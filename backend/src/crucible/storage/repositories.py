@@ -1,10 +1,11 @@
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol, cast
+from typing import cast
 from uuid import UUID
 
 from sqlalchemy import insert, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crucible.domain.conversation import Message
@@ -13,35 +14,6 @@ from crucible.domain.repository import Repository
 from crucible.domain.run import Run, RunStatus
 from crucible.domain.task import Task
 from crucible.storage import models
-
-
-class RepositoryReader(Protocol):
-    async def add(self, repository: Repository) -> None: ...
-    async def get_by_root(self, root: Path) -> Repository | None: ...
-
-
-class TaskWriter(Protocol):
-    async def add(self, task: Task) -> None: ...
-
-
-class RunWriter(Protocol):
-    async def add(self, run: Run) -> None: ...
-    async def claim_queued(
-        self,
-        run_id: UUID,
-        execution_id: UUID,
-        now: datetime,
-        lease_expires_at: datetime,
-    ) -> bool: ...
-    async def set_triggering_message(self, run_id: UUID, message_id: UUID) -> None: ...
-
-
-class MessageWriter(Protocol):
-    async def add(self, message: Message) -> Message: ...
-
-
-class EventWriter(Protocol):
-    async def append(self, event: Event) -> Event: ...
 
 
 @dataclass(frozen=True)
@@ -53,11 +25,6 @@ class IdempotencyRecord:
     response_status: int
     response_json: dict[str, object]
     created_at: datetime
-
-
-class IdempotencyStore(Protocol):
-    async def add(self, record: IdempotencyRecord) -> None: ...
-    async def get(self, scope: str, key: str) -> IdempotencyRecord | None: ...
 
 
 class RepositoryRepository:
@@ -73,6 +40,19 @@ class RepositoryRepository:
             )
         )
         await self._session.flush()
+
+    async def add_if_absent(self, repository: Repository) -> bool:
+        result = await self._session.execute(
+            sqlite_insert(models.repositories)
+            .values(
+                id=str(repository.id),
+                root_path=str(repository.root_path),
+                created_at=repository.created_at,
+            )
+            .on_conflict_do_nothing(index_elements=["root_path"])
+        )
+        await self._session.flush()
+        return cast(int, result.rowcount) == 1  # type: ignore[attr-defined]
 
     async def get_by_root(self, root: Path) -> Repository | None:
         row = (
@@ -92,6 +72,23 @@ class RepositoryRepository:
             id=UUID(row["id"]),
             root_path=Path(row["root_path"]),
             created_at=row["created_at"],
+        )
+
+    async def list(self) -> tuple[Repository, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.repositories).order_by(
+                    models.repositories.c.created_at, models.repositories.c.id
+                )
+            )
+        ).mappings()
+        return tuple(
+            Repository(
+                id=UUID(row["id"]),
+                root_path=Path(row["root_path"]),
+                created_at=row["created_at"],
+            )
+            for row in rows
         )
 
 

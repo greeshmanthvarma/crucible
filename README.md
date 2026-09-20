@@ -42,6 +42,7 @@ uv run mypy src/crucible
 Start the development server:
 
 ```sh
+uv run alembic upgrade head
 uv run uvicorn crucible.api.app:create_app --factory --reload
 ```
 
