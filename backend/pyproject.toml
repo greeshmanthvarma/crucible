@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "An eval-driven coding-agent harness"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "aiosqlite>=0.22.1",
+    "alembic>=1.20.0",
     "fastapi",
+    "sqlalchemy>=2.0.54",
     "uuid6>=2025.0.1",
     "uvicorn[standard]",
 ]

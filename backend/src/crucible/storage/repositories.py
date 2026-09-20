@@ -1,0 +1,337 @@
+from dataclasses import dataclass, replace
+from datetime import datetime
+from pathlib import Path
+from typing import Protocol, cast
+from uuid import UUID
+
+from sqlalchemy import insert, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from crucible.domain.conversation import Message
+from crucible.domain.events import Event
+from crucible.domain.repository import Repository
+from crucible.domain.run import Run, RunStatus
+from crucible.domain.task import Task
+from crucible.storage import models
+
+
+class RepositoryReader(Protocol):
+    async def add(self, repository: Repository) -> None: ...
+    async def get_by_root(self, root: Path) -> Repository | None: ...
+
+
+class TaskWriter(Protocol):
+    async def add(self, task: Task) -> None: ...
+
+
+class RunWriter(Protocol):
+    async def add(self, run: Run) -> None: ...
+    async def claim_queued(
+        self,
+        run_id: UUID,
+        execution_id: UUID,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> bool: ...
+    async def set_triggering_message(self, run_id: UUID, message_id: UUID) -> None: ...
+
+
+class MessageWriter(Protocol):
+    async def add(self, message: Message) -> Message: ...
+
+
+class EventWriter(Protocol):
+    async def append(self, event: Event) -> Event: ...
+
+
+@dataclass(frozen=True)
+class IdempotencyRecord:
+    id: UUID
+    scope: str
+    key: str
+    request_hash: str
+    response_status: int
+    response_json: dict[str, object]
+    created_at: datetime
+
+
+class IdempotencyStore(Protocol):
+    async def add(self, record: IdempotencyRecord) -> None: ...
+    async def get(self, scope: str, key: str) -> IdempotencyRecord | None: ...
+
+
+class RepositoryRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, repository: Repository) -> None:
+        await self._session.execute(
+            insert(models.repositories).values(
+                id=str(repository.id),
+                root_path=str(repository.root_path),
+                created_at=repository.created_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get_by_root(self, root: Path) -> Repository | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.repositories).where(
+                        models.repositories.c.root_path == str(root)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        return Repository(
+            id=UUID(row["id"]),
+            root_path=Path(row["root_path"]),
+            created_at=row["created_at"],
+        )
+
+
+class TaskRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, task: Task) -> None:
+        await self._session.execute(
+            insert(models.tasks).values(
+                id=str(task.id),
+                repository_id=str(task.repository_id),
+                source_ref=task.source_ref,
+                base_revision=task.base_revision,
+                workspace_path=str(task.workspace_path),
+                status=task.status,
+                failure_code=task.failure_code,
+                failure_detail=task.failure_detail,
+                created_at=task.created_at,
+                updated_at=task.updated_at,
+            )
+        )
+        await self._session.flush()
+
+
+class RunRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, run: Run) -> None:
+        if run.triggering_message_id is not None:
+            message_task = await self._session.scalar(
+                select(models.messages.c.task_id).where(
+                    models.messages.c.id == str(run.triggering_message_id)
+                )
+            )
+            if message_task != str(run.task_id):
+                raise ValueError(
+                    "Run and triggering Message must belong to the same Task"
+                )
+        await self._session.execute(
+            insert(models.runs).values(
+                id=str(run.id),
+                task_id=str(run.task_id),
+                triggering_message_id=str(run.triggering_message_id)
+                if run.triggering_message_id
+                else None,
+                status=run.status,
+                execution_id=str(run.execution_id) if run.execution_id else None,
+                lease_expires_at=run.lease_expires_at,
+                heartbeat_at=run.heartbeat_at,
+                outcome_code=run.outcome_code,
+                outcome_detail=run.outcome_detail,
+                created_at=run.created_at,
+                started_at=run.started_at,
+                completed_at=run.completed_at,
+            )
+        )
+        await self._session.flush()
+
+    async def claim_queued(
+        self,
+        run_id: UUID,
+        execution_id: UUID,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> bool:
+        result = await self._session.execute(
+            update(models.runs)
+            .where(
+                models.runs.c.id == str(run_id),
+                models.runs.c.status == RunStatus.QUEUED,
+            )
+            .values(
+                status=RunStatus.RUNNING,
+                execution_id=str(execution_id),
+                started_at=now,
+                heartbeat_at=now,
+                lease_expires_at=lease_expires_at,
+            )
+        )
+        return cast(int, result.rowcount) == 1  # type: ignore[attr-defined]
+
+    async def set_triggering_message(self, run_id: UUID, message_id: UUID) -> None:
+        row = (
+            await self._session.execute(
+                select(models.runs.c.task_id, models.messages.c.task_id)
+                .select_from(
+                    models.runs.join(
+                        models.messages, models.messages.c.id == str(message_id)
+                    )
+                )
+                .where(models.runs.c.id == str(run_id))
+            )
+        ).one_or_none()
+        if row is None or row[0] != row[1]:
+            raise ValueError("Run and triggering Message must belong to the same Task")
+        await self._session.execute(
+            update(models.runs)
+            .where(models.runs.c.id == str(run_id))
+            .values(triggering_message_id=str(message_id))
+        )
+        await self._session.flush()
+
+
+class MessageRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, message: Message) -> Message:
+        if message.run_id is not None:
+            run_task = await self._session.scalar(
+                select(models.runs.c.task_id).where(
+                    models.runs.c.id == str(message.run_id)
+                )
+            )
+            if run_task != str(message.task_id):
+                raise ValueError("Message and Run must belong to the same Task")
+        sequence = await self._session.scalar(
+            update(models.tasks)
+            .where(models.tasks.c.id == str(message.task_id))
+            .values(
+                next_conversation_sequence=models.tasks.c.next_conversation_sequence + 1
+            )
+            .returning(models.tasks.c.next_conversation_sequence - 1)
+        )
+        if sequence is None:
+            raise ValueError("Task not found")
+        stored = replace(message, conversation_sequence=sequence)
+        await self._session.execute(
+            insert(models.messages).values(
+                id=str(stored.id),
+                task_id=str(stored.task_id),
+                run_id=str(stored.run_id) if stored.run_id else None,
+                conversation_sequence=stored.conversation_sequence,
+                role=stored.role,
+                status=stored.status,
+                created_at=stored.created_at,
+                completed_at=stored.completed_at,
+            )
+        )
+        for part in stored.parts:
+            await self._session.execute(
+                insert(models.message_parts).values(
+                    id=str(part.id),
+                    message_id=str(stored.id),
+                    part_sequence=part.part_sequence,
+                    kind=part.kind,
+                    text_content=part.text_content,
+                )
+            )
+        await self._session.flush()
+        return stored
+
+
+class EventRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def append(self, event: Event) -> Event:
+        run_sequence = None
+        if event.run_id is not None:
+            run_task = await self._session.scalar(
+                select(models.runs.c.task_id).where(
+                    models.runs.c.id == str(event.run_id)
+                )
+            )
+            if run_task != str(event.task_id):
+                raise ValueError("Event and Run must belong to the same Task")
+            run_sequence = await self._session.scalar(
+                update(models.runs)
+                .where(models.runs.c.id == str(event.run_id))
+                .values(next_run_sequence=models.runs.c.next_run_sequence + 1)
+                .returning(models.runs.c.next_run_sequence - 1)
+            )
+        task_sequence = await self._session.scalar(
+            update(models.tasks)
+            .where(models.tasks.c.id == str(event.task_id))
+            .values(next_task_sequence=models.tasks.c.next_task_sequence + 1)
+            .returning(models.tasks.c.next_task_sequence - 1)
+        )
+        if task_sequence is None or (event.run_id is not None and run_sequence is None):
+            raise ValueError("Event parent not found")
+        stored = replace(event, task_sequence=task_sequence, run_sequence=run_sequence)
+        await self._session.execute(
+            insert(models.task_events).values(
+                id=str(stored.id),
+                task_id=str(stored.task_id),
+                run_id=str(stored.run_id) if stored.run_id else None,
+                task_sequence=stored.task_sequence,
+                run_sequence=stored.run_sequence,
+                type=stored.type,
+                schema_version=stored.schema_version,
+                payload_json=stored.payload_json(),
+                created_at=stored.created_at,
+            )
+        )
+        await self._session.flush()
+        return stored
+
+
+class IdempotencyRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, record: IdempotencyRecord) -> None:
+        await self._session.execute(
+            insert(models.idempotency_records).values(
+                id=str(record.id),
+                scope=record.scope,
+                key=record.key,
+                request_hash=record.request_hash,
+                response_status=record.response_status,
+                response_json=record.response_json,
+                created_at=record.created_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get(self, scope: str, key: str) -> IdempotencyRecord | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.idempotency_records).where(
+                        models.idempotency_records.c.scope == scope,
+                        models.idempotency_records.c.key == key,
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        return IdempotencyRecord(
+            UUID(row["id"]),
+            row["scope"],
+            row["key"],
+            row["request_hash"],
+            row["response_status"],
+            row["response_json"],
+            row["created_at"],
+        )
