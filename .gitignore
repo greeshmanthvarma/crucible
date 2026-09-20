@@ -13,6 +13,7 @@ htmlcov/
 # Frontend
 node_modules/
 dist/
+*.tsbuildinfo
 
 # Local application data
 data/

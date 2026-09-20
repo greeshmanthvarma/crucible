@@ -44,3 +44,43 @@ Start the development server:
 ```sh
 uv run uvicorn crucible.api.app:create_app --factory --reload
 ```
+
+## Frontend
+
+The frontend requires Node.js 24 and pnpm. Run these commands from `frontend/`.
+
+Install dependencies:
+
+```sh
+pnpm install
+```
+
+Run tests:
+
+```sh
+pnpm test --run
+```
+
+Lint:
+
+```sh
+pnpm lint
+```
+
+Type-check:
+
+```sh
+pnpm typecheck
+```
+
+Build:
+
+```sh
+pnpm build
+```
+
+Start the development server:
+
+```sh
+pnpm dev
+```
