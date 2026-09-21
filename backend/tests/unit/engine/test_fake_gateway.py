@@ -22,6 +22,7 @@ def request(text: str) -> ModelRequest:
                 uuid4(),
                 uuid4(),
                 None,
+                None,
                 1,
                 MessageRole.USER,
                 MessageStatus.COMPLETED,

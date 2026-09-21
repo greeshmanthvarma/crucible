@@ -67,7 +67,7 @@ class MessagePartResponse(ApiModel):
     id: UUID
     part_sequence: int
     kind: str
-    text_content: str
+    text_content: str | None
 
 
 class MessageResponse(ApiModel):

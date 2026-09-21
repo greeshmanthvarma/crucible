@@ -137,7 +137,7 @@ export interface components {
             /** Partsequence */
             partSequence: number;
             /** Textcontent */
-            textContent: string;
+            textContent: string | null;
         };
         /** MessageResponse */
         MessageResponse: {

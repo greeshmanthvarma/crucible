@@ -96,6 +96,7 @@ class MessageService:
                     id=message_id,
                     task_id=task_id,
                     run_id=run_id,
+                    step_id=None,
                     conversation_sequence=0,
                     role=MessageRole.USER,
                     status=MessageStatus.COMPLETED,

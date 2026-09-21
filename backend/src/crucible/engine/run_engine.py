@@ -70,6 +70,7 @@ class RunEngine:
                 id=new_id(),
                 task_id=run.task_id,
                 run_id=run.id,
+                step_id=None,
                 conversation_sequence=0,
                 role=MessageRole.ASSISTANT,
                 status=MessageStatus.COMPLETED,

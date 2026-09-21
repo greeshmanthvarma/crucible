@@ -5,11 +5,14 @@ from typing import Protocol, Self
 from uuid import UUID
 
 from crucible.application.idempotency import IdempotencyRecord
+from crucible.context.manifests import ContextManifest
 from crucible.domain.conversation import Message
 from crucible.domain.events import Event
 from crucible.domain.repository import Repository
 from crucible.domain.run import Run
+from crucible.domain.steps import Step
 from crucible.domain.task import Task
+from crucible.domain.tools import ToolCall, ToolResult
 
 
 class RepositoryStore(Protocol):
@@ -29,6 +32,27 @@ class TaskStore(Protocol):
 class MessageStore(Protocol):
     async def add(self, message: Message) -> Message: ...
     async def list_for_task(self, task_id: UUID) -> tuple[Message, ...]: ...
+
+
+class StepStore(Protocol):
+    async def add(self, step: Step) -> None: ...
+    async def update(self, step: Step) -> None: ...
+    async def list_for_run(self, run_id: UUID) -> tuple[Step, ...]: ...
+
+
+class ContextManifestStore(Protocol):
+    async def add(self, manifest: ContextManifest) -> None: ...
+    async def get_for_step(self, step_id: UUID) -> ContextManifest | None: ...
+
+
+class ToolCallStore(Protocol):
+    async def add(self, call: ToolCall) -> None: ...
+    async def list_for_step(self, step_id: UUID) -> tuple[ToolCall, ...]: ...
+
+
+class ToolResultStore(Protocol):
+    async def add(self, result: ToolResult) -> None: ...
+    async def list_for_step(self, step_id: UUID) -> tuple[ToolResult, ...]: ...
 
 
 class RunStore(Protocol):
@@ -75,6 +99,10 @@ class UnitOfWork(Protocol):
     repositories: RepositoryStore
     tasks: TaskStore
     messages: MessageStore
+    steps: StepStore
+    context_manifests: ContextManifestStore
+    tool_calls: ToolCallStore
+    tool_results: ToolResultStore
     runs: RunStore
     events: EventStore
     idempotency: IdempotencyStore

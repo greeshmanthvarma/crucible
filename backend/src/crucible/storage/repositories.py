@@ -9,6 +9,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crucible.application.idempotency import IdempotencyRecord
+from crucible.context.manifests import ContextManifest
 from crucible.domain.conversation import (
     Message,
     MessagePart,
@@ -19,7 +20,15 @@ from crucible.domain.conversation import (
 from crucible.domain.events import Event, EventType
 from crucible.domain.repository import Repository
 from crucible.domain.run import Run, RunStatus
+from crucible.domain.steps import Step, StepStatus
 from crucible.domain.task import Task, TaskStatus
+from crucible.domain.tools import (
+    ToolCall,
+    ToolCallStatus,
+    ToolExecutionMode,
+    ToolResult,
+    ToolResultStatus,
+)
 from crucible.storage import models
 
 
@@ -351,6 +360,293 @@ class RunRepository:
         await self._session.flush()
 
 
+class StepRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, step: Step) -> None:
+        run_task = await self._session.scalar(
+            select(models.runs.c.task_id).where(models.runs.c.id == str(step.run_id))
+        )
+        if run_task != str(step.task_id):
+            raise ValueError("Step and Run must belong to the same Task")
+        await self._session.execute(
+            insert(models.steps).values(
+                id=str(step.id),
+                task_id=str(step.task_id),
+                run_id=str(step.run_id),
+                step_sequence=step.step_sequence,
+                status=step.status,
+                created_at=step.created_at,
+                started_at=step.started_at,
+                completed_at=step.completed_at,
+            )
+        )
+        await self._session.flush()
+
+    async def update(self, step: Step) -> None:
+        await self._session.execute(
+            update(models.steps)
+            .where(models.steps.c.id == str(step.id))
+            .values(
+                status=step.status,
+                started_at=step.started_at,
+                completed_at=step.completed_at,
+            )
+        )
+        await self._session.flush()
+
+    async def list_for_run(self, run_id: UUID) -> tuple[Step, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.steps)
+                .where(models.steps.c.run_id == str(run_id))
+                .order_by(models.steps.c.step_sequence)
+            )
+        ).mappings()
+        return tuple(
+            Step(
+                id=UUID(row["id"]),
+                task_id=UUID(row["task_id"]),
+                run_id=UUID(row["run_id"]),
+                step_sequence=row["step_sequence"],
+                status=StepStatus(row["status"]),
+                created_at=row["created_at"],
+                started_at=row["started_at"],
+                completed_at=row["completed_at"],
+            )
+            for row in rows
+        )
+
+
+class ContextManifestRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, manifest: ContextManifest) -> None:
+        await self._require_same_task(
+            manifest.task_id, manifest.run_id, manifest.step_id
+        )
+        await self._session.execute(
+            insert(models.context_manifests).values(
+                id=str(manifest.id),
+                task_id=str(manifest.task_id),
+                run_id=str(manifest.run_id),
+                step_id=str(manifest.step_id),
+                model=manifest.model,
+                parameters_json=dict(manifest.parameters),
+                input_limit=manifest.input_limit,
+                output_reserve=manifest.output_reserve,
+                threshold=str(manifest.threshold),
+                estimated_tokens=manifest.estimated_tokens,
+                message_ids_json=[str(value) for value in manifest.message_ids],
+                part_ids_json=[str(value) for value in manifest.part_ids],
+                instruction_digests_json=dict(manifest.instruction_digests),
+                tool_schema_digest=manifest.tool_schema_digest,
+                created_at=manifest.created_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get_for_step(self, step_id: UUID) -> ContextManifest | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.context_manifests).where(
+                        models.context_manifests.c.step_id == str(step_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        return ContextManifest(
+            id=UUID(row["id"]),
+            task_id=UUID(row["task_id"]),
+            run_id=UUID(row["run_id"]),
+            step_id=UUID(row["step_id"]),
+            model=row["model"],
+            parameters=row["parameters_json"],
+            input_limit=row["input_limit"],
+            output_reserve=row["output_reserve"],
+            threshold=float(row["threshold"]),
+            estimated_tokens=row["estimated_tokens"],
+            message_ids=[UUID(value) for value in row["message_ids_json"]],
+            part_ids=[UUID(value) for value in row["part_ids_json"]],
+            instruction_digests=row["instruction_digests_json"],
+            tool_schema_digest=row["tool_schema_digest"],
+            created_at=row["created_at"],
+        )
+
+    async def _require_same_task(
+        self, task_id: UUID, run_id: UUID, step_id: UUID
+    ) -> None:
+        row = (
+            await self._session.execute(
+                select(models.runs.c.task_id, models.steps.c.task_id)
+                .select_from(
+                    models.runs.join(
+                        models.steps, models.steps.c.run_id == models.runs.c.id
+                    )
+                )
+                .where(
+                    models.runs.c.id == str(run_id),
+                    models.steps.c.id == str(step_id),
+                )
+            )
+        ).one_or_none()
+        if row is None or row[0] != str(task_id) or row[1] != str(task_id):
+            raise ValueError("Context Manifest parents must belong to the same Task")
+
+
+class ToolCallRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, call: ToolCall) -> None:
+        parent_tasks = (
+            await self._session.execute(
+                select(
+                    models.runs.c.task_id,
+                    models.steps.c.task_id,
+                    models.messages.c.task_id,
+                )
+                .select_from(
+                    models.runs.join(
+                        models.steps, models.steps.c.run_id == models.runs.c.id
+                    ).join(
+                        models.messages,
+                        models.messages.c.id == str(call.assistant_message_id),
+                    )
+                )
+                .where(
+                    models.runs.c.id == str(call.run_id),
+                    models.steps.c.id == str(call.step_id),
+                )
+            )
+        ).one_or_none()
+        if parent_tasks is None or any(
+            task != str(call.task_id) for task in parent_tasks
+        ):
+            raise ValueError("Tool Call parents must belong to the same Task")
+        await self._session.execute(
+            insert(models.tool_calls).values(
+                id=str(call.id),
+                task_id=str(call.task_id),
+                run_id=str(call.run_id),
+                step_id=str(call.step_id),
+                assistant_message_id=str(call.assistant_message_id),
+                call_sequence=call.call_sequence,
+                name=call.name,
+                arguments_json=dict(call.arguments),
+                schema_version=call.schema_version,
+                provider_correlation_id=call.provider_correlation_id,
+                execution_mode=call.execution_mode,
+                status=call.status,
+                created_at=call.created_at,
+            )
+        )
+        await self._session.flush()
+
+    async def list_for_step(self, step_id: UUID) -> tuple[ToolCall, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.tool_calls)
+                .where(models.tool_calls.c.step_id == str(step_id))
+                .order_by(models.tool_calls.c.call_sequence)
+            )
+        ).mappings()
+        return tuple(self._from_row(row) for row in rows)
+
+    @staticmethod
+    def _from_row(row: object) -> ToolCall:
+        values = cast(dict[str, object], row)
+        return ToolCall(
+            id=UUID(cast(str, values["id"])),
+            task_id=UUID(cast(str, values["task_id"])),
+            run_id=UUID(cast(str, values["run_id"])),
+            step_id=UUID(cast(str, values["step_id"])),
+            assistant_message_id=UUID(cast(str, values["assistant_message_id"])),
+            call_sequence=cast(int, values["call_sequence"]),
+            name=cast(str, values["name"]),
+            arguments=cast(dict[str, object], values["arguments_json"]),
+            schema_version=cast(int, values["schema_version"]),
+            provider_correlation_id=cast(str | None, values["provider_correlation_id"]),
+            execution_mode=ToolExecutionMode(cast(str, values["execution_mode"])),
+            created_at=cast(datetime, values["created_at"]),
+            status=ToolCallStatus(cast(str, values["status"])),
+        )
+
+
+class ToolResultRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, result: ToolResult) -> None:
+        call = (
+            await self._session.execute(
+                select(
+                    models.tool_calls.c.task_id,
+                    models.tool_calls.c.run_id,
+                    models.tool_calls.c.step_id,
+                ).where(models.tool_calls.c.id == str(result.tool_call_id))
+            )
+        ).one_or_none()
+        if call != (
+            str(result.task_id),
+            str(result.run_id),
+            str(result.step_id),
+        ):
+            raise ValueError("Tool Result must belong to its Tool Call")
+        await self._session.execute(
+            insert(models.tool_results).values(
+                id=str(result.id),
+                task_id=str(result.task_id),
+                run_id=str(result.run_id),
+                step_id=str(result.step_id),
+                tool_call_id=str(result.tool_call_id),
+                status=result.status,
+                result_json=dict(result.result),
+                schema_version=result.schema_version,
+                display_text=result.display_text,
+                error_code=result.error_code,
+                completion_sequence=result.completion_sequence,
+                created_at=result.created_at,
+                completed_at=result.completed_at,
+            )
+        )
+        await self._session.flush()
+
+    async def list_for_step(self, step_id: UUID) -> tuple[ToolResult, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.tool_results)
+                .where(models.tool_results.c.step_id == str(step_id))
+                .order_by(models.tool_results.c.completion_sequence)
+            )
+        ).mappings()
+        return tuple(
+            ToolResult(
+                id=UUID(row["id"]),
+                task_id=UUID(row["task_id"]),
+                run_id=UUID(row["run_id"]),
+                step_id=UUID(row["step_id"]),
+                tool_call_id=UUID(row["tool_call_id"]),
+                status=ToolResultStatus(row["status"]),
+                result=row["result_json"],
+                schema_version=row["schema_version"],
+                display_text=row["display_text"],
+                error_code=row["error_code"],
+                completion_sequence=row["completion_sequence"],
+                created_at=row["created_at"],
+                completed_at=row["completed_at"],
+            )
+            for row in rows
+        )
+
+
 class MessageRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -364,6 +660,14 @@ class MessageRepository:
             )
             if run_task != str(message.task_id):
                 raise ValueError("Message and Run must belong to the same Task")
+        if message.step_id is not None:
+            step_task = await self._session.scalar(
+                select(models.steps.c.task_id).where(
+                    models.steps.c.id == str(message.step_id)
+                )
+            )
+            if step_task != str(message.task_id):
+                raise ValueError("Message and Step must belong to the same Task")
         sequence = await self._session.scalar(
             update(models.tasks)
             .where(models.tasks.c.id == str(message.task_id))
@@ -380,6 +684,7 @@ class MessageRepository:
                 id=str(stored.id),
                 task_id=str(stored.task_id),
                 run_id=str(stored.run_id) if stored.run_id else None,
+                step_id=str(stored.step_id) if stored.step_id else None,
                 conversation_sequence=stored.conversation_sequence,
                 role=stored.role,
                 status=stored.status,
@@ -395,6 +700,11 @@ class MessageRepository:
                     part_sequence=part.part_sequence,
                     kind=part.kind,
                     text_content=part.text_content,
+                    reasoning_content=part.reasoning_content,
+                    tool_call_id=str(part.tool_call_id) if part.tool_call_id else None,
+                    tool_result_id=str(part.tool_result_id)
+                    if part.tool_result_id
+                    else None,
                 )
             )
         await self._session.flush()
@@ -430,6 +740,7 @@ class MessageRepository:
                     id=UUID(row["id"]),
                     task_id=UUID(row["task_id"]),
                     run_id=UUID(row["run_id"]) if row["run_id"] else None,
+                    step_id=UUID(row["step_id"]) if row["step_id"] else None,
                     conversation_sequence=row["conversation_sequence"],
                     role=MessageRole(row["role"]),
                     status=MessageStatus(row["status"]),
@@ -439,6 +750,13 @@ class MessageRepository:
                             part_sequence=part["part_sequence"],
                             kind=MessagePartKind(part["kind"]),
                             text_content=part["text_content"],
+                            reasoning_content=part["reasoning_content"],
+                            tool_call_id=UUID(part["tool_call_id"])
+                            if part["tool_call_id"]
+                            else None,
+                            tool_result_id=UUID(part["tool_result_id"])
+                            if part["tool_result_id"]
+                            else None,
                         )
                         for part in part_rows
                     ),

@@ -26,5 +26,5 @@ class FakeModelGateway:
             for message in reversed(request.messages)
             if message.role is MessageRole.USER
         )
-        text = "".join(part.text_content for part in newest.parts)
+        text = "".join(part.text_content or "" for part in newest.parts)
         return f"Fake response: {text}"
