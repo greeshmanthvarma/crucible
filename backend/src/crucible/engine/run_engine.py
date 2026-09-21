@@ -12,7 +12,15 @@ from crucible.domain.conversation import (
 )
 from crucible.domain.events import EventType
 from crucible.domain.ids import new_id
-from crucible.engine.gateway import ModelGateway, ModelRequest
+from crucible.engine.gateway import (
+    ModelError,
+    ModelGateway,
+    ModelMessage,
+    ModelPart,
+    ModelRole,
+    PreparedModelRequest,
+    TextDelta,
+)
 from crucible.engine.journal import (
     JournalMutationRejected,
     RunJournal,
@@ -56,7 +64,30 @@ class RunEngine:
             messages = await uow.messages.list_for_task(run.task_id)
 
         try:
-            response = await self._gateway.complete(ModelRequest(messages))
+            request = PreparedModelRequest(
+                run_id=run_id,
+                step_id=new_id(),
+                model="fake",
+                messages=tuple(
+                    ModelMessage(
+                        role=ModelRole(message.role.value),
+                        parts=tuple(
+                            ModelPart(part.kind.value, part.text_content)
+                            for part in message.parts
+                        ),
+                    )
+                    for message in messages
+                ),
+                tools=(),
+                max_output_tokens=1024,
+            )
+            response_parts: list[str] = []
+            async for item in self._gateway.stream(request):
+                if isinstance(item, TextDelta):
+                    response_parts.append(item.text)
+                elif isinstance(item, ModelError):
+                    raise RuntimeError(f"{item.code}: {item.detail}")
+            response = "".join(response_parts)
         except Exception as error:
             await self._persist_failure(run_id, error)
             return True
