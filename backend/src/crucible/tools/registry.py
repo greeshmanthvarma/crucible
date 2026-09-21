@@ -1,6 +1,12 @@
 from crucible.engine.gateway import ModelToolDefinition
 from crucible.tools.definitions import Tool
 from crucible.tools.filesystem import ListFilesTool, ReadFileTool, SearchFilesTool
+from crucible.tools.git_tools import (
+    ApplyPatchTool,
+    WorkspaceDiffTool,
+    WorkspaceStatusTool,
+    WriteFileTool,
+)
 
 
 class ToolRegistry:
@@ -16,4 +22,14 @@ class ToolRegistry:
 
 
 def default_registry() -> ToolRegistry:
-    return ToolRegistry((ListFilesTool(), SearchFilesTool(), ReadFileTool()))
+    return ToolRegistry(
+        (
+            ListFilesTool(),
+            SearchFilesTool(),
+            ReadFileTool(),
+            WorkspaceStatusTool(),
+            WorkspaceDiffTool(),
+            ApplyPatchTool(),
+            WriteFileTool(),
+        )
+    )

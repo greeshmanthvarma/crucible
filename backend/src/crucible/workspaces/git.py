@@ -36,6 +36,11 @@ class GitClient(Protocol):
 
     async def worktree_revision(self, workspace: Path) -> str: ...
     async def owns_worktree(self, root: Path, workspace: Path) -> bool: ...
+    async def status(self, workspace: Path) -> GitResult: ...
+    async def diff(self, workspace: Path) -> GitResult: ...
+    async def apply_patch(
+        self, workspace: Path, patch: str, *, check: bool
+    ) -> GitResult: ...
 
 
 class SubprocessGitClient:
@@ -100,15 +105,35 @@ class SubprocessGitClient:
             if line.startswith("worktree ")
         )
 
-    async def _run(self, cwd: Path, *arguments: str) -> GitResult:
+    async def status(self, workspace: Path) -> GitResult:
+        return await self._run(workspace, "status", "--porcelain=v2", "--")
+
+    async def diff(self, workspace: Path) -> GitResult:
+        return await self._run(workspace, "diff", "--no-ext-diff", "--binary", "--")
+
+    async def apply_patch(
+        self, workspace: Path, patch: str, *, check: bool
+    ) -> GitResult:
+        arguments = ["apply", "--whitespace=nowarn"]
+        if check:
+            arguments.append("--check")
+        arguments.append("-")
+        return await self._run(workspace, *arguments, input_text=patch)
+
+    async def _run(
+        self, cwd: Path, *arguments: str, input_text: str | None = None
+    ) -> GitResult:
         process = await asyncio.create_subprocess_exec(
             "git",
             *arguments,
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE if input_text is not None else None,
         )
-        stdout, stderr = await process.communicate()
+        stdout, stderr = await process.communicate(
+            input_text.encode() if input_text is not None else None
+        )
         return GitResult(
             returncode=process.returncode or 0,
             stdout=stdout.decode(),

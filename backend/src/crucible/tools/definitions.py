@@ -26,6 +26,23 @@ class ReadFileArguments(ToolArguments):
     end_line: int | None = Field(default=None, ge=1)
 
 
+class WriteFileArguments(ToolArguments):
+    path: str
+    content: str = Field(max_length=1_000_000)
+
+
+class ApplyPatchArguments(ToolArguments):
+    patch: str = Field(min_length=1, max_length=1_000_000)
+
+
+class WorkspaceStatusArguments(ToolArguments):
+    pass
+
+
+class WorkspaceDiffArguments(ToolArguments):
+    pass
+
+
 @dataclass(frozen=True)
 class ToolContext:
     workspace: Path
