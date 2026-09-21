@@ -32,6 +32,10 @@ class FakeGitClient:
         self.calls.append(("verify", workspace))
         return self.verified_revision
 
+    async def owns_worktree(self, root: Path, workspace: Path) -> bool:
+        self.calls.append(("owns", root, workspace))
+        return True
+
 
 async def test_provisions_derived_worktree_at_resolved_revision(tmp_path: Path) -> None:
     git = FakeGitClient("a" * 40)

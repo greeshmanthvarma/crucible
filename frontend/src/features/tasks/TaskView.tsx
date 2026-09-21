@@ -26,7 +26,10 @@ export function TaskView({
   const [text, setText] = useState("");
   const [pending, setPending] = useState<{ text: string; key: string }>();
   const [error, setError] = useState("");
-  const [events, setEvents] = useState<TaskEventState>({ events: [], needsReplay: false });
+  const [events, setEvents] = useState<TaskEventState>({
+    events: [],
+    needsReplay: false,
+  });
   const eventState = useRef<TaskEventState>({ events: [], needsReplay: false });
 
   async function refreshMessages() {
@@ -92,7 +95,7 @@ export function TaskView({
       ? "running"
       : latestRunEvent?.type === "run.interrupted"
         ? "failed"
-        : latestRunEvent?.type.replace("run.", "") ?? "idle";
+        : (latestRunEvent?.type.replace("run.", "") ?? "idle");
   return (
     <section>
       {task && (
@@ -116,13 +119,17 @@ export function TaskView({
       <form onSubmit={submit}>
         <label>
           Message
-          <textarea value={text} onChange={(event) => setText(event.target.value)} />
+          <textarea
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+          />
         </label>
         <button disabled={Boolean(pending) || !text.trim()}>Send</button>
       </form>
       {error && (
         <p role="alert">
-          {error} <button onClick={() => pending && void send(pending)}>Retry</button>
+          {error}{" "}
+          <button onClick={() => pending && void send(pending)}>Retry</button>
         </p>
       )}
     </section>

@@ -67,3 +67,17 @@ class WorkspaceManager:
         self, repository_root: Path, source_ref: str, task_id: UUID
     ) -> ProvisionedWorkspace:
         return await self.create(await self.plan(repository_root, source_ref, task_id))
+
+    async def recover(self, plan: WorkspacePlan) -> ProvisionedWorkspace:
+        if not plan.workspace_path.exists():
+            return await self.create(plan)
+        if not await self._git.owns_worktree(plan.repository_root, plan.workspace_path):
+            raise WorkspaceDestinationExists(
+                "Destination is not a worktree owned by the recorded Repository"
+            )
+        actual_revision = await self._git.worktree_revision(plan.workspace_path)
+        if actual_revision != plan.base_revision:
+            raise WorkspaceRevisionMismatch(
+                "Existing workspace does not match the recorded Base Revision"
+            )
+        return ProvisionedWorkspace(plan.base_revision, plan.workspace_path)

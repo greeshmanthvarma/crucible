@@ -2,7 +2,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 
 import type { CrucibleClient } from "../../api/client";
-import type { EventStreamFactory, TaskEventEnvelope } from "../../events/taskEventStream";
+import type {
+  EventStreamFactory,
+  TaskEventEnvelope,
+} from "../../events/taskEventStream";
 import { TaskView } from "./TaskView";
 
 const task = {
@@ -36,17 +39,27 @@ it("renders canonical messages, sends, and refreshes once for a deduplicated com
         conversationSequence: 1,
         role: "user",
         status: "completed",
-        parts: [{ id: "part", partSequence: 1, kind: "text", textContent: "hello" }],
+        parts: [
+          { id: "part", partSequence: 1, kind: "text", textContent: "hello" },
+        ],
         createdAt: task.createdAt,
         completedAt: task.createdAt,
       },
     ]),
-    sendMessage: vi.fn().mockResolvedValue({ messageId: "message-2", runId: "run-2", runStatus: "queued" }),
+    sendMessage: vi.fn().mockResolvedValue({
+      messageId: "message-2",
+      runId: "run-2",
+      runStatus: "queued",
+    }),
   } as unknown as CrucibleClient;
-  render(<TaskView taskId="task" client={client} streamFactory={streamFactory} />);
+  render(
+    <TaskView taskId="task" client={client} streamFactory={streamFactory} />,
+  );
   await screen.findByText(/hello/);
 
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "next" } });
+  fireEvent.change(screen.getByLabelText("Message"), {
+    target: { value: "next" },
+  });
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(client.sendMessage).toHaveBeenCalled());
   const completed = {

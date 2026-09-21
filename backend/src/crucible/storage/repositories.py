@@ -168,6 +168,32 @@ class TaskRepository:
         )
         await self._session.flush()
 
+    async def list_provisioning(self) -> tuple[Task, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.tasks)
+                .where(models.tasks.c.status == TaskStatus.PROVISIONING)
+                .order_by(models.tasks.c.created_at, models.tasks.c.id)
+            )
+        ).mappings()
+        return tuple(self._from_row(row) for row in rows)
+
+    @staticmethod
+    def _from_row(row: object) -> Task:
+        values = cast(dict[str, object], row)
+        return Task(
+            id=UUID(cast(str, values["id"])),
+            repository_id=UUID(cast(str, values["repository_id"])),
+            source_ref=cast(str, values["source_ref"]),
+            base_revision=cast(str | None, values["base_revision"]),
+            workspace_path=Path(cast(str, values["workspace_path"])),
+            status=TaskStatus(cast(str, values["status"])),
+            failure_code=cast(str | None, values["failure_code"]),
+            failure_detail=cast(str | None, values["failure_detail"]),
+            created_at=cast(datetime, values["created_at"]),
+            updated_at=cast(datetime, values["updated_at"]),
+        )
+
 
 class RunRepository:
     def __init__(self, session: AsyncSession) -> None:

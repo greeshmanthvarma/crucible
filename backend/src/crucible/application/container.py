@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from sqlalchemy import text
 from crucible.application.event_service import TaskEventSource
 from crucible.application.message_service import MessageService
 from crucible.application.ports import UnitOfWork
+from crucible.application.reconciliation import StartupReconciler
 from crucible.application.repository_service import RepositoryService
 from crucible.application.task_service import TaskService
 from crucible.domain.clock import SystemClock
@@ -29,6 +31,8 @@ class ApplicationContainer:
     message_service: MessageService
     supervisor: LocalRunSupervisor
     event_source: TaskEventSource
+    reconciler: StartupReconciler
+    unit_of_work: Callable[[], UnitOfWork]
 
     @classmethod
     async def create(cls, database_url: str, data_dir: Path) -> "ApplicationContainer":
@@ -43,19 +47,21 @@ class ApplicationContainer:
         notifier = TaskEventNotifier()
         engine = RunEngine(unit_of_work, clock, FakeModelGateway(), notifier)
         supervisor = LocalRunSupervisor(engine, unit_of_work, clock, notifier)
+        workspaces = WorkspaceManager(git, data_dir)
 
         return cls(
             database=database,
             repository_service=RepositoryService(git, unit_of_work, clock),
-            task_service=TaskService(
-                WorkspaceManager(git, data_dir), unit_of_work, clock, notifier
-            ),
+            task_service=TaskService(workspaces, unit_of_work, clock, notifier),
             message_service=MessageService(unit_of_work, clock, supervisor, notifier),
             supervisor=supervisor,
             event_source=TaskEventSource(unit_of_work, notifier),
+            reconciler=StartupReconciler(workspaces, unit_of_work, clock, notifier),
+            unit_of_work=unit_of_work,
         )
 
     async def start(self) -> None:
+        await self.reconciler.reconcile()
         await self.supervisor.reconcile()
 
     async def close(self) -> None:

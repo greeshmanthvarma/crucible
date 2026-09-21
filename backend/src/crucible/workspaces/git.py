@@ -35,6 +35,7 @@ class GitClient(Protocol):
     ) -> None: ...
 
     async def worktree_revision(self, workspace: Path) -> str: ...
+    async def owns_worktree(self, root: Path, workspace: Path) -> bool: ...
 
 
 class SubprocessGitClient:
@@ -87,6 +88,17 @@ class SubprocessGitClient:
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip())
         return result.stdout.splitlines()[0]
+
+    async def owns_worktree(self, root: Path, workspace: Path) -> bool:
+        result = await self._run(root, "worktree", "list", "--porcelain")
+        if result.returncode != 0:
+            return False
+        expected = workspace.resolve()
+        return any(
+            Path(line.removeprefix("worktree ")).resolve() == expected
+            for line in result.stdout.splitlines()
+            if line.startswith("worktree ")
+        )
 
     async def _run(self, cwd: Path, *arguments: str) -> GitResult:
         process = await asyncio.create_subprocess_exec(

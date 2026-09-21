@@ -32,6 +32,8 @@ describe("reduceTaskEvents", () => {
       event("two", 2),
     );
     expect(reduceTaskEvents(initial, event("old", 1))).toEqual(initial);
-    expect(initial.events.map(({ taskSequence }) => taskSequence)).toEqual([1, 2]);
+    expect(initial.events.map(({ taskSequence }) => taskSequence)).toEqual([
+      1, 2,
+    ]);
   });
 });

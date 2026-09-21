@@ -23,7 +23,9 @@ export function RepositoryForm({
       setRepository(result);
       onRegistered(result);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Registration failed");
+      setError(
+        reason instanceof Error ? reason.message : "Registration failed",
+      );
     } finally {
       setPending(false);
     }
@@ -35,7 +37,9 @@ export function RepositoryForm({
         Repository path
         <input value={path} onChange={(event) => setPath(event.target.value)} />
       </label>
-      <button disabled={pending || !path.trim()}>{pending ? "Registering…" : "Register"}</button>
+      <button disabled={pending || !path.trim()}>
+        {pending ? "Registering…" : "Register"}
+      </button>
       {repository && <p>Registered: {repository.rootPath}</p>}
       {error && <p role="alert">{error}</p>}
     </form>

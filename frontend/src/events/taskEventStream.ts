@@ -1,7 +1,10 @@
 import type { components } from "../api/schema";
 
 export type TaskEventEnvelope = components["schemas"]["TaskEventEnvelope"];
-export type TaskEventState = { events: TaskEventEnvelope[]; needsReplay: boolean };
+export type TaskEventState = {
+  events: TaskEventEnvelope[];
+  needsReplay: boolean;
+};
 
 export function reduceTaskEvents(
   state: TaskEventState,
@@ -30,10 +33,16 @@ export type EventStreamFactory = (
   onOpen?: () => void,
 ) => EventStream;
 
-export const openTaskEventStream: EventStreamFactory = (taskId, onEvent, onOpen) => {
+export const openTaskEventStream: EventStreamFactory = (
+  taskId,
+  onEvent,
+  onOpen,
+) => {
   const source = new EventSource(`/api/tasks/${taskId}/events`);
   source.addEventListener("task_event", (event) => {
-    onEvent(JSON.parse((event as MessageEvent<string>).data) as TaskEventEnvelope);
+    onEvent(
+      JSON.parse((event as MessageEvent<string>).data) as TaskEventEnvelope,
+    );
   });
   if (onOpen) source.addEventListener("open", onOpen);
   return source;

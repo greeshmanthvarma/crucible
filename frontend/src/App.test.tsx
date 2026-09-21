@@ -7,7 +7,11 @@ describe("App", () => {
   it("identifies Crucible as a coding-agent harness", () => {
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: "Crucible" })).toBeInTheDocument();
-    expect(screen.getByText("Eval-driven coding-agent harness")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Crucible" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Eval-driven coding-agent harness"),
+    ).toBeInTheDocument();
   });
 });

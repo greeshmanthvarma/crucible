@@ -21,7 +21,11 @@ it("registers explicitly and renders the canonical root without creating a task"
   });
   fireEvent.click(screen.getByRole("button", { name: "Register" }));
 
-  await waitFor(() => expect(screen.getByText("Registered: /canonical/repository")).toBeInTheDocument());
+  await waitFor(() =>
+    expect(
+      screen.getByText("Registered: /canonical/repository"),
+    ).toBeInTheDocument(),
+  );
   expect(client.registerRepository).toHaveBeenCalledWith("/alias");
   expect(client.createTask).not.toHaveBeenCalled();
 });
