@@ -59,5 +59,6 @@ class ToolOutcome:
 class Tool(Protocol):
     definition: ModelToolDefinition
     parallel_safe: bool
+    argument_model: type[ToolArguments]
 
     async def invoke(self, context: ToolContext, arguments: object) -> ToolOutcome: ...

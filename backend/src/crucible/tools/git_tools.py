@@ -17,6 +17,7 @@ from crucible.workspaces.git import GitClient, SubprocessGitClient
 
 class WriteFileTool:
     parallel_safe = False
+    argument_model = WriteFileArguments
 
     def __init__(self, *, max_bytes: int = 1_000_000) -> None:
         self.max_bytes = max_bytes
@@ -61,6 +62,7 @@ class WriteFileTool:
 
 class ApplyPatchTool:
     parallel_safe = False
+    argument_model = ApplyPatchArguments
 
     def __init__(self, git: GitClient | None = None) -> None:
         self._git = git or SubprocessGitClient()
@@ -97,6 +99,7 @@ class ApplyPatchTool:
 
 class WorkspaceStatusTool:
     parallel_safe = True
+    argument_model = WorkspaceStatusArguments
 
     def __init__(
         self, git: GitClient | None = None, *, max_bytes: int = 100_000
@@ -117,6 +120,7 @@ class WorkspaceStatusTool:
 
 class WorkspaceDiffTool:
     parallel_safe = True
+    argument_model = WorkspaceDiffArguments
 
     def __init__(
         self, git: GitClient | None = None, *, max_bytes: int = 200_000

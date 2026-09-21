@@ -1,3 +1,5 @@
+from typing import cast
+
 from crucible.engine.gateway import ModelToolDefinition
 from crucible.tools.definitions import Tool
 from crucible.tools.filesystem import ListFilesTool, ReadFileTool, SearchFilesTool
@@ -23,13 +25,16 @@ class ToolRegistry:
 
 def default_registry() -> ToolRegistry:
     return ToolRegistry(
-        (
-            ListFilesTool(),
-            SearchFilesTool(),
-            ReadFileTool(),
-            WorkspaceStatusTool(),
-            WorkspaceDiffTool(),
-            ApplyPatchTool(),
-            WriteFileTool(),
+        cast(
+            tuple[Tool, ...],
+            (
+                ListFilesTool(),
+                SearchFilesTool(),
+                ReadFileTool(),
+                WorkspaceStatusTool(),
+                WorkspaceDiffTool(),
+                ApplyPatchTool(),
+                WriteFileTool(),
+            ),
         )
     )

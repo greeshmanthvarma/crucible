@@ -49,6 +49,7 @@ class WorkspacePathResolver:
 
 class ListFilesTool:
     parallel_safe = True
+    argument_model = ListFilesArguments
 
     def __init__(self, *, max_entries: int = 1000, max_bytes: int = 100_000) -> None:
         self.max_entries = max_entries
@@ -95,6 +96,7 @@ class ListFilesTool:
 
 class ReadFileTool:
     parallel_safe = True
+    argument_model = ReadFileArguments
 
     def __init__(self, *, max_bytes: int = 100_000) -> None:
         self.max_bytes = max_bytes
@@ -135,6 +137,7 @@ class ReadFileTool:
 
 class SearchFilesTool:
     parallel_safe = True
+    argument_model = SearchFilesArguments
 
     def __init__(self, *, max_matches: int = 200, max_bytes: int = 100_000) -> None:
         self.max_matches = max_matches
