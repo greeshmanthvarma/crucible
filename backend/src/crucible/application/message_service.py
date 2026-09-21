@@ -12,7 +12,7 @@ from crucible.application.idempotency import (
     IdempotencyRecord,
     canonical_request_hash,
 )
-from crucible.application.ports import RunSupervisor, UnitOfWork
+from crucible.application.ports import EventNotifier, RunSupervisor, UnitOfWork
 from crucible.domain.clock import Clock
 from crucible.domain.conversation import (
     Message,
@@ -50,10 +50,12 @@ class MessageService:
         unit_of_work: Callable[[], UnitOfWork],
         clock: Clock,
         supervisor: RunSupervisor,
+        notifier: EventNotifier | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._supervisor = supervisor
+        self._notifier = notifier
 
     async def submit(
         self, task_id: UUID, text: str, idempotency_key: str
@@ -140,6 +142,8 @@ class MessageService:
             )
             await uow.commit()
 
+        if self._notifier is not None:
+            await self._notifier.notify(task_id)
         try:
             await self._supervisor.submit(run_id)
         except Exception:

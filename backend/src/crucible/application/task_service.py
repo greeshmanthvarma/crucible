@@ -8,7 +8,7 @@ from crucible.application.errors import (
     TaskNotFound,
     WorkspaceProvisioningFailed,
 )
-from crucible.application.ports import UnitOfWork
+from crucible.application.ports import EventNotifier, UnitOfWork
 from crucible.domain.clock import Clock
 from crucible.domain.events import Event, EventType
 from crucible.domain.ids import new_id
@@ -22,10 +22,12 @@ class TaskService:
         workspaces: WorkspaceManager,
         unit_of_work: Callable[[], UnitOfWork],
         clock: Clock,
+        notifier: EventNotifier | None = None,
     ) -> None:
         self._workspaces = workspaces
         self._unit_of_work = unit_of_work
         self._clock = clock
+        self._notifier = notifier
 
     async def create(self, repository_id: UUID, source_ref: str) -> Task:
         async with self._unit_of_work() as uow:
@@ -58,6 +60,7 @@ class TaskService:
                 self._event(task, EventType.TASK_PROVISIONING_STARTED)
             )
             await uow.commit()
+        await self._notify(task.id)
 
         try:
             await self._workspaces.create(plan)
@@ -77,6 +80,7 @@ class TaskService:
                 self._event(active, EventType.TASK_PROVISIONING_SUCCEEDED)
             )
             await uow.commit()
+        await self._notify(active.id)
         return active
 
     async def get(self, task_id: UUID) -> Task:
@@ -110,6 +114,7 @@ class TaskService:
                 self._event(task, EventType.TASK_PROVISIONING_FAILED)
             )
             await uow.commit()
+        await self._notify(task.id)
 
     async def _record_provisioning_failure(self, task: Task, error: Exception) -> None:
         code = (
@@ -124,6 +129,11 @@ class TaskService:
                 self._event(failed, EventType.TASK_PROVISIONING_FAILED)
             )
             await uow.commit()
+        await self._notify(failed.id)
+
+    async def _notify(self, task_id: UUID) -> None:
+        if self._notifier is not None:
+            await self._notifier.notify(task_id)
 
     def _event(self, task: Task, event_type: EventType) -> Event:
         payload: dict[str, object] = {

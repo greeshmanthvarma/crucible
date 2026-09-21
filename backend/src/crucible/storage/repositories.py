@@ -16,7 +16,7 @@ from crucible.domain.conversation import (
     MessageRole,
     MessageStatus,
 )
-from crucible.domain.events import Event
+from crucible.domain.events import Event, EventType
 from crucible.domain.repository import Repository
 from crucible.domain.run import Run, RunStatus
 from crucible.domain.task import Task, TaskStatus
@@ -465,6 +465,51 @@ class EventRepository:
         )
         await self._session.flush()
         return stored
+
+    async def get(self, event_id: UUID) -> Event | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.task_events).where(
+                        models.task_events.c.id == str(event_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return self._from_row(row) if row is not None else None
+
+    async def list_after(
+        self, task_id: UUID, sequence: int, limit: int = 100
+    ) -> tuple[Event, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.task_events)
+                .where(
+                    models.task_events.c.task_id == str(task_id),
+                    models.task_events.c.task_sequence > sequence,
+                )
+                .order_by(models.task_events.c.task_sequence)
+                .limit(limit)
+            )
+        ).mappings()
+        return tuple(self._from_row(row) for row in rows)
+
+    @staticmethod
+    def _from_row(row: object) -> Event:
+        values = cast(dict[str, object], row)
+        return Event(
+            id=UUID(cast(str, values["id"])),
+            task_id=UUID(cast(str, values["task_id"])),
+            run_id=UUID(cast(str, values["run_id"])) if values["run_id"] else None,
+            task_sequence=cast(int, values["task_sequence"]),
+            run_sequence=cast(int | None, values["run_sequence"]),
+            type=EventType(cast(str, values["type"])),
+            schema_version=cast(int, values["schema_version"]),
+            payload=cast(dict[str, object], values["payload_json"]),
+            created_at=cast(datetime, values["created_at"]),
+        )
 
 
 class IdempotencyRepository:

@@ -2,7 +2,7 @@ from collections.abc import Callable
 from datetime import timedelta
 from uuid import UUID
 
-from crucible.application.ports import UnitOfWork
+from crucible.application.ports import EventNotifier, UnitOfWork
 from crucible.domain.clock import Clock
 from crucible.domain.conversation import (
     Message,
@@ -22,10 +22,12 @@ class RunEngine:
         unit_of_work: Callable[[], UnitOfWork],
         clock: Clock,
         gateway: ModelGateway,
+        notifier: EventNotifier | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._gateway = gateway
+        self._notifier = notifier
 
     async def execute(self, run_id: UUID) -> bool:
         now = self._clock.now()
@@ -43,6 +45,7 @@ class RunEngine:
                 self._event(run.task_id, run.id, EventType.RUN_STARTED, now)
             )
             await uow.commit()
+        await self._notify(run.task_id)
 
         async with self._unit_of_work() as uow:
             messages = await uow.messages.list_for_task(run.task_id)
@@ -85,6 +88,7 @@ class RunEngine:
                 self._event(run.task_id, run.id, EventType.RUN_COMPLETED, completed_at)
             )
             await uow.commit()
+        await self._notify(run.task_id)
         return True
 
     async def _persist_failure(self, run_id: UUID, error: Exception) -> None:
@@ -106,6 +110,11 @@ class RunEngine:
                 )
             )
             await uow.commit()
+        await self._notify(run.task_id)
+
+    async def _notify(self, task_id: UUID) -> None:
+        if self._notifier is not None:
+            await self._notifier.notify(task_id)
 
     @staticmethod
     def _event(

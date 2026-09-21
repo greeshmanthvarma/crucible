@@ -48,6 +48,10 @@ class RunStore(Protocol):
 
 class EventStore(Protocol):
     async def append(self, event: Event) -> Event: ...
+    async def get(self, event_id: UUID) -> Event | None: ...
+    async def list_after(
+        self, task_id: UUID, sequence: int, limit: int = 100
+    ) -> tuple[Event, ...]: ...
 
 
 class IdempotencyStore(Protocol):
@@ -58,6 +62,10 @@ class IdempotencyStore(Protocol):
 class RunSupervisor(Protocol):
     async def submit(self, run_id: UUID) -> None: ...
     async def reconcile(self) -> None: ...
+
+
+class EventNotifier(Protocol):
+    async def notify(self, task_id: UUID) -> None: ...
 
 
 class UnitOfWork(Protocol):

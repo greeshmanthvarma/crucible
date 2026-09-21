@@ -62,3 +62,13 @@ class IdempotencyKeyRequired(ApplicationError):
 class TaskNotActive(ApplicationError):
     code = "task_not_active"
     status_code = 409
+
+
+class EventCursorNotFound(ApplicationError):
+    code = "event_cursor_not_found"
+    status_code = 409
+
+
+class EventCursorTaskMismatch(ApplicationError):
+    code = "event_cursor_task_mismatch"
+    status_code = 409
