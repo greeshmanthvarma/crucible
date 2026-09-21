@@ -2,6 +2,11 @@ from collections.abc import Callable
 from uuid import UUID
 
 from crucible.application.ports import EventNotifier, UnitOfWork
+from crucible.context.manager import (
+    ContextLimitExceeded,
+    ContextManager,
+    SimpleTokenEstimator,
+)
 from crucible.domain.clock import Clock
 from crucible.domain.conversation import (
     Message,
@@ -12,13 +17,10 @@ from crucible.domain.conversation import (
 )
 from crucible.domain.events import EventType
 from crucible.domain.ids import new_id
+from crucible.domain.steps import Step
 from crucible.engine.gateway import (
     ModelError,
     ModelGateway,
-    ModelMessage,
-    ModelPart,
-    ModelRole,
-    PreparedModelRequest,
     TextDelta,
 )
 from crucible.engine.journal import (
@@ -39,6 +41,7 @@ class RunEngine:
         notifier: EventNotifier | None = None,
         process_execution_id: UUID | None = None,
         journal: RunJournal | None = None,
+        context_manager: ContextManager | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._clock = clock
@@ -46,6 +49,16 @@ class RunEngine:
         self._notifier = notifier
         self.process_execution_id = process_execution_id or new_id()
         self._journal = journal or RunJournal(unit_of_work, clock, notifier)
+        self._context_manager = context_manager or ContextManager(
+            unit_of_work,
+            clock,
+            SimpleTokenEstimator(),
+            harness_policy="Follow harness safety and execution policy.",
+            tool_contract="Use only the structured tools supplied by the harness.",
+            model="fake",
+            input_limit=100_000,
+            output_reserve=1024,
+        )
 
     async def execute(self, run_id: UUID) -> bool:
         now = self._clock.now()
@@ -61,33 +74,26 @@ class RunEngine:
             return False
 
         async with self._unit_of_work() as uow:
-            messages = await uow.messages.list_for_task(run.task_id)
+            step = Step.preparing(new_id(), run.task_id, run.id, 1, self._clock.now())
+            await uow.steps.add(step)
+            await uow.commit()
 
         try:
-            request = PreparedModelRequest(
-                run_id=run_id,
-                step_id=new_id(),
-                model="fake",
-                messages=tuple(
-                    ModelMessage(
-                        role=ModelRole(message.role.value),
-                        parts=tuple(
-                            ModelPart(part.kind.value, part.text_content)
-                            for part in message.parts
-                        ),
-                    )
-                    for message in messages
-                ),
-                tools=(),
-                max_output_tokens=1024,
-            )
+            prepared = await self._context_manager.prepare(run, step)
+            active_step = step.activate_model(self._clock.now())
+            async with self._unit_of_work() as uow:
+                await uow.steps.update(active_step)
+                await uow.commit()
             response_parts: list[str] = []
-            async for item in self._gateway.stream(request):
+            async for item in self._gateway.stream(prepared.request):
                 if isinstance(item, TextDelta):
                     response_parts.append(item.text)
                 elif isinstance(item, ModelError):
                     raise RuntimeError(f"{item.code}: {item.detail}")
             response = "".join(response_parts)
+        except ContextLimitExceeded as error:
+            await self._persist_failure(run_id, error, code="context_limit")
+            return True
         except Exception as error:
             await self._persist_failure(run_id, error)
             return True
@@ -112,9 +118,14 @@ class RunEngine:
         await self._journal.record(
             completed_message_mutation(run, message, completed_at)
         )
+        async with self._unit_of_work() as uow:
+            await uow.steps.update(active_step.complete(completed_at))
+            await uow.commit()
         return True
 
-    async def _persist_failure(self, run_id: UUID, error: Exception) -> None:
+    async def _persist_failure(
+        self, run_id: UUID, error: Exception, *, code: str = "model_gateway_error"
+    ) -> None:
         async with self._unit_of_work() as uow:
             run = await uow.runs.get(run_id)
             if run is None:
@@ -124,7 +135,7 @@ class RunEngine:
             terminal_run_mutation(
                 run,
                 type=EventType.RUN_FAILED,
-                code="model_gateway_error",
+                code=code,
                 detail=str(error)[:1000],
                 now=now,
             )

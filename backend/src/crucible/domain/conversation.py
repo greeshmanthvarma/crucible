@@ -3,7 +3,15 @@ from datetime import datetime
 from enum import StrEnum
 
 from crucible.domain.clock import require_utc
-from crucible.domain.ids import MessageId, MessagePartId, RunId, StepId, TaskId
+from crucible.domain.ids import (
+    MessageId,
+    MessagePartId,
+    RunId,
+    StepId,
+    TaskId,
+    ToolCallId,
+    ToolResultId,
+)
 
 
 class MessageRole(StrEnum):
@@ -32,8 +40,8 @@ class MessagePart:
     kind: MessagePartKind
     text_content: str | None
     reasoning_content: str | None = None
-    tool_call_id: object | None = None
-    tool_result_id: object | None = None
+    tool_call_id: ToolCallId | None = None
+    tool_result_id: ToolResultId | None = None
 
 
 @dataclass(frozen=True)

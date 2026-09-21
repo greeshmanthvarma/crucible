@@ -63,7 +63,10 @@ async def test_engine_claims_and_completes_a_run_once(
         "run.completed",
     ]
     assert len(gateway.requests) == 1
-    assert gateway.requests[0].messages[0].parts[0].text_content == "Explain the change"
+    user_message = next(
+        message for message in gateway.requests[0].messages if message.role == "user"
+    )
+    assert user_message.parts[0].text_content == "Explain the change"
 
 
 async def test_gateway_failure_persists_stable_outcome(
