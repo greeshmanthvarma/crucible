@@ -8,6 +8,7 @@ from crucible.application.errors import (
     NotAGitRepository,
     RepositoryHasNoCommit,
     RepositoryPathNotFound,
+    RevisionNotFound,
 )
 
 
@@ -67,7 +68,7 @@ class SubprocessGitClient:
             "--",
         )
         if result.returncode != 0:
-            raise RepositoryHasNoCommit(
+            raise RevisionNotFound(
                 f"Revision does not resolve to a commit: {source_ref}"
             )
         return result.stdout.splitlines()[0]

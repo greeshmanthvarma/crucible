@@ -20,7 +20,7 @@ class Task:
     id: TaskId
     repository_id: RepositoryId
     source_ref: str
-    base_revision: str
+    base_revision: str | None
     workspace_path: Path
     status: TaskStatus
     failure_code: str | None
@@ -30,6 +30,11 @@ class Task:
 
     def __post_init__(self) -> None:
         require_utc(self.created_at, self.updated_at)
+        if self.base_revision is None and not (
+            self.status is TaskStatus.PROVISIONING_FAILED
+            and self.failure_code == "revision_not_found"
+        ):
+            raise ValueError("Only a revision_not_found Task may lack a Base Revision")
 
     @classmethod
     def provisioning(
@@ -52,6 +57,31 @@ class Task:
             status=TaskStatus.PROVISIONING,
             failure_code=None,
             failure_detail=None,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @classmethod
+    def failed_without_revision(
+        cls,
+        *,
+        task_id: TaskId,
+        repository_id: RepositoryId,
+        source_ref: str,
+        workspace_path: Path,
+        detail: str,
+        clock: Clock,
+    ) -> Self:
+        now = clock.now()
+        return cls(
+            id=task_id,
+            repository_id=repository_id,
+            source_ref=source_ref,
+            base_revision=None,
+            workspace_path=workspace_path,
+            status=TaskStatus.PROVISIONING_FAILED,
+            failure_code="revision_not_found",
+            failure_detail=detail,
             created_at=now,
             updated_at=now,
         )

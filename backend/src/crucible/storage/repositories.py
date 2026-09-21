@@ -12,7 +12,7 @@ from crucible.domain.conversation import Message
 from crucible.domain.events import Event
 from crucible.domain.repository import Repository
 from crucible.domain.run import Run, RunStatus
-from crucible.domain.task import Task
+from crucible.domain.task import Task, TaskStatus
 from crucible.storage import models
 
 
@@ -74,6 +74,26 @@ class RepositoryRepository:
             created_at=row["created_at"],
         )
 
+    async def get(self, repository_id: UUID) -> Repository | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.repositories).where(
+                        models.repositories.c.id == str(repository_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        return Repository(
+            id=UUID(row["id"]),
+            root_path=Path(row["root_path"]),
+            created_at=row["created_at"],
+        )
+
     async def list(self) -> tuple[Repository, ...]:
         rows = (
             await self._session.execute(
@@ -108,6 +128,45 @@ class TaskRepository:
                 failure_code=task.failure_code,
                 failure_detail=task.failure_detail,
                 created_at=task.created_at,
+                updated_at=task.updated_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get(self, task_id: UUID) -> Task | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.tasks).where(models.tasks.c.id == str(task_id))
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        return Task(
+            id=UUID(row["id"]),
+            repository_id=UUID(row["repository_id"]),
+            source_ref=row["source_ref"],
+            base_revision=row["base_revision"],
+            workspace_path=Path(row["workspace_path"]),
+            status=TaskStatus(row["status"]),
+            failure_code=row["failure_code"],
+            failure_detail=row["failure_detail"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    async def update(self, task: Task) -> None:
+        await self._session.execute(
+            update(models.tasks)
+            .where(models.tasks.c.id == str(task.id))
+            .values(
+                workspace_path=str(task.workspace_path),
+                status=task.status,
+                failure_code=task.failure_code,
+                failure_detail=task.failure_detail,
                 updated_at=task.updated_at,
             )
         )

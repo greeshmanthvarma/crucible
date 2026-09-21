@@ -54,7 +54,7 @@ tasks = Table(
     Column("id", String(36), primary_key=True),
     Column("repository_id", ForeignKey("repositories.id"), nullable=False),
     Column("source_ref", String, nullable=False),
-    Column("base_revision", String, nullable=False),
+    Column("base_revision", String),
     Column("workspace_path", String, nullable=False, unique=True),
     Column("status", String, nullable=False),
     Column("failure_code", String),
@@ -66,6 +66,11 @@ tasks = Table(
     CheckConstraint("status IN ('provisioning','active','provisioning_failed')"),
     CheckConstraint("next_task_sequence > 0"),
     CheckConstraint("next_conversation_sequence > 0"),
+    CheckConstraint(
+        "base_revision IS NOT NULL OR "
+        "(status = 'provisioning_failed' AND failure_code IS NOT NULL "
+        "AND failure_code = 'revision_not_found')"
+    ),
 )
 
 runs = Table(

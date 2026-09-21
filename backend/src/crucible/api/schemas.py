@@ -27,3 +27,20 @@ class RepositoryResponse(ApiModel):
 class ErrorResponse(ApiModel):
     code: str
     detail: str
+
+
+class CreateTaskRequest(ApiModel):
+    source_ref: str = "HEAD"
+
+
+class TaskResponse(ApiModel):
+    id: UUID
+    repository_id: UUID
+    source_ref: str
+    base_revision: str | None
+    workspace_path: str
+    status: str
+    failure_code: str | None
+    failure_detail: str | None
+    created_at: datetime
+    updated_at: datetime
