@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import StreamingResponse
 
+from crucible.api.schemas import TaskEventEnvelope
 from crucible.application.errors import EventCursorNotFound
 from crucible.application.event_service import TaskEventSource
 from crucible.domain.events import Event
@@ -33,7 +34,11 @@ def _sse_event(event: Event) -> str:
     )
 
 
-@router.get("/api/tasks/{task_id}/events")
+@router.get(
+    "/api/tasks/{task_id}/events",
+    response_model=TaskEventEnvelope,
+    response_class=StreamingResponse,
+)
 async def event_stream(
     task_id: UUID,
     request: Request,

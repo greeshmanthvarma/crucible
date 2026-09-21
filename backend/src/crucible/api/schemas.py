@@ -80,3 +80,15 @@ class MessageResponse(ApiModel):
     parts: list[MessagePartResponse]
     created_at: datetime
     completed_at: datetime
+
+
+class TaskEventEnvelope(ApiModel):
+    event_id: UUID
+    task_id: UUID
+    run_id: UUID | None
+    task_sequence: int
+    run_sequence: int | None
+    type: str
+    schema_version: int
+    payload: dict[str, object]
+    created_at: datetime

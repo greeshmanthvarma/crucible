@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "generate:api": "cd ../backend && uv run python scripts/export_openapi.py ../frontend/openapi.json && cd ../frontend && pnpm exec openapi-typescript openapi.json -o src/api/schema.d.ts",
     "build": "tsc -b && vite build",
     "test": "vitest",
     "lint": "eslint .",
@@ -27,6 +28,7 @@
     "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^17.12.0",
     "jsdom": "^30.1.0",
+    "openapi-typescript": "^7.13.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.70.0",
     "vite": "^8.3.0",
