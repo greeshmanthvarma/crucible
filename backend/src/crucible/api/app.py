@@ -2,7 +2,6 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from uuid import UUID
 
 from fastapi import FastAPI
 
@@ -10,24 +9,11 @@ from crucible.api.errors import application_error_handler
 from crucible.api.repositories import router as repositories_router
 from crucible.api.tasks import messages_router
 from crucible.api.tasks import router as tasks_router
+from crucible.application.container import ApplicationContainer
 from crucible.application.errors import ApplicationError
 from crucible.application.message_service import MessageService
-from crucible.application.ports import RunSupervisor, UnitOfWork
 from crucible.application.repository_service import RepositoryService
 from crucible.application.task_service import TaskService
-from crucible.domain.clock import SystemClock
-from crucible.storage.database import Database
-from crucible.storage.unit_of_work import SqlAlchemyUnitOfWork
-from crucible.workspaces.git import SubprocessGitClient
-from crucible.workspaces.manager import WorkspaceManager
-
-
-class DeferredRunSupervisor:
-    async def submit(self, run_id: UUID) -> None:
-        return None
-
-    async def reconcile(self) -> None:
-        return None
 
 
 def create_app(
@@ -43,27 +29,18 @@ def create_app(
             app.state.message_service = message_service
             yield
             return
-        database = await Database.create(
-            os.environ.get("CRUCIBLE_DATABASE_URL", "sqlite+aiosqlite:///crucible.db")
+        container = await ApplicationContainer.create(
+            os.environ.get("CRUCIBLE_DATABASE_URL", "sqlite+aiosqlite:///crucible.db"),
+            Path(os.environ.get("CRUCIBLE_DATA_DIR", "data")),
         )
-
-        def unit_of_work() -> UnitOfWork:
-            return SqlAlchemyUnitOfWork(database)
-
-        git = SubprocessGitClient()
-        clock = SystemClock()
-        app.state.repository_service = RepositoryService(git, unit_of_work, clock)
-        app.state.task_service = TaskService(
-            WorkspaceManager(git, Path(os.environ.get("CRUCIBLE_DATA_DIR", "data"))),
-            unit_of_work,
-            clock,
-        )
-        supervisor: RunSupervisor = DeferredRunSupervisor()
-        app.state.message_service = MessageService(unit_of_work, clock, supervisor)
+        app.state.repository_service = container.repository_service
+        app.state.task_service = container.task_service
+        app.state.message_service = container.message_service
+        await container.start()
         try:
             yield
         finally:
-            await database.dispose()
+            await container.close()
 
     app = FastAPI(title="Crucible", version="0.1.0", lifespan=lifespan)
     if repository_service is not None:

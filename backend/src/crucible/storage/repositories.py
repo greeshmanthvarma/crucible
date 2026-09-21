@@ -204,6 +204,80 @@ class RunRepository:
         )
         await self._session.flush()
 
+    async def get(self, run_id: UUID) -> Run | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.runs).where(models.runs.c.id == str(run_id))
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return self._from_row(row) if row is not None else None
+
+    async def update(self, run: Run) -> None:
+        await self._session.execute(
+            update(models.runs)
+            .where(models.runs.c.id == str(run.id))
+            .values(
+                status=run.status,
+                execution_id=str(run.execution_id) if run.execution_id else None,
+                lease_expires_at=run.lease_expires_at,
+                heartbeat_at=run.heartbeat_at,
+                outcome_code=run.outcome_code,
+                outcome_detail=run.outcome_detail,
+                started_at=run.started_at,
+                completed_at=run.completed_at,
+            )
+        )
+        await self._session.flush()
+
+    async def list_queued(self) -> tuple[Run, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.runs)
+                .where(models.runs.c.status == RunStatus.QUEUED)
+                .order_by(models.runs.c.created_at, models.runs.c.id)
+            )
+        ).mappings()
+        return tuple(self._from_row(row) for row in rows)
+
+    async def list_stale_running(self, now: datetime) -> tuple[Run, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.runs)
+                .where(
+                    models.runs.c.status == RunStatus.RUNNING,
+                    models.runs.c.lease_expires_at <= now,
+                )
+                .order_by(models.runs.c.created_at, models.runs.c.id)
+            )
+        ).mappings()
+        return tuple(self._from_row(row) for row in rows)
+
+    @staticmethod
+    def _from_row(row: object) -> Run:
+        values = cast(dict[str, object], row)
+        return Run(
+            id=UUID(cast(str, values["id"])),
+            task_id=UUID(cast(str, values["task_id"])),
+            triggering_message_id=UUID(cast(str, values["triggering_message_id"]))
+            if values["triggering_message_id"]
+            else None,
+            status=RunStatus(cast(str, values["status"])),
+            execution_id=UUID(cast(str, values["execution_id"]))
+            if values["execution_id"]
+            else None,
+            lease_expires_at=cast(datetime | None, values["lease_expires_at"]),
+            heartbeat_at=cast(datetime | None, values["heartbeat_at"]),
+            outcome_code=cast(str | None, values["outcome_code"]),
+            outcome_detail=cast(str | None, values["outcome_detail"]),
+            created_at=cast(datetime, values["created_at"]),
+            started_at=cast(datetime | None, values["started_at"]),
+            completed_at=cast(datetime | None, values["completed_at"]),
+        )
+
     async def claim_queued(
         self,
         run_id: UUID,
