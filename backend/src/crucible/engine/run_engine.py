@@ -23,21 +23,25 @@ class RunEngine:
         clock: Clock,
         gateway: ModelGateway,
         notifier: EventNotifier | None = None,
+        process_execution_id: UUID | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._gateway = gateway
         self._notifier = notifier
+        self.process_execution_id = process_execution_id or new_id()
 
     async def execute(self, run_id: UUID) -> bool:
         now = self._clock.now()
-        execution_id = new_id()
         async with self._unit_of_work() as uow:
             run = await uow.runs.get(run_id)
             if run is None:
                 return False
             claimed = await uow.runs.claim_queued(
-                run_id, execution_id, now, now + timedelta(minutes=5)
+                run_id,
+                self.process_execution_id,
+                now,
+                now + timedelta(minutes=5),
             )
             if not claimed:
                 return False

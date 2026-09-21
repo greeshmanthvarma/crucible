@@ -44,10 +44,16 @@ class LocalRunSupervisor:
     async def reconcile(self) -> None:
         async with self._unit_of_work() as uow:
             now = self._clock.now()
-            stale = await uow.runs.list_stale_running(now)
-            for run in stale:
+            prior_process_runs = await uow.runs.list_running_not_owned_by(
+                self._engine.process_execution_id
+            )
+            for run in prior_process_runs:
                 await uow.runs.update(
-                    run.interrupt("stale_run", "Run lease expired", now=now)
+                    run.interrupt(
+                        "process_restarted",
+                        "Run was owned by a prior application process",
+                        now=now,
+                    )
                 )
                 await uow.events.append(
                     Event(
@@ -60,7 +66,7 @@ class LocalRunSupervisor:
                         schema_version=1,
                         payload={
                             "schema_version": 1,
-                            "outcome_code": "stale_run",
+                            "outcome_code": "process_restarted",
                         },
                         created_at=now,
                     )
@@ -68,7 +74,7 @@ class LocalRunSupervisor:
             queued = await uow.runs.list_queued()
             await uow.commit()
         if self._notifier is not None:
-            for run in stale:
+            for run in prior_process_runs:
                 await self._notifier.notify(run.task_id)
         for run in queued:
             await self.submit(run.id)

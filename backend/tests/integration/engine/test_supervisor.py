@@ -3,7 +3,7 @@ from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from crucible.engine.fake_gateway import FakeModelGateway
 from crucible.engine.run_engine import RunEngine
@@ -50,18 +50,19 @@ async def test_supervisor_deduplicates_submission_and_reconciles(
     assert len(gateway.requests) == 2
 
 
-async def test_reconcile_interrupts_expired_running_run_without_submission(
+async def test_reconcile_interrupts_run_owned_by_prior_process_even_with_future_lease(
     database: Database, tmp_path: Path
 ) -> None:
     submitted = await queued_run(database, tmp_path)
     factory = uow_factory(database)
     clock = FixedClock()
+    prior_process_execution_id = uuid4()
     async with factory() as uow:
         assert await uow.runs.claim_queued(
             submitted.run_id,
-            uuid4(),
-            clock.now() - timedelta(minutes=10),
-            clock.now() - timedelta(minutes=5),
+            prior_process_execution_id,
+            clock.now(),
+            clock.now() + timedelta(minutes=5),
         )
         await uow.commit()
     gateway = FakeModelGateway()
@@ -87,6 +88,18 @@ async def test_reconcile_interrupts_expired_running_run_without_submission(
             .limit(1)
         )
     assert run["status"] == "interrupted"
-    assert run["outcome_code"] == "stale_run"
+    assert run["outcome_code"] == "process_restarted"
     assert event_type == "run.interrupted"
     assert gateway.requests == []
+
+    await supervisor.reconcile()
+    async with database.engine.connect() as connection:
+        interrupted_count = await connection.scalar(
+            select(func.count())
+            .select_from(models.task_events)
+            .where(
+                models.task_events.c.run_id == str(submitted.run_id),
+                models.task_events.c.type == "run.interrupted",
+            )
+        )
+    assert interrupted_count == 1

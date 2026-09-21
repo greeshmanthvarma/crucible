@@ -269,13 +269,15 @@ class RunRepository:
         ).mappings()
         return tuple(self._from_row(row) for row in rows)
 
-    async def list_stale_running(self, now: datetime) -> tuple[Run, ...]:
+    async def list_running_not_owned_by(
+        self, process_execution_id: UUID
+    ) -> tuple[Run, ...]:
         rows = (
             await self._session.execute(
                 select(models.runs)
                 .where(
                     models.runs.c.status == RunStatus.RUNNING,
-                    models.runs.c.lease_expires_at <= now,
+                    models.runs.c.execution_id != str(process_execution_id),
                 )
                 .order_by(models.runs.c.created_at, models.runs.c.id)
             )
