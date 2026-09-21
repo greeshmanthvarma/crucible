@@ -34,7 +34,9 @@ async def test_complete_run_spine_survives_container_recreation(
     container = await ApplicationContainer.create(database_url, tmp_path / "data")
     await container.start()
     repository = await container.repository_service.register(root)
-    task = await container.task_service.create(repository.repository.id, "HEAD")
+    task = await container.task_service.create(
+        repository.repository.id, "HEAD", "run-spine-task"
+    )
     submitted = await container.message_service.submit(task.id, "Explain", "vertical")
 
     for _ in range(200):

@@ -20,7 +20,9 @@ export function App() {
       {repository && !task && (
         <button
           onClick={() =>
-            void apiClient.createTask(repository.id, "HEAD").then(setTask)
+            void apiClient
+              .createTask(repository.id, "HEAD", crypto.randomUUID())
+              .then(setTask)
           }
         >
           Create Task from HEAD

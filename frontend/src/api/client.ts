@@ -34,7 +34,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export interface CrucibleClient {
   registerRepository(path: string): Promise<RepositoryResponse>;
-  createTask(repositoryId: string, sourceRef: string): Promise<TaskResponse>;
+  createTask(
+    repositoryId: string,
+    sourceRef: string,
+    idempotencyKey: string,
+  ): Promise<TaskResponse>;
   getTask(taskId: string): Promise<TaskResponse>;
   getMessages(taskId: string): Promise<MessageResponse[]>;
   sendMessage(
@@ -50,9 +54,10 @@ export const apiClient: CrucibleClient = {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
-  createTask: (repositoryId, sourceRef) =>
+  createTask: (repositoryId, sourceRef, idempotencyKey) =>
     request(`/api/repositories/${repositoryId}/tasks`, {
       method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({ sourceRef }),
     }),
   getTask: (taskId) => request(`/api/tasks/${taskId}`),

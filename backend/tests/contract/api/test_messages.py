@@ -63,7 +63,7 @@ async def test_submit_retry_conflict_validation_and_listing_contract(
     supervisor = RecordingSupervisor()
     messages = MessageService(factory, FixedClock(), supervisor)
     registered = await repositories.register(root)
-    task = await tasks.create(registered.repository.id, "HEAD")
+    task = await tasks.create(registered.repository.id, "HEAD", "message-task")
 
     async with AsyncClient(
         transport=ASGITransport(app=create_app(repositories, tasks, messages)),

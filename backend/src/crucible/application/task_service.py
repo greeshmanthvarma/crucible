@@ -3,10 +3,15 @@ from uuid import UUID
 
 from crucible.application.errors import (
     ApplicationError,
+    IdempotencyConflict,
     RepositoryNotFound,
     RevisionNotFound,
     TaskNotFound,
     WorkspaceProvisioningFailed,
+)
+from crucible.application.idempotency import (
+    IdempotencyRecord,
+    canonical_request_hash,
 )
 from crucible.application.ports import EventNotifier, UnitOfWork
 from crucible.domain.clock import Clock
@@ -29,8 +34,30 @@ class TaskService:
         self._clock = clock
         self._notifier = notifier
 
-    async def create(self, repository_id: UUID, source_ref: str) -> Task:
+    async def create(
+        self, repository_id: UUID, source_ref: str, idempotency_key: str
+    ) -> Task:
+        scope = f"repository:{repository_id}:create-task"
+        request_hash = canonical_request_hash({"source_ref": source_ref})
         async with self._unit_of_work() as uow:
+            previous = await uow.idempotency.get(scope, idempotency_key)
+            if previous is not None:
+                if previous.request_hash != request_hash:
+                    raise IdempotencyConflict(
+                        "Idempotency key was already used for a different request"
+                    )
+                task = await uow.tasks.get(UUID(str(previous.response_json["taskId"])))
+                if task is None:
+                    raise RuntimeError("Idempotency record references a missing Task")
+                if previous.response_json.get("errorCode") == RevisionNotFound.code:
+                    raise RevisionNotFound(
+                        str(
+                            previous.response_json.get(
+                                "errorDetail", "Revision not found"
+                            )
+                        )
+                    )
+                return task
             repository = await uow.repositories.get(repository_id)
         if repository is None:
             raise RepositoryNotFound(f"Repository not found: {repository_id}")
@@ -42,7 +69,13 @@ class TaskService:
             )
         except RevisionNotFound as error:
             await self._record_unresolved_failure(
-                task_id, repository_id, source_ref, error
+                task_id,
+                repository_id,
+                source_ref,
+                error,
+                scope,
+                idempotency_key,
+                request_hash,
             )
             raise
 
@@ -55,9 +88,32 @@ class TaskService:
             clock=self._clock,
         )
         async with self._unit_of_work() as uow:
+            previous = await uow.idempotency.get(scope, idempotency_key)
+            if previous is not None:
+                if previous.request_hash != request_hash:
+                    raise IdempotencyConflict(
+                        "Idempotency key was already used for a different request"
+                    )
+                existing = await uow.tasks.get(
+                    UUID(str(previous.response_json["taskId"]))
+                )
+                if existing is None:
+                    raise RuntimeError("Idempotency record references a missing Task")
+                return existing
             await uow.tasks.add(task)
             await uow.events.append(
                 self._event(task, EventType.TASK_PROVISIONING_STARTED)
+            )
+            await uow.idempotency.add(
+                IdempotencyRecord(
+                    id=new_id(),
+                    scope=scope,
+                    key=idempotency_key,
+                    request_hash=request_hash,
+                    response_status=201,
+                    response_json={"taskId": str(task.id)},
+                    created_at=self._clock.now(),
+                )
             )
             await uow.commit()
         await self._notify(task.id)
@@ -96,6 +152,9 @@ class TaskService:
         repository_id: UUID,
         source_ref: str,
         error: RevisionNotFound,
+        scope: str,
+        idempotency_key: str,
+        request_hash: str,
     ) -> None:
         task = Task.failed_without_revision(
             task_id=task_id,
@@ -112,6 +171,21 @@ class TaskService:
             )
             await uow.events.append(
                 self._event(task, EventType.TASK_PROVISIONING_FAILED)
+            )
+            await uow.idempotency.add(
+                IdempotencyRecord(
+                    id=new_id(),
+                    scope=scope,
+                    key=idempotency_key,
+                    request_hash=request_hash,
+                    response_status=error.status_code,
+                    response_json={
+                        "taskId": str(task.id),
+                        "errorCode": error.code,
+                        "errorDetail": error.detail,
+                    },
+                    created_at=self._clock.now(),
+                )
             )
             await uow.commit()
         await self._notify(task.id)

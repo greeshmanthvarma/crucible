@@ -381,7 +381,9 @@ export interface operations {
     create_task_api_repositories__repository_id__tasks_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 repository_id: string;
             };

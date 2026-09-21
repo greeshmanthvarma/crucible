@@ -48,8 +48,13 @@ async def create_task(
     repository_id: UUID,
     request: CreateTaskRequest,
     service: TaskServiceDependency,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> TaskResponse:
-    return to_response(await service.create(repository_id, request.source_ref))
+    if idempotency_key is None or not idempotency_key.strip():
+        raise IdempotencyKeyRequired("Idempotency-Key header is required")
+    return to_response(
+        await service.create(repository_id, request.source_ref, idempotency_key)
+    )
 
 
 @router.get("/api/tasks/{task_id}", response_model=TaskResponse)

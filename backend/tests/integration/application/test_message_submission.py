@@ -62,7 +62,7 @@ async def active_task(database: Database, tmp_path: Path, name: str):
     registered = await RepositoryService(git, factory, FixedClock()).register(root)
     return await TaskService(
         WorkspaceManager(git, tmp_path / "data"), factory, FixedClock()
-    ).create(registered.repository.id, "HEAD")
+    ).create(registered.repository.id, "HEAD", "message-submission-task")
 
 
 async def test_submission_is_atomic_ordered_and_idempotent(
@@ -105,7 +105,12 @@ async def test_submission_is_atomic_ordered_and_idempotent(
             .one()
         )
         idempotency_count = await connection.scalar(
-            select(func.count()).select_from(models.idempotency_records)
+            select(func.count())
+            .select_from(models.idempotency_records)
+            .where(
+                models.idempotency_records.c.scope
+                == f"POST:/api/tasks/{task.id}/messages"
+            )
         )
     assert run["triggering_message_id"] == str(submitted.message_id)
     assert run["status"] == "queued"

@@ -51,7 +51,7 @@ async def queued_run(
     repository = await RepositoryService(git, factory, FixedClock()).register(root)
     task = await TaskService(
         WorkspaceManager(git, tmp_path / "data"), factory, FixedClock()
-    ).create(repository.repository.id, "HEAD")
+    ).create(repository.repository.id, "HEAD", f"engine-task-{name}")
     return await MessageService(factory, FixedClock(), PassiveSupervisor()).submit(
         task.id, "Explain the change", f"key-{name}"
     )
