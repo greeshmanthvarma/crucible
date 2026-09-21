@@ -5,7 +5,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from crucible.domain.clock import require_utc
-from crucible.domain.ids import EventId, RunId, TaskId
+from crucible.domain.ids import EventId, RunId, TaskId, new_id
 
 
 class EventType(StrEnum):
@@ -40,6 +40,31 @@ class Event:
 
     def payload_json(self) -> dict[str, object]:
         return {key: _thaw_value(value) for key, value in self.payload.items()}
+
+
+class EventFactory:
+    """Creates schema-versioned Events without allocating persistence sequences."""
+
+    def create(
+        self,
+        *,
+        task_id: TaskId,
+        run_id: RunId | None,
+        type: EventType,
+        created_at: datetime,
+        payload: Mapping[str, object] | None = None,
+    ) -> Event:
+        return Event(
+            id=new_id(),
+            task_id=task_id,
+            run_id=run_id,
+            task_sequence=0,
+            run_sequence=0 if run_id is not None else None,
+            type=type,
+            schema_version=1,
+            payload={"schema_version": 1, **(payload or {})},
+            created_at=created_at,
+        )
 
 
 def _freeze_mapping(payload: Mapping[str, object]) -> Mapping[str, object]:

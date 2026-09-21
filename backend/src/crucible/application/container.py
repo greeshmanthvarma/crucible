@@ -14,6 +14,7 @@ from crucible.application.repository_service import RepositoryService
 from crucible.application.task_service import TaskService
 from crucible.domain.clock import SystemClock
 from crucible.engine.fake_gateway import FakeModelGateway
+from crucible.engine.journal import RunJournal
 from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
 from crucible.engine.supervisor import LocalRunSupervisor
@@ -45,8 +46,13 @@ class ApplicationContainer:
         clock = SystemClock()
         git = SubprocessGitClient()
         notifier = TaskEventNotifier()
-        engine = RunEngine(unit_of_work, clock, FakeModelGateway(), notifier)
-        supervisor = LocalRunSupervisor(engine, unit_of_work, clock, notifier)
+        journal = RunJournal(unit_of_work, clock, notifier)
+        engine = RunEngine(
+            unit_of_work, clock, FakeModelGateway(), notifier, journal=journal
+        )
+        supervisor = LocalRunSupervisor(
+            engine, unit_of_work, clock, notifier, journal=journal
+        )
         workspaces = WorkspaceManager(git, data_dir)
 
         return cls(

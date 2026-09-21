@@ -15,7 +15,7 @@ from crucible.application.idempotency import (
 )
 from crucible.application.ports import EventNotifier, UnitOfWork
 from crucible.domain.clock import Clock
-from crucible.domain.events import Event, EventType
+from crucible.domain.events import Event, EventFactory, EventType
 from crucible.domain.ids import new_id
 from crucible.domain.task import Task
 from crucible.workspaces.manager import WorkspaceManager
@@ -33,6 +33,7 @@ class TaskService:
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._notifier = notifier
+        self._events = EventFactory()
 
     async def create(
         self, repository_id: UUID, source_ref: str, idempotency_key: str
@@ -217,14 +218,10 @@ class TaskService:
         }
         if task.failure_code is not None:
             payload["failure_code"] = task.failure_code
-        return Event(
-            id=new_id(),
+        return self._events.create(
             task_id=task.id,
             run_id=None,
-            task_sequence=0,
-            run_sequence=None,
             type=event_type,
-            schema_version=1,
             payload=payload,
             created_at=self._clock.now(),
         )
