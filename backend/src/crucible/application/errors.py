@@ -47,3 +47,18 @@ class TaskNotFound(ApplicationError):
 
 class WorkspaceProvisioningFailed(ApplicationError):
     code = "workspace_provisioning_failed"
+
+
+class IdempotencyConflict(ApplicationError):
+    code = "idempotency_conflict"
+    status_code = 409
+
+
+class IdempotencyKeyRequired(ApplicationError):
+    code = "idempotency_key_required"
+    status_code = 400
+
+
+class TaskNotActive(ApplicationError):
+    code = "task_not_active"
+    status_code = 409

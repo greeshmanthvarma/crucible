@@ -1,4 +1,4 @@
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -8,23 +8,19 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from crucible.domain.conversation import Message
+from crucible.application.idempotency import IdempotencyRecord
+from crucible.domain.conversation import (
+    Message,
+    MessagePart,
+    MessagePartKind,
+    MessageRole,
+    MessageStatus,
+)
 from crucible.domain.events import Event
 from crucible.domain.repository import Repository
 from crucible.domain.run import Run, RunStatus
 from crucible.domain.task import Task, TaskStatus
 from crucible.storage import models
-
-
-@dataclass(frozen=True)
-class IdempotencyRecord:
-    id: UUID
-    scope: str
-    key: str
-    request_hash: str
-    response_status: int
-    response_json: dict[str, object]
-    created_at: datetime
 
 
 class RepositoryRepository:
@@ -301,6 +297,54 @@ class MessageRepository:
             )
         await self._session.flush()
         return stored
+
+    async def list_for_task(self, task_id: UUID) -> tuple[Message, ...]:
+        message_rows = (
+            (
+                await self._session.execute(
+                    select(models.messages)
+                    .where(models.messages.c.task_id == str(task_id))
+                    .order_by(models.messages.c.conversation_sequence)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        result = []
+        for row in message_rows:
+            part_rows = (
+                (
+                    await self._session.execute(
+                        select(models.message_parts)
+                        .where(models.message_parts.c.message_id == row["id"])
+                        .order_by(models.message_parts.c.part_sequence)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            result.append(
+                Message(
+                    id=UUID(row["id"]),
+                    task_id=UUID(row["task_id"]),
+                    run_id=UUID(row["run_id"]) if row["run_id"] else None,
+                    conversation_sequence=row["conversation_sequence"],
+                    role=MessageRole(row["role"]),
+                    status=MessageStatus(row["status"]),
+                    parts=tuple(
+                        MessagePart(
+                            id=UUID(part["id"]),
+                            part_sequence=part["part_sequence"],
+                            kind=MessagePartKind(part["kind"]),
+                            text_content=part["text_content"],
+                        )
+                        for part in part_rows
+                    ),
+                    created_at=row["created_at"],
+                    completed_at=row["completed_at"],
+                )
+            )
+        return tuple(result)
 
 
 class EventRepository:

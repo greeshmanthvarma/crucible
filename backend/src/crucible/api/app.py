@@ -2,14 +2,17 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from uuid import UUID
 
 from fastapi import FastAPI
 
 from crucible.api.errors import application_error_handler
 from crucible.api.repositories import router as repositories_router
+from crucible.api.tasks import messages_router
 from crucible.api.tasks import router as tasks_router
 from crucible.application.errors import ApplicationError
-from crucible.application.ports import UnitOfWork
+from crucible.application.message_service import MessageService
+from crucible.application.ports import RunSupervisor, UnitOfWork
 from crucible.application.repository_service import RepositoryService
 from crucible.application.task_service import TaskService
 from crucible.domain.clock import SystemClock
@@ -19,15 +22,25 @@ from crucible.workspaces.git import SubprocessGitClient
 from crucible.workspaces.manager import WorkspaceManager
 
 
+class DeferredRunSupervisor:
+    async def submit(self, run_id: UUID) -> None:
+        return None
+
+    async def reconcile(self) -> None:
+        return None
+
+
 def create_app(
     repository_service: RepositoryService | None = None,
     task_service: TaskService | None = None,
+    message_service: MessageService | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if repository_service is not None:
             app.state.repository_service = repository_service
             app.state.task_service = task_service
+            app.state.message_service = message_service
             yield
             return
         database = await Database.create(
@@ -45,6 +58,8 @@ def create_app(
             unit_of_work,
             clock,
         )
+        supervisor: RunSupervisor = DeferredRunSupervisor()
+        app.state.message_service = MessageService(unit_of_work, clock, supervisor)
         try:
             yield
         finally:
@@ -54,10 +69,13 @@ def create_app(
     if repository_service is not None:
         app.state.repository_service = repository_service
         app.state.task_service = task_service
+        app.state.message_service = message_service
     app.add_exception_handler(ApplicationError, application_error_handler)  # type: ignore[arg-type]
     app.include_router(repositories_router)
     if task_service is not None or repository_service is None:
         app.include_router(tasks_router)
+    if message_service is not None or repository_service is None:
+        app.include_router(messages_router)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:

@@ -4,6 +4,7 @@ from types import TracebackType
 from typing import Protocol, Self
 from uuid import UUID
 
+from crucible.application.idempotency import IdempotencyRecord
 from crucible.domain.conversation import Message
 from crucible.domain.events import Event
 from crucible.domain.repository import Repository
@@ -26,6 +27,7 @@ class TaskStore(Protocol):
 
 class MessageStore(Protocol):
     async def add(self, message: Message) -> Message: ...
+    async def list_for_task(self, task_id: UUID) -> tuple[Message, ...]: ...
 
 
 class RunStore(Protocol):
@@ -45,7 +47,13 @@ class EventStore(Protocol):
 
 
 class IdempotencyStore(Protocol):
-    """Port for durable idempotency records, completed in Task 7."""
+    async def add(self, record: IdempotencyRecord) -> None: ...
+    async def get(self, scope: str, key: str) -> IdempotencyRecord | None: ...
+
+
+class RunSupervisor(Protocol):
+    async def submit(self, run_id: UUID) -> None: ...
+    async def reconcile(self) -> None: ...
 
 
 class UnitOfWork(Protocol):
