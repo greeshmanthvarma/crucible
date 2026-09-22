@@ -101,3 +101,30 @@ async def test_mixed_batch_runs_entirely_sequentially(database: Database) -> Non
     )
 
     assert actions == ["start:first", "finish:first", "start:second", "finish:second"]
+
+
+async def test_oversized_arguments_and_excess_calls_are_terminally_rejected(
+    database: Database,
+) -> None:
+    task, run, step, message = await prepared(database, "limits")
+    actions: list[str] = []
+    tool = ControlledTool("read", actions, parallel_safe=True)
+    dispatcher = ToolDispatcher(
+        ToolRegistry((tool,)),
+        lambda: SqlAlchemyUnitOfWork(database),
+        FixedClock(),
+        max_calls=1,
+    )
+    calls = (
+        CompleteToolCall(new_id(), "read", {"label": ""}),
+        CompleteToolCall(new_id(), "read", {"label": "never"}),
+    )
+
+    results = await dispatcher.execute_batch(
+        DispatchContext(task.id, run.id, step.id, message.id, task.workspace_path),
+        calls,
+    )
+
+    assert actions == []
+    assert [result.status.value for result in results] == ["rejected", "rejected"]
+    assert all(result.error_code == "rejected" for result in results)

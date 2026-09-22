@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from crucible.domain.ids import new_id
 from crucible.engine.gateway import (
     CompleteToolCall,
+    ModelError,
     ModelMessage,
     ModelRole,
     ModelStop,
@@ -77,3 +78,68 @@ async def test_translates_fragmented_provider_chunks_to_owned_protocol() -> None
     assert ModelUsage(12, 4) in items
     assert ModelStop(ModelStopReason.TOOL_CALLS) in items
     assert captured["stream"] is True
+
+
+async def test_malformed_arguments_become_owned_error() -> None:
+    async def stream() -> AsyncIterator[dict[str, object]]:
+        yield {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": "{not-json",
+                                },
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+
+    async def completion(**_: object) -> object:
+        return stream()
+
+    items = [item async for item in LiteLLMModelGateway(completion).stream(request())]
+
+    assert isinstance(items[0], ModelError)
+    assert items[0].code == "invalid_tool_arguments"
+    assert items[-1] == ModelStop(ModelStopReason.TOOL_CALLS)
+
+
+async def test_duplicate_provider_ids_receive_distinct_owned_ids() -> None:
+    async def stream() -> AsyncIterator[dict[str, object]]:
+        yield {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": index,
+                                "id": "duplicate-provider-id",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": '{"path":"README.md"}',
+                                },
+                            }
+                            for index in (0, 1)
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+
+    async def completion(**_: object) -> object:
+        return stream()
+
+    items = [item async for item in LiteLLMModelGateway(completion).stream(request())]
+    calls = [item for item in items if isinstance(item, CompleteToolCall)]
+
+    assert len(calls) == 2
+    assert calls[0].id != calls[1].id
+    assert {call.provider_correlation_id for call in calls} == {"duplicate-provider-id"}

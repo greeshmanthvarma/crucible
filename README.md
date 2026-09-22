@@ -9,6 +9,28 @@ written to Events, Context Manifests, or Task worktrees. Real-provider smoke tes
 are opt-in; the default quality gate uses captured chunks and deterministic scripted
 gateways only.
 
+Select a model and its context budget before starting the backend:
+
+```sh
+export CRUCIBLE_MODEL=openai/gpt-5-mini
+export CRUCIBLE_MODEL_INPUT_LIMIT=100000
+export CRUCIBLE_MODEL_OUTPUT_RESERVE=4096
+```
+
+The model loop has a 20-Step default limit and admits at most 100 Tool Calls in one
+batch. Each model request records a Context Manifest with the selected model,
+estimated input size, root instruction digest, and Tool schema digest. If the input
+budget cannot fit the required evidence, the Run fails with `context_limit`; if the
+Step budget is exhausted, it fails with `budget_exhausted`.
+
+The Slice 2 repository tools are `list_files`, `search_files`, `read_file`,
+`write_file`, `apply_patch`, and `git_status_diff`. Paths are confined to the Task's
+isolated worktree, reads and outputs are bounded, writes are atomic, and a complete
+batch is validated before any call begins. Only the worktree-root `AGENTS.md` is
+loaded as repository instruction evidence in this slice. Nested instruction files,
+shell commands, Docker, approval flows, and executable tools are intentionally out
+of scope until later slices.
+
 Crucible is an eval-driven, self-improving coding-agent harness for observable,
 isolated repository-level software-engineering work.
 

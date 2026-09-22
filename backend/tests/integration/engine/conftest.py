@@ -34,7 +34,10 @@ def uow_factory(database: Database):
 
 
 async def queued_run(
-    database: Database, tmp_path: Path, name: str = "repository"
+    database: Database,
+    tmp_path: Path,
+    name: str = "repository",
+    instructions: str | None = None,
 ) -> SubmittedRun:
     root = tmp_path / name
     root.mkdir()
@@ -44,7 +47,11 @@ async def queued_run(
     )
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=root, check=True)
     (root / "README.md").write_text("fixture\n")
-    subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
+    tracked = ["README.md"]
+    if instructions is not None:
+        (root / "AGENTS.md").write_text(instructions)
+        tracked.append("AGENTS.md")
+    subprocess.run(["git", "add", *tracked], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
     factory = uow_factory(database)
     git = SubprocessGitClient()
