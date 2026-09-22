@@ -1,5 +1,5 @@
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Mapping
 
@@ -7,8 +7,10 @@ from crucible.application.ports import EventNotifier, UnitOfWork
 from crucible.domain.clock import Clock
 from crucible.domain.conversation import Message
 from crucible.domain.events import Event, EventFactory, EventType
-from crucible.domain.ids import ExecutionId, RunId, TaskId
+from crucible.domain.ids import ExecutionId, RunId, TaskId, new_id
 from crucible.domain.run import Run
+from crucible.domain.steps import Step
+from crucible.domain.tools import ToolCall, ToolCallStatus, ToolResult, ToolResultStatus
 
 MutationAction = Callable[[UnitOfWork], Awaitable[None]]
 
@@ -128,6 +130,7 @@ def terminal_run_mutation(
     code: str,
     detail: str,
     now: datetime,
+    step: Step | None = None,
 ) -> JournalMutation:
     if type is EventType.RUN_FAILED:
         terminal = run.fail(code, detail, now=now)
@@ -137,21 +140,94 @@ def terminal_run_mutation(
         raise ValueError(f"Unsupported terminal Run Event: {type}")
 
     async def apply(uow: UnitOfWork) -> None:
+        if step is not None:
+            await uow.steps.update(
+                step.fail(now) if type is EventType.RUN_FAILED else step.interrupt(now)
+            )
         await uow.runs.update(terminal)
 
     return JournalMutation(
         task_id=run.task_id,
         run_id=run.id,
         apply=apply,
-        events=(EventSpec(type, {"outcome_code": code}),),
+        events=(
+            *(
+                (
+                    EventSpec(
+                        EventType.STEP_FAILED
+                        if type is EventType.RUN_FAILED
+                        else EventType.STEP_INTERRUPTED,
+                        {"step_id": str(step.id)},
+                    ),
+                )
+                if step is not None
+                else ()
+            ),
+            EventSpec(type, {"outcome_code": code}),
+        ),
     )
 
 
-def recovery_mutation(run: Run, *, now: datetime) -> JournalMutation:
-    return terminal_run_mutation(
-        run,
-        type=EventType.RUN_INTERRUPTED,
-        code="process_restarted",
-        detail="Run was owned by a prior application process",
-        now=now,
+def recovery_mutation(
+    run: Run,
+    *,
+    now: datetime,
+    orphaned_calls: tuple[ToolCall, ...] = (),
+    active_step: Step | None = None,
+) -> JournalMutation:
+    terminal = run.interrupt(
+        "process_restarted", "Run was owned by a prior application process", now=now
+    )
+
+    async def apply(uow: UnitOfWork) -> None:
+        completion_by_step: dict[object, int] = {}
+        for call in orphaned_calls:
+            if call.step_id not in completion_by_step:
+                existing = await uow.tool_results.list_for_step(call.step_id)
+                completion_by_step[call.step_id] = max(
+                    (result.completion_sequence for result in existing), default=0
+                )
+            completion_by_step[call.step_id] += 1
+            await uow.tool_results.add(
+                ToolResult(
+                    id=new_id(),
+                    task_id=call.task_id,
+                    run_id=call.run_id,
+                    step_id=call.step_id,
+                    tool_call_id=call.id,
+                    status=ToolResultStatus.INTERRUPTED,
+                    result={"truncated": False},
+                    schema_version=1,
+                    display_text="Interrupted by process restart",
+                    error_code="process_restarted",
+                    completion_sequence=completion_by_step[call.step_id],
+                    created_at=now,
+                    completed_at=now,
+                )
+            )
+            if call.status is not ToolCallStatus.REJECTED:
+                await uow.tool_calls.update(
+                    replace(call, status=ToolCallStatus.COMPLETED)
+                )
+        if active_step is not None:
+            await uow.steps.update(active_step.interrupt(now))
+        await uow.runs.update(terminal)
+
+    return JournalMutation(
+        task_id=run.task_id,
+        run_id=run.id,
+        apply=apply,
+        events=(
+            *(
+                (
+                    EventSpec(
+                        EventType.STEP_INTERRUPTED,
+                        {"step_id": str(active_step.id)},
+                    ),
+                )
+                if active_step is not None
+                else ()
+            ),
+            EventSpec(EventType.RUN_INTERRUPTED, {"outcome_code": "process_restarted"}),
+        ),
     )

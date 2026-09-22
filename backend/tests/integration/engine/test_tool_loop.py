@@ -107,3 +107,13 @@ async def test_two_step_tool_trajectory_persists_exact_exchange(
     assert results == ["succeeded"]
     assert len(gateway.requests) == 2
     assert gateway.requests[1].messages[-1].role == "tool"
+    assistant_call = next(
+        part
+        for message in gateway.requests[1].messages
+        for part in message.parts
+        if part.kind == "tool_call"
+    )
+    tool_result = gateway.requests[1].messages[-1].parts[0]
+    assert assistant_call.tool_name == "read_file"
+    assert assistant_call.arguments == {"path": "README.md"}
+    assert tool_result.tool_call_id == assistant_call.tool_call_id

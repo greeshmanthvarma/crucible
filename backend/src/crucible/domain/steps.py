@@ -65,6 +65,24 @@ class Step:
             )
         return replace(self, status=StepStatus.COMPLETED, completed_at=now)
 
+    def fail(self, now: datetime) -> Self:
+        if self.status in (
+            StepStatus.COMPLETED,
+            StepStatus.FAILED,
+            StepStatus.INTERRUPTED,
+        ):
+            raise ValueError(f"cannot fail terminal Step in state {self.status}")
+        return replace(self, status=StepStatus.FAILED, completed_at=now)
+
+    def interrupt(self, now: datetime) -> Self:
+        if self.status in (
+            StepStatus.COMPLETED,
+            StepStatus.FAILED,
+            StepStatus.INTERRUPTED,
+        ):
+            raise ValueError(f"cannot interrupt terminal Step in state {self.status}")
+        return replace(self, status=StepStatus.INTERRUPTED, completed_at=now)
+
     def _require(self, source: StepStatus, target: StepStatus) -> None:
         if self.status is not source:
             raise ValueError(f"cannot transition Step from {self.status} to {target}")

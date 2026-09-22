@@ -1,3 +1,5 @@
+import asyncio
+import time
 from collections.abc import Callable
 from uuid import UUID
 
@@ -25,9 +27,13 @@ from crucible.engine.gateway import (
     ModelGateway,
     ModelStop,
     ModelStopReason,
+    ModelUsage,
+    ReasoningDelta,
     TextDelta,
 )
 from crucible.engine.journal import (
+    EventSpec,
+    JournalMutation,
     JournalMutationRejected,
     RunJournal,
     claim_run_mutation,
@@ -37,6 +43,10 @@ from crucible.engine.journal import (
 )
 from crucible.tools.dispatcher import DispatchContext, ToolDispatcher
 from crucible.tools.registry import default_registry
+
+
+class RunBudgetExceeded(Exception):
+    pass
 
 
 class RunEngine:
@@ -51,6 +61,9 @@ class RunEngine:
         context_manager: ContextManager | None = None,
         dispatcher: ToolDispatcher | None = None,
         max_steps: int = 20,
+        max_tool_calls: int = 100,
+        max_model_tokens: int = 200_000,
+        max_active_seconds: float = 600,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._clock = clock
@@ -59,8 +72,13 @@ class RunEngine:
         self.process_execution_id = process_execution_id or new_id()
         self._journal = journal or RunJournal(unit_of_work, clock, notifier)
         registry = default_registry()
-        self._dispatcher = dispatcher or ToolDispatcher(registry, unit_of_work, clock)
+        self._dispatcher = dispatcher or ToolDispatcher(
+            registry, unit_of_work, clock, journal=self._journal
+        )
         self._max_steps = max_steps
+        self._max_tool_calls = max_tool_calls
+        self._max_model_tokens = max_model_tokens
+        self._max_active_seconds = max_active_seconds
         self._context_manager = context_manager or ContextManager(
             unit_of_work,
             clock,
@@ -71,6 +89,7 @@ class RunEngine:
             input_limit=100_000,
             output_reserve=1024,
             tools=registry.definitions,
+            journal=self._journal,
         )
 
     async def execute(self, run_id: UUID) -> bool:
@@ -91,12 +110,53 @@ class RunEngine:
             return False
         run = claimed_run
 
+        async with self._unit_of_work() as uow:
+            steps = await uow.steps.list_for_run(run.id)
+            existing_calls = 0
+            for step in steps:
+                existing_calls += len(await uow.tool_calls.list_for_step(step.id))
+        used_calls = existing_calls
+        used_tokens = 0
+        started = time.monotonic()
         for step_sequence in range(1, self._max_steps + 1):
             try:
-                should_continue = await self._execute_step(run, step_sequence)
+                if time.monotonic() - started > self._max_active_seconds:
+                    raise RunBudgetExceeded(
+                        "Run exceeded configured active-time budget"
+                    )
+                remaining_seconds = self._max_active_seconds - (
+                    time.monotonic() - started
+                )
+                async with asyncio.timeout(remaining_seconds):
+                    should_continue, step_calls, step_tokens = await self._execute_step(
+                        run,
+                        step_sequence,
+                        call_budget=max(0, self._max_tool_calls - used_calls),
+                        token_budget=max(0, self._max_model_tokens - used_tokens),
+                    )
+                used_calls += step_calls
+                used_tokens += step_tokens
             except ContextLimitExceeded as error:
                 await self._persist_failure(run_id, error, code="context_limit")
                 return True
+            except RunBudgetExceeded as error:
+                await self._persist_failure(run_id, error, code="budget_exhausted")
+                return True
+            except TimeoutError as error:
+                await self._persist_failure(
+                    run_id,
+                    error,
+                    code="budget_exhausted",
+                )
+                return True
+            except asyncio.CancelledError as error:
+                await self._persist_failure(
+                    run_id,
+                    error,
+                    code="cancelled",
+                    event_type=EventType.RUN_INTERRUPTED,
+                )
+                raise
             except Exception as error:
                 await self._persist_failure(run_id, error)
                 return True
@@ -109,35 +169,57 @@ class RunEngine:
         )
         return True
 
-    async def _execute_step(self, run: Run, step_sequence: int) -> bool:
+    async def _execute_step(
+        self,
+        run: Run,
+        step_sequence: int,
+        *,
+        call_budget: int,
+        token_budget: int,
+    ) -> tuple[bool, int, int]:
         step = Step.preparing(
             new_id(), run.task_id, run.id, step_sequence, self._clock.now()
         )
+        await self._record_step(step, EventType.STEP_PREPARING, add=True)
         async with self._unit_of_work() as uow:
-            await uow.steps.add(step)
             task = await uow.tasks.get(run.task_id)
-            await uow.commit()
         if task is None:
             raise ValueError(f"Task not found: {run.task_id}")
 
         prepared = await self._context_manager.prepare(run, step)
         active_step = step.activate_model(self._clock.now())
-        async with self._unit_of_work() as uow:
-            await uow.steps.update(active_step)
-            await uow.commit()
+        await self._record_step(active_step, EventType.STEP_MODEL_ACTIVE)
 
         text: list[str] = []
+        reasoning: list[str] = []
         calls: list[CompleteToolCall] = []
         stop: ModelStop | None = None
+        model_tokens = 0
+        usage_reported = False
         async for item in self._gateway.stream(prepared.request):
             if isinstance(item, TextDelta):
                 text.append(item.text)
+            elif isinstance(item, ReasoningDelta):
+                reasoning.append(item.text)
             elif isinstance(item, CompleteToolCall):
                 calls.append(item)
             elif isinstance(item, ModelStop):
                 stop = item
             elif isinstance(item, ModelError):
                 raise RuntimeError(f"{item.code}: {item.detail}")
+            elif isinstance(item, ModelUsage):
+                usage_reported = True
+                model_tokens += (item.input_tokens or 0) + (item.output_tokens or 0)
+
+        if stop is None:
+            raise RuntimeError("Model stream ended without a terminal stop item")
+        if not usage_reported:
+            output_characters = sum(map(len, text)) + sum(map(len, reasoning))
+            model_tokens = prepared.manifest.estimated_tokens + max(
+                1, (output_characters + 3) // 4
+            )
+        if model_tokens > token_budget:
+            raise RunBudgetExceeded("Run exceeded configured model-token budget")
 
         now = self._clock.now()
         message_id = new_id()
@@ -146,6 +228,16 @@ class RunEngine:
             parts.append(
                 MessagePart(
                     new_id(), len(parts) + 1, MessagePartKind.TEXT, "".join(text)
+                )
+            )
+        if reasoning:
+            parts.append(
+                MessagePart(
+                    new_id(),
+                    len(parts) + 1,
+                    MessagePartKind.REASONING,
+                    None,
+                    reasoning_content="".join(reasoning),
                 )
             )
         for call in calls:
@@ -175,17 +267,12 @@ class RunEngine:
                 raise RuntimeError(
                     "Model stopped for Tool Calls without emitting a call"
                 )
+            await self._record_step(active_step.complete(now), EventType.STEP_COMPLETED)
             await self._journal.record(completed_message_mutation(run, assistant, now))
-            async with self._unit_of_work() as uow:
-                await uow.steps.update(active_step.complete(now))
-                await uow.commit()
-            return False
+            return False, 0, model_tokens
 
-        await self._journal.record(message_completed_mutation(run, assistant))
         tools_step = active_step.activate_tools(now)
-        async with self._unit_of_work() as uow:
-            await uow.steps.update(tools_step)
-            await uow.commit()
+        await self._record_step(tools_step, EventType.STEP_TOOLS_ACTIVE)
         results = await self._dispatcher.execute_batch(
             DispatchContext(
                 run.task_id,
@@ -195,6 +282,8 @@ class RunEngine:
                 task.workspace_path,
             ),
             tuple(calls),
+            call_budget=call_budget,
+            assistant_message=assistant,
         )
         tool_message = Message(
             id=new_id(),
@@ -218,25 +307,53 @@ class RunEngine:
             completed_at=self._clock.now(),
         )
         await self._journal.record(message_completed_mutation(run, tool_message))
-        async with self._unit_of_work() as uow:
-            await uow.steps.update(tools_step.complete(self._clock.now()))
-            await uow.commit()
-        return True
+        await self._record_step(
+            tools_step.complete(self._clock.now()), EventType.STEP_COMPLETED
+        )
+        return True, len(calls), model_tokens
+
+    async def _record_step(
+        self, step: Step, event_type: EventType, *, add: bool = False
+    ) -> None:
+        async def apply(uow: UnitOfWork) -> None:
+            if add:
+                await uow.steps.add(step)
+            else:
+                await uow.steps.update(step)
+
+        await self._journal.record(
+            JournalMutation(
+                step.task_id,
+                step.run_id,
+                apply,
+                (EventSpec(event_type, {"step_id": str(step.id)}),),
+            )
+        )
 
     async def _persist_failure(
-        self, run_id: UUID, error: Exception, *, code: str = "model_gateway_error"
+        self,
+        run_id: UUID,
+        error: BaseException,
+        *,
+        code: str = "model_gateway_error",
+        event_type: EventType = EventType.RUN_FAILED,
     ) -> None:
         async with self._unit_of_work() as uow:
             run = await uow.runs.get(run_id)
             if run is None:
                 return
             now = self._clock.now()
+            steps = await uow.steps.list_for_run(run_id)
+            active_step = next(
+                (step for step in reversed(steps) if step.completed_at is None), None
+            )
         await self._journal.record(
             terminal_run_mutation(
                 run,
-                type=EventType.RUN_FAILED,
+                type=event_type,
                 code=code,
                 detail=str(error)[:1000],
                 now=now,
+                step=active_step,
             )
         )

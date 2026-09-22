@@ -50,7 +50,21 @@ class LocalRunSupervisor:
             )
             queued = await uow.runs.list_queued()
         for run in prior_process_runs:
-            await self._journal.record(recovery_mutation(run, now=now))
+            async with self._unit_of_work() as uow:
+                orphaned = await uow.tool_calls.list_without_result_for_run(run.id)
+                steps = await uow.steps.list_for_run(run.id)
+                active_step = next(
+                    (step for step in reversed(steps) if step.completed_at is None),
+                    None,
+                )
+            await self._journal.record(
+                recovery_mutation(
+                    run,
+                    now=now,
+                    orphaned_calls=orphaned,
+                    active_step=active_step,
+                )
+            )
         for run in queued:
             await self.submit(run.id)
 

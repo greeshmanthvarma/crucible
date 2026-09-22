@@ -5,6 +5,7 @@ from crucible.engine.gateway import (
     CompleteToolCall,
     ModelError,
     ModelMessage,
+    ModelPart,
     ModelRole,
     ModelStop,
     ModelStopReason,
@@ -143,3 +144,85 @@ async def test_duplicate_provider_ids_receive_distinct_owned_ids() -> None:
     assert len(calls) == 2
     assert calls[0].id != calls[1].id
     assert {call.provider_correlation_id for call in calls} == {"duplicate-provider-id"}
+
+
+async def test_serializes_structured_tool_exchange_for_follow_up_request() -> None:
+    call_id = new_id()
+    captured: dict[str, object] = {}
+
+    async def empty_stream() -> AsyncIterator[dict[str, object]]:
+        if False:
+            yield {}
+
+    async def completion(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return empty_stream()
+
+    prepared = PreparedModelRequest(
+        new_id(),
+        new_id(),
+        "openai/fixture",
+        (
+            ModelMessage(
+                ModelRole.ASSISTANT,
+                (
+                    ModelPart("text", "Checking."),
+                    ModelPart(
+                        "tool_call",
+                        tool_call_id=call_id,
+                        tool_name="read_file",
+                        arguments={"path": "README.md"},
+                    ),
+                ),
+            ),
+            ModelMessage(
+                ModelRole.TOOL,
+                (ModelPart("tool_result", "fixture\n", tool_call_id=call_id),),
+            ),
+        ),
+        (),
+        100,
+    )
+
+    assert [
+        item async for item in LiteLLMModelGateway(completion).stream(prepared)
+    ] == []
+    assert captured["messages"] == [
+        {
+            "role": "assistant",
+            "content": "Checking.",
+            "tool_calls": [
+                {
+                    "id": str(call_id),
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"README.md"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": str(call_id), "content": "fixture\n"},
+    ]
+
+
+async def test_normalizes_provider_request_and_stream_failures() -> None:
+    async def failed_request(**_: object) -> object:
+        raise RuntimeError("request boom")
+
+    request_items = [
+        item async for item in LiteLLMModelGateway(failed_request).stream(request())
+    ]
+    assert request_items == [ModelError("provider_request_failed", "request boom")]
+
+    async def failed_stream() -> AsyncIterator[dict[str, object]]:
+        raise RuntimeError("stream boom")
+        yield {}
+
+    async def completion(**_: object) -> object:
+        return failed_stream()
+
+    stream_items = [
+        item async for item in LiteLLMModelGateway(completion).stream(request())
+    ]
+    assert stream_items == [ModelError("provider_stream_failed", "stream boom")]

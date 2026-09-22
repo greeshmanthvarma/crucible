@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from pydantic import Field
 
 from crucible.domain.ids import new_id
@@ -127,4 +128,45 @@ async def test_oversized_arguments_and_excess_calls_are_terminally_rejected(
 
     assert actions == []
     assert [result.status.value for result in results] == ["rejected", "rejected"]
-    assert all(result.error_code == "rejected" for result in results)
+    assert [result.error_code for result in results] == [
+        "rejected",
+        "budget_exhausted",
+    ]
+
+
+async def test_cancellation_terminalizes_entire_admitted_batch_and_propagates(
+    database: Database,
+) -> None:
+    task, run, step, message = await prepared(database, "cancel")
+    started = asyncio.Event()
+
+    class BlockingTool(ControlledTool):
+        async def invoke(self, context: ToolContext, arguments: object) -> ToolOutcome:
+            started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    tool = BlockingTool("write", [], parallel_safe=False)
+    dispatcher = ToolDispatcher(
+        ToolRegistry((tool,)), lambda: SqlAlchemyUnitOfWork(database), FixedClock()
+    )
+    calls = (
+        CompleteToolCall(new_id(), "write", {"label": "first"}),
+        CompleteToolCall(new_id(), "write", {"label": "second"}),
+    )
+    execution = asyncio.create_task(
+        dispatcher.execute_batch(
+            DispatchContext(task.id, run.id, step.id, message.id, task.workspace_path),
+            calls,
+        )
+    )
+    await started.wait()
+    execution.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+    async with SqlAlchemyUnitOfWork(database) as uow:
+        results = await uow.tool_results.list_for_step(step.id)
+        persisted_calls = await uow.tool_calls.list_for_step(step.id)
+    assert [result.status.value for result in results] == ["cancelled", "cancelled"]
+    assert [call.status.value for call in persisted_calls] == ["completed", "completed"]

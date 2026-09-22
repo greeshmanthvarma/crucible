@@ -1,12 +1,14 @@
 import asyncio
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from crucible.application.ports import UnitOfWork
 from crucible.domain.clock import Clock
+from crucible.domain.conversation import Message
+from crucible.domain.events import EventType
 from crucible.domain.ids import MessageId, RunId, StepId, TaskId, new_id
 from crucible.domain.tools import (
     ToolCall,
@@ -16,6 +18,7 @@ from crucible.domain.tools import (
     ToolResultStatus,
 )
 from crucible.engine.gateway import CompleteToolCall
+from crucible.engine.journal import EventSpec, JournalMutation, RunJournal
 from crucible.tools.definitions import Tool, ToolContext, ToolOutcome
 from crucible.tools.registry import ToolRegistry
 
@@ -36,6 +39,7 @@ class AdmittedCall:
     tool: Tool | None
     arguments: object
     rejection: str | None = None
+    rejection_code: str = "rejected"
 
 
 class ToolDispatcher:
@@ -46,44 +50,36 @@ class ToolDispatcher:
         clock: Clock,
         *,
         max_calls: int = 100,
+        journal: RunJournal | None = None,
     ) -> None:
         self._registry = registry
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._max_calls = max_calls
+        self._journal = journal
 
     async def execute_batch(
-        self, context: DispatchContext, calls: tuple[CompleteToolCall, ...]
+        self,
+        context: DispatchContext,
+        calls: tuple[CompleteToolCall, ...],
+        *,
+        call_budget: int | None = None,
+        assistant_message: Message | None = None,
     ) -> tuple[ToolResult, ...]:
-        admitted = await self._preflight(context, calls)
+        admitted = await self._preflight(
+            context,
+            calls,
+            call_budget=call_budget,
+            assistant_message=assistant_message,
+        )
         completion_lock = asyncio.Lock()
         completion_sequence = 0
         results: dict[object, ToolResult] = {}
 
-        async def execute(item: AdmittedCall) -> None:
+        async def record_result(
+            item: AdmittedCall, outcome: ToolOutcome, status: ToolResultStatus
+        ) -> None:
             nonlocal completion_sequence
-            if item.rejection is not None:
-                outcome = ToolOutcome({}, item.rejection, error_code="rejected")
-                status = ToolResultStatus.REJECTED
-            else:
-                assert item.tool is not None
-                try:
-                    outcome = await item.tool.invoke(
-                        ToolContext(context.workspace), item.arguments
-                    )
-                    status = (
-                        ToolResultStatus.FAILED
-                        if outcome.error_code is not None
-                        else ToolResultStatus.SUCCEEDED
-                    )
-                except asyncio.CancelledError:
-                    outcome = ToolOutcome({}, "Cancelled", error_code="cancelled")
-                    status = ToolResultStatus.CANCELLED
-                except Exception as error:
-                    outcome = ToolOutcome(
-                        {}, str(error)[:4000], error_code="tool_exception"
-                    )
-                    status = ToolResultStatus.FAILED
             async with completion_lock:
                 completion_sequence += 1
                 result = ToolResult(
@@ -101,34 +97,124 @@ class ToolDispatcher:
                     created_at=self._clock.now(),
                     completed_at=self._clock.now(),
                 )
-                async with self._unit_of_work() as uow:
+
+                async def persist(uow: UnitOfWork) -> None:
                     await uow.tool_results.add(result)
-                    await uow.commit()
+                    if item.rejection is None:
+                        await uow.tool_calls.update(
+                            replace(item.record, status=ToolCallStatus.COMPLETED)
+                        )
+
+                await self._persist(
+                    context,
+                    persist,
+                    EventSpec(
+                        EventType.TOOL_CALL_COMPLETED,
+                        {
+                            "tool_call_id": str(item.record.id),
+                            "tool_result_id": str(result.id),
+                            "status": result.status.value,
+                        },
+                    ),
+                )
                 results[item.record.id] = result
 
-        executable = [item for item in admitted if item.rejection is None]
-        all_parallel = bool(executable) and all(
-            item.tool is not None and item.tool.parallel_safe for item in executable
+        async def execute(item: AdmittedCall) -> None:
+            if item.rejection is not None:
+                outcome = ToolOutcome(
+                    {}, item.rejection, error_code=item.rejection_code
+                )
+                status = ToolResultStatus.REJECTED
+            else:
+                assert item.tool is not None
+                running = replace(item.record, status=ToolCallStatus.RUNNING)
+
+                async def start(uow: UnitOfWork) -> None:
+                    await uow.tool_calls.update(running)
+
+                await self._persist(
+                    context,
+                    start,
+                    EventSpec(
+                        EventType.TOOL_CALL_STARTED,
+                        {"tool_call_id": str(item.record.id)},
+                    ),
+                )
+                try:
+                    outcome = await item.tool.invoke(
+                        ToolContext(context.workspace), item.arguments
+                    )
+                    status = (
+                        ToolResultStatus.FAILED
+                        if outcome.error_code is not None
+                        else ToolResultStatus.SUCCEEDED
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    outcome = ToolOutcome(
+                        {}, str(error)[:4000], error_code="tool_exception"
+                    )
+                    status = ToolResultStatus.FAILED
+            await record_result(item, outcome, status)
+
+        all_parallel = bool(admitted) and all(
+            item.rejection is None and item.tool is not None and item.tool.parallel_safe
+            for item in admitted
         )
-        if all_parallel:
-            async with asyncio.TaskGroup() as group:
+        try:
+            if all_parallel:
+                async with asyncio.TaskGroup() as group:
+                    for item in admitted:
+                        group.create_task(execute(item))
+            else:
                 for item in admitted:
-                    group.create_task(execute(item))
-        else:
-            for item in admitted:
-                await execute(item)
+                    await execute(item)
+        except asyncio.CancelledError:
+
+            async def terminalize() -> None:
+                async with self._unit_of_work() as uow:
+                    persisted = {
+                        result.tool_call_id
+                        for result in await uow.tool_results.list_for_step(
+                            context.step_id
+                        )
+                    }
+                for item in admitted:
+                    if item.record.id not in persisted:
+                        await record_result(
+                            item,
+                            ToolOutcome({}, "Cancelled", error_code="cancelled"),
+                            ToolResultStatus.CANCELLED,
+                        )
+
+            cleanup = asyncio.create_task(terminalize())
+            await asyncio.shield(cleanup)
+            raise
         return tuple(results[item.record.id] for item in admitted)
 
     async def _preflight(
-        self, context: DispatchContext, calls: tuple[CompleteToolCall, ...]
+        self,
+        context: DispatchContext,
+        calls: tuple[CompleteToolCall, ...],
+        *,
+        call_budget: int | None,
+        assistant_message: Message | None,
     ) -> tuple[AdmittedCall, ...]:
         admitted: list[AdmittedCall] = []
+        limit = (
+            self._max_calls
+            if call_budget is None
+            else min(self._max_calls, call_budget)
+        )
         for sequence, source in enumerate(calls, 1):
             tool = self._registry.get(source.name)
             rejection: str | None = None
+            rejection_code = "rejected"
             arguments: object = source.arguments
-            if sequence > self._max_calls:
+            if sequence > limit:
                 rejection = "Tool Call budget exhausted"
+                rejection_code = "budget_exhausted"
             elif tool is None:
                 rejection = f"Unknown tool: {source.name}"
             else:
@@ -162,9 +248,58 @@ class ToolDispatcher:
                     else ToolCallStatus.ADMITTED
                 ),
             )
-            admitted.append(AdmittedCall(source, record, tool, arguments, rejection))
-        async with self._unit_of_work() as uow:
+            admitted.append(
+                AdmittedCall(source, record, tool, arguments, rejection, rejection_code)
+            )
+
+        async def persist(uow: UnitOfWork) -> None:
+            if assistant_message is not None:
+                await uow.messages.add(assistant_message)
             for item in admitted:
                 await uow.tool_calls.add(item.record)
-            await uow.commit()
+
+        await self._persist(
+            context,
+            persist,
+            *(
+                (
+                    EventSpec(
+                        EventType.MESSAGE_COMPLETED,
+                        {"message_id": str(assistant_message.id)},
+                    ),
+                )
+                if assistant_message is not None
+                else ()
+            ),
+            *(
+                EventSpec(
+                    EventType.TOOL_CALL_ADMITTED,
+                    {
+                        "tool_call_id": str(item.record.id),
+                        "status": item.record.status.value,
+                    },
+                )
+                for item in admitted
+            ),
+        )
         return tuple(admitted)
+
+    async def _persist(
+        self,
+        context: DispatchContext,
+        apply: Callable[[UnitOfWork], Awaitable[None]],
+        *events: EventSpec,
+    ) -> None:
+        async def mutation(uow: UnitOfWork) -> None:
+            await apply(uow)
+
+        if self._journal is not None:
+            await self._journal.record(
+                JournalMutation(
+                    context.task_id, context.run_id, mutation, tuple(events)
+                )
+            )
+            return
+        async with self._unit_of_work() as uow:
+            await mutation(uow)
+            await uow.commit()

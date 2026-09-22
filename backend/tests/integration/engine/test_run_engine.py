@@ -57,11 +57,9 @@ async def test_engine_claims_and_completes_a_run_once(
     assert run["lease_expires_at"] is None
     assert [message["conversation_sequence"] for message in messages] == [1, 2]
     assert [message["role"] for message in messages] == ["user", "assistant"]
-    assert [event["type"] for event in events][-3:] == [
-        "run.started",
-        "message.completed",
-        "run.completed",
-    ]
+    event_types = [event["type"] for event in events]
+    assert event_types[-2:] == ["message.completed", "run.completed"]
+    assert event_types.index("run.started") < event_types.index("step.preparing")
     assert len(gateway.requests) == 1
     user_message = next(
         message for message in gateway.requests[0].messages if message.role == "user"

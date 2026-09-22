@@ -570,6 +570,32 @@ class ToolCallRepository:
         ).mappings()
         return tuple(self._from_row(row) for row in rows)
 
+    async def update(self, call: ToolCall) -> None:
+        result = await self._session.execute(
+            update(models.tool_calls)
+            .where(models.tool_calls.c.id == str(call.id))
+            .values(status=call.status)
+        )
+        if cast(int, result.rowcount) != 1:  # type: ignore[attr-defined]
+            raise ValueError(f"Tool Call not found: {call.id}")
+
+    async def list_without_result_for_run(self, run_id: UUID) -> tuple[ToolCall, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.tool_calls)
+                .outerjoin(
+                    models.tool_results,
+                    models.tool_results.c.tool_call_id == models.tool_calls.c.id,
+                )
+                .where(
+                    models.tool_calls.c.run_id == str(run_id),
+                    models.tool_results.c.id.is_(None),
+                )
+                .order_by(models.tool_calls.c.call_sequence)
+            )
+        ).mappings()
+        return tuple(self._from_row(row) for row in rows)
+
     @staticmethod
     def _from_row(row: object) -> ToolCall:
         values = cast(dict[str, object], row)

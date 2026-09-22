@@ -5,12 +5,16 @@ from uuid import uuid4
 
 from sqlalchemy import func, select
 
+from crucible.domain.ids import new_id
+from crucible.domain.tools import ToolCall, ToolExecutionMode
 from crucible.engine.fake_gateway import FakeModelGateway
 from crucible.engine.run_engine import RunEngine
 from crucible.engine.supervisor import LocalRunSupervisor
 from crucible.storage import models
 from crucible.storage.database import Database
+from crucible.storage.unit_of_work import SqlAlchemyUnitOfWork
 from tests.integration.engine.conftest import FixedClock, queued_run, uow_factory
+from tests.integration.storage.test_tool_loop_storage import seed_exchange
 
 
 async def test_supervisor_deduplicates_submission_and_reconciles(
@@ -103,3 +107,46 @@ async def test_reconcile_interrupts_run_owned_by_prior_process_even_with_future_
             )
         )
     assert interrupted_count == 1
+
+
+async def test_reconcile_terminalizes_orphaned_tool_calls(database: Database) -> None:
+    clock = FixedClock()
+    async with SqlAlchemyUnitOfWork(database) as uow:
+        task, run, step, message = await seed_exchange(uow, "orphaned")
+        call = ToolCall(
+            new_id(),
+            task.id,
+            run.id,
+            step.id,
+            message.id,
+            1,
+            "read_file",
+            {"path": "README.md"},
+            1,
+            None,
+            ToolExecutionMode.PARALLEL,
+            clock.now(),
+        )
+        await uow.tool_calls.add(call)
+        assert await uow.runs.claim_queued(
+            run.id,
+            uuid4(),
+            clock.now(),
+            clock.now() + timedelta(minutes=5),
+        )
+        await uow.commit()
+
+    factory = uow_factory(database)
+    supervisor = LocalRunSupervisor(
+        RunEngine(factory, clock, FakeModelGateway()), factory, clock
+    )
+    await supervisor.reconcile()
+    await supervisor.close()
+
+    async with factory() as uow:
+        results = await uow.tool_results.list_for_step(step.id)
+        calls = await uow.tool_calls.list_for_step(step.id)
+        recovered = await uow.runs.get(run.id)
+    assert recovered is not None and recovered.status.value == "interrupted"
+    assert [result.status.value for result in results] == ["interrupted"]
+    assert [candidate.status.value for candidate in calls] == ["completed"]

@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 
 import type { CrucibleClient } from "../../api/client";
@@ -94,4 +100,31 @@ it("renders canonical messages, sends, and refreshes once for a deduplicated com
   opened();
   await waitFor(() => expect(client.getMessages).toHaveBeenCalledTimes(5));
   expect(screen.getByText("Run: running")).toBeInTheDocument();
+});
+
+it("keeps the draft available when submission fails", async () => {
+  const client = {
+    getTask: vi.fn().mockResolvedValue(task),
+    getMessages: vi.fn().mockResolvedValue([]),
+    getTaskTrace: vi.fn().mockResolvedValue([]),
+    getWorkspaceState: vi.fn().mockResolvedValue({
+      status: "",
+      diff: "",
+      statusTruncated: false,
+      diffTruncated: false,
+    }),
+    sendMessage: vi.fn().mockRejectedValue(new Error("offline")),
+  } as unknown as CrucibleClient;
+  const streamFactory: EventStreamFactory = () => ({ close: vi.fn() });
+  const rendered = render(
+    <TaskView taskId="task" client={client} streamFactory={streamFactory} />,
+  );
+  const view = within(rendered.container);
+  await view.findByText("Status: active");
+  const input = view.getByLabelText("Message");
+  fireEvent.change(input, { target: { value: "keep this" } });
+  fireEvent.click(view.getByRole("button", { name: "Send" }));
+
+  await view.findByRole("alert");
+  expect(input).toHaveValue("keep this");
 });

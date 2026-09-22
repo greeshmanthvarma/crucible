@@ -65,6 +65,7 @@ class ApplicationContainer:
             input_limit=int(os.environ.get("CRUCIBLE_MODEL_INPUT_LIMIT", "100000")),
             output_reserve=int(os.environ.get("CRUCIBLE_MODEL_OUTPUT_RESERVE", "4096")),
             tools=registry.definitions,
+            journal=journal,
         )
         engine = RunEngine(
             unit_of_work,
@@ -73,7 +74,13 @@ class ApplicationContainer:
             notifier,
             journal=journal,
             context_manager=context_manager,
-            dispatcher=ToolDispatcher(registry, unit_of_work, clock),
+            dispatcher=ToolDispatcher(registry, unit_of_work, clock, journal=journal),
+            max_steps=int(os.environ.get("CRUCIBLE_MAX_STEPS", "20")),
+            max_tool_calls=int(os.environ.get("CRUCIBLE_MAX_TOOL_CALLS", "100")),
+            max_model_tokens=int(os.environ.get("CRUCIBLE_MAX_MODEL_TOKENS", "200000")),
+            max_active_seconds=float(
+                os.environ.get("CRUCIBLE_MAX_ACTIVE_SECONDS", "600")
+            ),
         )
         supervisor = LocalRunSupervisor(
             engine, unit_of_work, clock, notifier, journal=journal

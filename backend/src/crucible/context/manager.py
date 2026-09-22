@@ -1,6 +1,6 @@
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -8,9 +8,12 @@ from crucible.application.ports import UnitOfWork
 from crucible.context.instructions import load_root_instructions
 from crucible.context.manifests import ContextManifest
 from crucible.domain.clock import Clock
-from crucible.domain.ids import new_id
+from crucible.domain.conversation import MessagePart
+from crucible.domain.events import EventType
+from crucible.domain.ids import ToolCallId, ToolResultId, new_id
 from crucible.domain.run import Run
 from crucible.domain.steps import Step
+from crucible.domain.tools import ToolCall, ToolResult
 from crucible.engine.gateway import (
     ModelMessage,
     ModelPart,
@@ -18,6 +21,7 @@ from crucible.engine.gateway import (
     ModelToolDefinition,
     PreparedModelRequest,
 )
+from crucible.engine.journal import EventSpec, JournalMutation, RunJournal
 
 
 class ContextLimitExceeded(Exception):
@@ -59,6 +63,7 @@ class ContextManager:
         threshold: float = 0.8,
         tools: tuple[ModelToolDefinition, ...] = (),
         max_output_tokens: int | None = None,
+        journal: RunJournal | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._clock = clock
@@ -71,11 +76,24 @@ class ContextManager:
         self._threshold = threshold
         self._tools = tools
         self._max_output_tokens = max_output_tokens or output_reserve
+        self._journal = journal
 
     async def prepare(self, run: Run, step: Step) -> PreparedContext:
         async with self._unit_of_work() as uow:
             task = await uow.tasks.get(run.task_id)
             messages = await uow.messages.list_for_task(run.task_id)
+            calls = {
+                call.id: call
+                for candidate in await uow.runs.list_for_task(run.task_id)
+                for candidate_step in await uow.steps.list_for_run(candidate.id)
+                for call in await uow.tool_calls.list_for_step(candidate_step.id)
+            }
+            results = {
+                result.id: result
+                for candidate in await uow.runs.list_for_task(run.task_id)
+                for candidate_step in await uow.steps.list_for_run(candidate.id)
+                for result in await uow.tool_results.list_for_step(candidate_step.id)
+            }
         if task is None:
             raise ValueError(f"Task not found: {run.task_id}")
 
@@ -97,14 +115,7 @@ class ContextManager:
             + [
                 ModelMessage(
                     ModelRole(message.role.value),
-                    tuple(
-                        ModelPart(
-                            part.kind.value,
-                            part.text_content or part.reasoning_content,
-                            part.tool_call_id,
-                        )
-                        for part in message.parts
-                    ),
+                    tuple(_model_part(part, calls, results) for part in message.parts),
                 )
                 for message in messages
             ]
@@ -140,14 +151,53 @@ class ContextManager:
             tool_schema_digest=_tool_digest(self._tools),
             created_at=self._clock.now(),
         )
-        async with self._unit_of_work() as uow:
-            await uow.context_manifests.add(manifest)
-            await uow.commit()
+        if self._journal is None:
+            async with self._unit_of_work() as uow:
+                await uow.context_manifests.add(manifest)
+                await uow.commit()
+        else:
+
+            async def add_manifest(uow: UnitOfWork) -> None:
+                await uow.context_manifests.add(manifest)
+
+            await self._journal.record(
+                JournalMutation(
+                    run.task_id,
+                    run.id,
+                    add_manifest,
+                    (
+                        EventSpec(
+                            EventType.CONTEXT_PREPARED,
+                            {"step_id": str(step.id), "manifest_id": str(manifest.id)},
+                        ),
+                    ),
+                )
+            )
         return PreparedContext(request, manifest)
 
 
 def _digest_text(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _model_part(
+    part: MessagePart,
+    calls: Mapping[ToolCallId, ToolCall],
+    results: Mapping[ToolResultId, ToolResult],
+) -> ModelPart:
+    call = calls.get(part.tool_call_id) if part.tool_call_id is not None else None
+    result = (
+        results.get(part.tool_result_id) if part.tool_result_id is not None else None
+    )
+    return ModelPart(
+        part.kind.value,
+        part.text_content or part.reasoning_content,
+        tool_call_id=(
+            call.id if call is not None else result.tool_call_id if result else None
+        ),
+        tool_name=call.name if call is not None else None,
+        arguments=call.arguments if call is not None else None,
+    )
 
 
 def _tool_digest(tools: tuple[ModelToolDefinition, ...]) -> str:

@@ -24,9 +24,10 @@ export function TaskView({
   function submit(event: FormEvent) {
     event.preventDefault();
     if (!text.trim()) return;
-    void session
-      .send({ text, key: crypto.randomUUID() })
-      .then(() => setText(""));
+    void session.send({ text, key: crypto.randomUUID() }).then(
+      () => setText(""),
+      () => undefined,
+    );
   }
 
   const latestRunEvent = [...session.events.events]

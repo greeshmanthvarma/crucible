@@ -8,6 +8,8 @@ from crucible.domain.ids import new_id
 from crucible.engine.gateway import (
     CompleteToolCall,
     ModelError,
+    ModelMessage,
+    ModelRole,
     ModelStop,
     ModelStopReason,
     ModelStreamItem,
@@ -27,17 +29,32 @@ class LiteLLMModelGateway:
     async def stream(
         self, request: PreparedModelRequest
     ) -> AsyncIterator[ModelStreamItem]:
-        response = await self._completion(
-            model=request.model,
-            messages=[_message(message) for message in request.messages],
-            tools=[_tool(tool) for tool in request.tools] or None,
-            max_tokens=request.max_output_tokens,
-            stream=True,
-            stream_options={"include_usage": True},
-        )
+        try:
+            response = await self._completion(
+                model=request.model,
+                messages=[
+                    translated
+                    for message in request.messages
+                    for translated in _messages(message)
+                ],
+                tools=[_tool(tool) for tool in request.tools] or None,
+                max_tokens=request.max_output_tokens,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+        except Exception as error:
+            yield ModelError("provider_request_failed", str(error)[:1000])
+            return
         fragments: dict[int, dict[str, str]] = {}
-        async for raw_chunk in cast(AsyncIterator[object], response):
-            chunk = _mapping(raw_chunk)
+        async for raw_chunk in _safe_chunks(cast(AsyncIterator[object], response)):
+            if isinstance(raw_chunk, ModelError):
+                yield raw_chunk
+                return
+            try:
+                chunk = _mapping(raw_chunk)
+            except TypeError as error:
+                yield ModelError("invalid_provider_chunk", str(error))
+                continue
             usage = chunk.get("usage")
             if isinstance(usage, dict):
                 yield ModelUsage(
@@ -98,11 +115,47 @@ class LiteLLMModelGateway:
                     yield ModelStop(_stop_reason(finish))
 
 
-def _message(message: object) -> dict[str, object]:
-    role = getattr(message, "role")
-    parts = getattr(message, "parts")
-    content = "".join(getattr(part, "text_content") or "" for part in parts)
-    return {"role": str(role), "content": content}
+async def _safe_chunks(
+    response: AsyncIterator[object],
+) -> AsyncIterator[object | ModelError]:
+    try:
+        async for chunk in response:
+            yield chunk
+    except Exception as error:
+        yield ModelError("provider_stream_failed", str(error)[:1000])
+
+
+def _messages(message: ModelMessage) -> list[dict[str, object]]:
+    text = "".join(part.text_content or "" for part in message.parts)
+    if message.role is ModelRole.ASSISTANT:
+        calls = [part for part in message.parts if part.kind == "tool_call"]
+        payload: dict[str, object] = {"role": "assistant", "content": text or None}
+        if calls:
+            payload["tool_calls"] = [
+                {
+                    "id": str(part.tool_call_id),
+                    "type": "function",
+                    "function": {
+                        "name": part.tool_name,
+                        "arguments": json.dumps(
+                            dict(part.arguments or {}), separators=(",", ":")
+                        ),
+                    },
+                }
+                for part in calls
+            ]
+        return [payload]
+    if message.role is ModelRole.TOOL:
+        return [
+            {
+                "role": "tool",
+                "tool_call_id": str(part.tool_call_id),
+                "content": part.text_content or "",
+            }
+            for part in message.parts
+            if part.kind == "tool_result"
+        ]
+    return [{"role": message.role.value, "content": text}]
 
 
 def _tool(tool: object) -> dict[str, object]:

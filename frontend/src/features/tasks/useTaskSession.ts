@@ -66,7 +66,10 @@ export function useTaskSession(
           setEvents(next);
           if (
             event.type === "message.completed" ||
-            event.type.startsWith("run.")
+            event.type.startsWith("run.") ||
+            event.type.startsWith("step.") ||
+            event.type.startsWith("tool_call.") ||
+            event.type === "context.prepared"
           ) {
             void refresh();
           }
@@ -92,6 +95,7 @@ export function useTaskSession(
       await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Message failed");
+      throw reason;
     }
   }
 

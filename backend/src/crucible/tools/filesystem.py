@@ -109,20 +109,31 @@ class ReadFileTool:
     async def invoke(self, context: ToolContext, arguments: object) -> ToolOutcome:
         args = ReadFileArguments.model_validate(arguments)
         path = WorkspacePathResolver(context.workspace).resolve(args.path)
-        content = path.read_bytes()
-        if b"\x00" in content:
-            return ToolOutcome(
-                {"path": args.path, "binary": True},
-                "Binary file",
-                error_code="binary_file",
-            )
-        text = content.decode("utf-8")
-        lines = text.splitlines(keepends=True)
-        selected = "".join(lines[args.start_line - 1 : args.end_line])
-        encoded = selected.encode()
-        truncated = len(encoded) > self.max_bytes
-        if truncated:
-            selected = encoded[: self.max_bytes].decode("utf-8", errors="ignore")
+        selected_bytes = bytearray()
+        line_number = 1
+        with path.open("rb") as source:
+            while chunk := source.readline(64 * 1024):
+                if b"\x00" in chunk:
+                    return ToolOutcome(
+                        {"path": args.path, "binary": True},
+                        "Binary file",
+                        error_code="binary_file",
+                    )
+                if line_number >= args.start_line and (
+                    args.end_line is None or line_number <= args.end_line
+                ):
+                    remaining = self.max_bytes + 1 - len(selected_bytes)
+                    selected_bytes.extend(chunk[:remaining])
+                    if len(selected_bytes) > self.max_bytes:
+                        break
+                if chunk.endswith(b"\n"):
+                    line_number += 1
+                    if args.end_line is not None and line_number > args.end_line:
+                        break
+        truncated = len(selected_bytes) > self.max_bytes
+        selected = bytes(selected_bytes[: self.max_bytes]).decode(
+            "utf-8", errors="ignore"
+        )
         return ToolOutcome(
             {
                 "path": args.path,
