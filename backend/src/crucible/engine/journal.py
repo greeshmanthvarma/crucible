@@ -107,6 +107,20 @@ def completed_message_mutation(
     )
 
 
+def message_completed_mutation(run: Run, message: Message) -> JournalMutation:
+    async def apply(uow: UnitOfWork) -> None:
+        await uow.messages.add(message)
+
+    return JournalMutation(
+        task_id=run.task_id,
+        run_id=run.id,
+        apply=apply,
+        events=(
+            EventSpec(EventType.MESSAGE_COMPLETED, {"message_id": str(message.id)}),
+        ),
+    )
+
+
 def terminal_run_mutation(
     run: Run,
     *,

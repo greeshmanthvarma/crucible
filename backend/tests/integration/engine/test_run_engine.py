@@ -52,7 +52,7 @@ async def test_engine_claims_and_completes_a_run_once(
             .all()
         )
 
-    assert run["status"] == "completed"
+    assert run["status"] == "completed", run["outcome_detail"]
     assert run["execution_id"] is not None
     assert run["lease_expires_at"] is None
     assert [message["conversation_sequence"] for message in messages] == [1, 2]
