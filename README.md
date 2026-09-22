@@ -1,5 +1,14 @@
 # Crucible
 
+## Model configuration
+
+Crucible embeds LiteLLM `1.102.0` behind its provider-neutral model gateway. Set the
+credential environment variable required by the selected LiteLLM provider (for
+example `OPENAI_API_KEY`); secret values are read by the provider SDK and are never
+written to Events, Context Manifests, or Task worktrees. Real-provider smoke tests
+are opt-in; the default quality gate uses captured chunks and deterministic scripted
+gateways only.
+
 Crucible is an eval-driven, self-improving coding-agent harness for observable,
 isolated repository-level software-engineering work.
 
