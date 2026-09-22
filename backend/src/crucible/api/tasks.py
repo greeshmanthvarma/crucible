@@ -5,12 +5,17 @@ from fastapi import APIRouter, Depends, Header, status
 
 from crucible.api.dependencies import get_message_service, get_task_service
 from crucible.api.schemas import (
+    ContextManifestSummary,
     CreateTaskRequest,
     MessagePartResponse,
     MessageResponse,
+    StepTraceResponse,
     SubmitMessageRequest,
     SubmittedRunResponse,
     TaskResponse,
+    ToolCallResponse,
+    ToolResultResponse,
+    WorkspaceStateResponse,
 )
 from crucible.application.errors import IdempotencyKeyRequired
 from crucible.application.message_service import MessageService
@@ -65,6 +70,68 @@ async def get_task(
     return to_response(await service.get(task_id))
 
 
+@router.get("/api/tasks/{task_id}/trace", response_model=list[StepTraceResponse])
+async def get_task_trace(
+    task_id: UUID,
+    service: TaskServiceDependency,
+) -> list[StepTraceResponse]:
+    return [
+        StepTraceResponse(
+            id=trace.step.id,
+            run_id=trace.step.run_id,
+            step_sequence=trace.step.step_sequence,
+            status=trace.step.status,
+            manifest=ContextManifestSummary(
+                id=trace.manifest.id,
+                model=trace.manifest.model,
+                estimated_tokens=trace.manifest.estimated_tokens,
+                instruction_digests=dict(trace.manifest.instruction_digests),
+                tool_schema_digest=trace.manifest.tool_schema_digest,
+            )
+            if trace.manifest is not None
+            else None,
+            calls=[
+                ToolCallResponse(
+                    id=call.id,
+                    call_sequence=call.call_sequence,
+                    name=call.name,
+                    arguments=dict(call.arguments),
+                    status=call.status,
+                    execution_mode=call.execution_mode,
+                )
+                for call in trace.calls
+            ],
+            results=[
+                ToolResultResponse(
+                    id=result.id,
+                    tool_call_id=result.tool_call_id,
+                    status=result.status,
+                    result=dict(result.result),
+                    display_text=result.display_text,
+                    error_code=result.error_code,
+                    completion_sequence=result.completion_sequence,
+                )
+                for result in trace.results
+            ],
+        )
+        for trace in await service.trace(task_id)
+    ]
+
+
+@router.get("/api/tasks/{task_id}/workspace", response_model=WorkspaceStateResponse)
+async def get_workspace_state(
+    task_id: UUID,
+    service: TaskServiceDependency,
+) -> WorkspaceStateResponse:
+    state = await service.workspace_state(task_id)
+    return WorkspaceStateResponse(
+        status=state.status,
+        diff=state.diff,
+        status_truncated=state.status_truncated,
+        diff_truncated=state.diff_truncated,
+    )
+
+
 @messages_router.post(
     "/api/tasks/{task_id}/messages",
     response_model=SubmittedRunResponse,
@@ -99,6 +166,7 @@ async def list_messages(
             id=message.id,
             task_id=message.task_id,
             run_id=message.run_id,
+            step_id=message.step_id,
             conversation_sequence=message.conversation_sequence,
             role=message.role,
             status=message.status,
@@ -108,6 +176,9 @@ async def list_messages(
                     part_sequence=part.part_sequence,
                     kind=part.kind,
                     text_content=part.text_content,
+                    reasoning_content=part.reasoning_content,
+                    tool_call_id=part.tool_call_id,
+                    tool_result_id=part.tool_result_id,
                 )
                 for part in message.parts
             ],

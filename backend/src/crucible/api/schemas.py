@@ -68,12 +68,16 @@ class MessagePartResponse(ApiModel):
     part_sequence: int
     kind: str
     text_content: str | None
+    reasoning_content: str | None
+    tool_call_id: UUID | None
+    tool_result_id: UUID | None
 
 
 class MessageResponse(ApiModel):
     id: UUID
     task_id: UUID
     run_id: UUID | None
+    step_id: UUID | None
     conversation_sequence: int
     role: str
     status: str
@@ -92,3 +96,47 @@ class TaskEventEnvelope(ApiModel):
     schema_version: int
     payload: dict[str, object]
     created_at: datetime
+
+
+class ContextManifestSummary(ApiModel):
+    id: UUID
+    model: str
+    estimated_tokens: int
+    instruction_digests: dict[str, str]
+    tool_schema_digest: str
+
+
+class ToolCallResponse(ApiModel):
+    id: UUID
+    call_sequence: int
+    name: str
+    arguments: dict[str, object]
+    status: str
+    execution_mode: str
+
+
+class ToolResultResponse(ApiModel):
+    id: UUID
+    tool_call_id: UUID
+    status: str
+    result: dict[str, object]
+    display_text: str
+    error_code: str | None
+    completion_sequence: int
+
+
+class StepTraceResponse(ApiModel):
+    id: UUID
+    run_id: UUID
+    step_sequence: int
+    status: str
+    manifest: ContextManifestSummary | None
+    calls: list[ToolCallResponse]
+    results: list[ToolResultResponse]
+
+
+class WorkspaceStateResponse(ApiModel):
+    status: str
+    diff: str
+    status_truncated: bool
+    diff_truncated: bool

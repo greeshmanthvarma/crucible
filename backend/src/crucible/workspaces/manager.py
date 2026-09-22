@@ -6,7 +6,7 @@ from crucible.application.errors import (
     WorkspaceDestinationExists,
     WorkspaceRevisionMismatch,
 )
-from crucible.workspaces.git import GitClient
+from crucible.workspaces.git import GitClient, GitResult
 
 
 @dataclass(frozen=True)
@@ -81,3 +81,9 @@ class WorkspaceManager:
                 "Existing workspace does not match the recorded Base Revision"
             )
         return ProvisionedWorkspace(plan.base_revision, plan.workspace_path)
+
+    async def status(self, workspace: Path) -> GitResult:
+        return await self._git.status(workspace)
+
+    async def diff(self, workspace: Path) -> GitResult:
+        return await self._git.diff(workspace)

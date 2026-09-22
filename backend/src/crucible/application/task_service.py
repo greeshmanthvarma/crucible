@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import dataclass
 from uuid import UUID
 
 from crucible.application.errors import (
@@ -14,11 +15,30 @@ from crucible.application.idempotency import (
     canonical_request_hash,
 )
 from crucible.application.ports import EventNotifier, UnitOfWork
+from crucible.context.manifests import ContextManifest
 from crucible.domain.clock import Clock
 from crucible.domain.events import Event, EventFactory, EventType
 from crucible.domain.ids import new_id
+from crucible.domain.steps import Step
 from crucible.domain.task import Task
+from crucible.domain.tools import ToolCall, ToolResult
 from crucible.workspaces.manager import WorkspaceManager
+
+
+@dataclass(frozen=True)
+class StepTrace:
+    step: Step
+    manifest: ContextManifest | None
+    calls: tuple[ToolCall, ...]
+    results: tuple[ToolResult, ...]
+
+
+@dataclass(frozen=True)
+class WorkspaceState:
+    status: str
+    diff: str
+    status_truncated: bool
+    diff_truncated: bool
 
 
 class TaskService:
@@ -147,6 +167,40 @@ class TaskService:
             raise TaskNotFound(f"Task not found: {task_id}")
         return task
 
+    async def trace(self, task_id: UUID) -> tuple[StepTrace, ...]:
+        async with self._unit_of_work() as uow:
+            task = await uow.tasks.get(task_id)
+            if task is None:
+                raise TaskNotFound(f"Task not found: {task_id}")
+            runs = await uow.runs.list_for_task(task_id)
+            traces: list[StepTrace] = []
+            for run in runs:
+                for step in await uow.steps.list_for_run(run.id):
+                    traces.append(
+                        StepTrace(
+                            step,
+                            await uow.context_manifests.get_for_step(step.id),
+                            await uow.tool_calls.list_for_step(step.id),
+                            await uow.tool_results.list_for_step(step.id),
+                        )
+                    )
+            return tuple(traces)
+
+    async def workspace_state(
+        self, task_id: UUID, *, limit: int = 200_000
+    ) -> WorkspaceState:
+        task = await self.get(task_id)
+        status = await self._workspaces.status(task.workspace_path)
+        diff = await self._workspaces.diff(task.workspace_path)
+        status_text, status_truncated = _bounded(status.stdout, limit)
+        diff_text, diff_truncated = _bounded(diff.stdout, limit)
+        return WorkspaceState(
+            status_text,
+            diff_text,
+            status_truncated,
+            diff_truncated,
+        )
+
     async def _record_unresolved_failure(
         self,
         task_id: UUID,
@@ -225,3 +279,10 @@ class TaskService:
             payload=payload,
             created_at=self._clock.now(),
         )
+
+
+def _bounded(value: str, limit: int) -> tuple[str, bool]:
+    encoded = value.encode()
+    if len(encoded) <= limit:
+        return value, False
+    return encoded[:limit].decode(errors="replace"), True

@@ -46,6 +46,13 @@ it("renders canonical messages, sends, and refreshes once for a deduplicated com
         completedAt: task.createdAt,
       },
     ]),
+    getTaskTrace: vi.fn().mockResolvedValue([]),
+    getWorkspaceState: vi.fn().mockResolvedValue({
+      status: "",
+      diff: "",
+      statusTruncated: false,
+      diffTruncated: false,
+    }),
     sendMessage: vi.fn().mockResolvedValue({
       messageId: "message-2",
       runId: "run-2",
@@ -82,9 +89,9 @@ it("renders canonical messages, sends, and refreshes once for a deduplicated com
   });
   listener(completed);
   listener(completed);
-  await waitFor(() => expect(client.getMessages).toHaveBeenCalledTimes(3));
-  opened();
-  opened();
   await waitFor(() => expect(client.getMessages).toHaveBeenCalledTimes(4));
+  opened();
+  opened();
+  await waitFor(() => expect(client.getMessages).toHaveBeenCalledTimes(5));
   expect(screen.getByText("Run: running")).toBeInTheDocument();
 });

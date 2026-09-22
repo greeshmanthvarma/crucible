@@ -36,7 +36,15 @@ it("registers, creates a task, reconstructs it, and submits a message", async ()
       if (url === "/api/repositories") body = repository;
       else if (url.endsWith("/tasks") && init?.method === "POST") body = task;
       else if (url === "/api/tasks/task") body = task;
-      else if (url.endsWith("/messages") && init?.method === "POST") {
+      else if (url.endsWith("/trace")) body = [];
+      else if (url.endsWith("/workspace")) {
+        body = {
+          status: "",
+          diff: "",
+          statusTruncated: false,
+          diffTruncated: false,
+        };
+      } else if (url.endsWith("/messages") && init?.method === "POST") {
         body = { messageId: "message", runId: "run", runStatus: "queued" };
       } else if (url.endsWith("/messages")) body = [];
       return new Response(JSON.stringify(body), {
