@@ -90,7 +90,18 @@ class MessageService:
             task = await uow.tasks.get(task_id)
             if task is None:
                 raise TaskNotFound(f"Task not found: {task_id}")
-            if task.status is not TaskStatus.ACTIVE:
+            if task.status is TaskStatus.ACCEPTED:
+                task = task.reopen(self._clock)
+                await uow.tasks.update(task)
+                await uow.events.append(
+                    self._events.create(
+                        task_id=task_id,
+                        run_id=None,
+                        type=EventType.TASK_REOPENED,
+                        created_at=self._clock.now(),
+                    )
+                )
+            elif task.status is not TaskStatus.ACTIVE:
                 raise TaskNotActive(f"Task is not active: {task_id}")
 
             now = self._clock.now()

@@ -141,6 +141,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tasks/{task_id}/acceptances": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Accept Task */
+        post: operations["accept_task_api_tasks__task_id__acceptances_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/tasks/{task_id}/approvals": {
         parameters: {
             query?: never;
@@ -503,6 +520,43 @@ export interface components {
             validationCommands: components["schemas"]["ValidationCommandSettings"][];
             /** Validationrepairlimit */
             validationRepairLimit: number;
+        };
+        /** ResultRevisionResponse */
+        ResultRevisionResponse: {
+            /** Commitsha */
+            commitSha: string;
+            /**
+             * Createdat
+             * Format: date-time
+             */
+            createdAt: string;
+            /** Createdby */
+            createdBy: string;
+            /**
+             * Diffartifactid
+             * Format: uuid
+             */
+            diffArtifactId: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Parentrevision */
+            parentRevision: string;
+            /** Previousresultrevisionid */
+            previousResultRevisionId: string | null;
+            /** Summary */
+            summary: string;
+            /**
+             * Taskid
+             * Format: uuid
+             */
+            taskId: string;
+            /** Validationsnapshot */
+            validationSnapshot: {
+                [key: string]: unknown;
+            };
         };
         /** StepTraceResponse */
         StepTraceResponse: {
@@ -986,6 +1040,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    accept_task_api_tasks__task_id__acceptances_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResultRevisionResponse"];
                 };
             };
             /** @description Validation Error */

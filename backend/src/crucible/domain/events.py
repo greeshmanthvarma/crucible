@@ -12,6 +12,8 @@ class EventType(StrEnum):
     TASK_PROVISIONING_STARTED = "task.provisioning_started"
     TASK_PROVISIONING_SUCCEEDED = "task.provisioning_succeeded"
     TASK_PROVISIONING_FAILED = "task.provisioning_failed"
+    TASK_ACCEPTED = "task.accepted"
+    TASK_REOPENED = "task.reopened"
     RUN_QUEUED = "run.queued"
     MESSAGE_STEERING_ADDED = "message.steering_added"
     RUN_STARTED = "run.started"

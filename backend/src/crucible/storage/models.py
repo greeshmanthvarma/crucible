@@ -64,7 +64,10 @@ tasks = Table(
     Column("next_conversation_sequence", Integer, nullable=False, server_default="1"),
     Column("created_at", UTCDateTime(), nullable=False),
     Column("updated_at", UTCDateTime(), nullable=False),
-    CheckConstraint("status IN ('provisioning','active','provisioning_failed')"),
+    CheckConstraint(
+        "status IN ('provisioning','active','accepted','provisioning_failed')",
+        name="ck_tasks_status",
+    ),
     CheckConstraint("next_task_sequence > 0"),
     CheckConstraint("next_conversation_sequence > 0"),
     CheckConstraint(

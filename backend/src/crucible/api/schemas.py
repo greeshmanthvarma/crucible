@@ -239,3 +239,16 @@ class CancelledRunResponse(ApiModel):
     status: str
     outcome_code: str | None
     cancel_requested_at: datetime | None
+
+
+class ResultRevisionResponse(ApiModel):
+    id: UUID
+    task_id: UUID
+    commit_sha: str
+    parent_revision: str
+    previous_result_revision_id: UUID | None
+    diff_artifact_id: UUID
+    validation_snapshot: dict[str, object]
+    summary: str
+    created_by: str
+    created_at: datetime

@@ -1,5 +1,8 @@
 import asyncio
+import os
+import tempfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -25,6 +28,18 @@ class GitResult:
     stderr: str
 
 
+@dataclass(frozen=True)
+class AcceptanceEvidence:
+    changed_files: tuple[str, ...]
+    diff: bytes
+
+
+@dataclass(frozen=True)
+class AcceptanceCommit:
+    commit_sha: str
+    parent_revision: str
+
+
 class GitClient(Protocol):
     async def resolve_repository(self, candidate: Path) -> ResolvedRepository: ...
 
@@ -41,6 +56,16 @@ class GitClient(Protocol):
     async def apply_patch(
         self, workspace: Path, patch: str, *, check: bool
     ) -> GitResult: ...
+    async def acceptance_evidence(self, workspace: Path) -> AcceptanceEvidence: ...
+    async def create_acceptance_commit(
+        self, workspace: Path, task_id: str, idempotency_key: str, now: datetime
+    ) -> AcceptanceCommit: ...
+    async def find_owned_acceptance_commit(
+        self, workspace: Path, task_id: str, idempotency_key: str
+    ) -> AcceptanceCommit | None: ...
+    async def commit_evidence(
+        self, workspace: Path, commit_sha: str
+    ) -> AcceptanceEvidence: ...
 
 
 class SubprocessGitClient:
@@ -120,8 +145,137 @@ class SubprocessGitClient:
         arguments.append("-")
         return await self._run(workspace, *arguments, input_text=patch)
 
+    async def acceptance_evidence(self, workspace: Path) -> AcceptanceEvidence:
+        descriptor, temporary_name = tempfile.mkstemp(prefix="crucible-index-")
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        temporary.unlink()
+        environment = {"GIT_INDEX_FILE": str(temporary)}
+        try:
+            read_tree = await self._run(workspace, "read-tree", "HEAD", env=environment)
+            if read_tree.returncode != 0:
+                raise RuntimeError(read_tree.stderr.strip())
+            added = await self._run(workspace, "add", "-A", "--", env=environment)
+            if added.returncode != 0:
+                raise RuntimeError(added.stderr.strip())
+            names = await self._run(
+                workspace,
+                "diff",
+                "--cached",
+                "--name-only",
+                "-z",
+                "--",
+                env=environment,
+            )
+            diff_code, diff_stdout, diff_stderr = await self._run_bytes(
+                workspace,
+                "diff",
+                "--cached",
+                "--no-ext-diff",
+                "--binary",
+                "--",
+                env=environment,
+            )
+            if names.returncode != 0 or diff_code != 0:
+                raise RuntimeError((names.stderr or diff_stderr.decode()).strip())
+            return AcceptanceEvidence(
+                tuple(name for name in names.stdout.split("\0") if name), diff_stdout
+            )
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    async def create_acceptance_commit(
+        self, workspace: Path, task_id: str, idempotency_key: str, now: datetime
+    ) -> AcceptanceCommit:
+        parent = await self.worktree_revision(workspace)
+        added = await self._run(workspace, "add", "-A", "--")
+        if added.returncode != 0:
+            raise RuntimeError(added.stderr.strip())
+        timestamp = now.isoformat()
+        environment = {
+            "GIT_AUTHOR_NAME": "Crucible",
+            "GIT_AUTHOR_EMAIL": "crucible@local.invalid",
+            "GIT_COMMITTER_NAME": "Crucible",
+            "GIT_COMMITTER_EMAIL": "crucible@local.invalid",
+            "GIT_AUTHOR_DATE": timestamp,
+            "GIT_COMMITTER_DATE": timestamp,
+        }
+        committed = await self._run(
+            workspace,
+            "commit",
+            "--no-gpg-sign",
+            "-m",
+            "Accept Crucible task result",
+            "-m",
+            f"Crucible-Task-Id: {task_id}\nCrucible-Acceptance-Key: {idempotency_key}",
+            "--",
+            env=environment,
+        )
+        if committed.returncode != 0:
+            raise RuntimeError(committed.stderr.strip())
+        return AcceptanceCommit(await self.worktree_revision(workspace), parent)
+
+    async def find_owned_acceptance_commit(
+        self, workspace: Path, task_id: str, idempotency_key: str
+    ) -> AcceptanceCommit | None:
+        shown = await self._run(
+            workspace,
+            "show",
+            "-s",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%B",
+            "HEAD",
+            "--",
+        )
+        if shown.returncode != 0:
+            return None
+        commit_sha, parents, author, email, message = shown.stdout.split("\0", 4)
+        lines = {line.strip() for line in message.splitlines()}
+        if (
+            author != "Crucible"
+            or email != "crucible@local.invalid"
+            or f"Crucible-Task-Id: {task_id}" not in lines
+            or f"Crucible-Acceptance-Key: {idempotency_key}" not in lines
+        ):
+            return None
+        parent_values = parents.split()
+        if len(parent_values) != 1:
+            return None
+        return AcceptanceCommit(commit_sha, parent_values[0])
+
+    async def commit_evidence(
+        self, workspace: Path, commit_sha: str
+    ) -> AcceptanceEvidence:
+        names = await self._run(
+            workspace,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            commit_sha,
+            "--",
+        )
+        diff_code, diff_stdout, diff_stderr = await self._run_bytes(
+            workspace,
+            "show",
+            "--format=",
+            "--no-ext-diff",
+            "--binary",
+            commit_sha,
+            "--",
+        )
+        if names.returncode != 0 or diff_code != 0:
+            raise RuntimeError((names.stderr or diff_stderr.decode()).strip())
+        return AcceptanceEvidence(
+            tuple(name for name in names.stdout.split("\0") if name), diff_stdout
+        )
+
     async def _run(
-        self, cwd: Path, *arguments: str, input_text: str | None = None
+        self,
+        cwd: Path,
+        *arguments: str,
+        input_text: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> GitResult:
         process = await asyncio.create_subprocess_exec(
             "git",
@@ -130,6 +284,7 @@ class SubprocessGitClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.PIPE if input_text is not None else None,
+            env={**os.environ, **(env or {})},
         )
         stdout, stderr = await process.communicate(
             input_text.encode() if input_text is not None else None
@@ -139,3 +294,17 @@ class SubprocessGitClient:
             stdout=stdout.decode(),
             stderr=stderr.decode(),
         )
+
+    async def _run_bytes(
+        self, cwd: Path, *arguments: str, env: dict[str, str] | None = None
+    ) -> tuple[int, bytes, bytes]:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            *arguments,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, **(env or {})},
+        )
+        stdout, stderr = await process.communicate()
+        return process.returncode or 0, stdout, stderr

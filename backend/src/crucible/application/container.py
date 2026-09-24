@@ -8,6 +8,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
+from crucible.application.acceptance_service import AcceptanceService
 from crucible.application.approval_service import ApprovalService
 from crucible.application.artifact_service import ArtifactService
 from crucible.application.command_authority import CommandAuthority
@@ -55,6 +56,7 @@ class ApplicationContainer:
     approval_service: ApprovalService
     artifact_service: ArtifactService
     run_service: RunService
+    acceptance_service: AcceptanceService
     sandbox_reconciler: SandboxReconciler
     reconciler: StartupReconciler
     unit_of_work: Callable[[], UnitOfWork]
@@ -140,6 +142,9 @@ class ApplicationContainer:
             approval_broker=approval_broker,
         )
         run_service = RunService(unit_of_work, clock, supervisor, notifier)
+        acceptance_service = AcceptanceService(
+            git, artifact_service, unit_of_work, clock, notifier
+        )
         sandbox_reconciler = SandboxReconciler(
             sandbox_backend,
             resource_manager,
@@ -159,6 +164,7 @@ class ApplicationContainer:
             approval_service=approval_service,
             artifact_service=artifact_service,
             run_service=run_service,
+            acceptance_service=acceptance_service,
             sandbox_reconciler=sandbox_reconciler,
             reconciler=StartupReconciler(
                 workspaces, unit_of_work, clock, notifier, resource_manager

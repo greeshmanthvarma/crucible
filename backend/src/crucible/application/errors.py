@@ -84,6 +84,11 @@ class TaskNotActive(ApplicationError):
     status_code = 409
 
 
+class AcceptanceRejected(ApplicationError):
+    code = "acceptance_rejected"
+    status_code = 409
+
+
 class EventCursorNotFound(ApplicationError):
     code = "event_cursor_not_found"
     status_code = 409

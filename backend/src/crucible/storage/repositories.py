@@ -1702,6 +1702,35 @@ class ResultRevisionRepository:
             )
         )
 
+    async def list_for_task(self, task_id: UUID) -> tuple[ResultRevision, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.result_revisions)
+                .where(models.result_revisions.c.task_id == str(task_id))
+                .order_by(
+                    models.result_revisions.c.created_at,
+                    models.result_revisions.c.id,
+                )
+            )
+        ).mappings()
+        return tuple(
+            ResultRevision(
+                UUID(row["id"]),
+                UUID(row["task_id"]),
+                row["commit_sha"],
+                row["parent_revision"],
+                UUID(row["previous_result_revision_id"])
+                if row["previous_result_revision_id"]
+                else None,
+                UUID(row["diff_artifact_id"]),
+                row["validation_snapshot_json"],
+                row["summary"],
+                row["created_by"],
+                row["created_at"],
+            )
+            for row in rows
+        )
+
 
 class IntegrationRepository:
     def __init__(self, session: AsyncSession) -> None:

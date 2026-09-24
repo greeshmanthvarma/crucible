@@ -1,4 +1,5 @@
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -63,3 +64,36 @@ async def test_rejects_unsupported_repository_candidates(
 
     with pytest.raises(expected):
         await SubprocessGitClient().resolve_repository(candidate)
+
+
+async def test_acceptance_evidence_is_binary_aware_and_commit_is_owned(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "acceptance"
+    parent = committed_repository(root)
+    (root / "README.md").write_text("changed\n")
+    (root / "binary.dat").write_bytes(b"\x00\x01\xff")
+    status_before = git("status", "--porcelain=v2", cwd=root)
+    client = SubprocessGitClient()
+
+    evidence = await client.acceptance_evidence(root)
+
+    assert evidence.changed_files == ("README.md", "binary.dat")
+    assert b"GIT binary patch" in evidence.diff
+    assert git("status", "--porcelain=v2", cwd=root) == status_before
+
+    accepted = await client.create_acceptance_commit(
+        root,
+        "task-123",
+        "accept-123",
+        datetime(2026, 9, 20, tzinfo=UTC),
+    )
+    assert accepted.parent_revision == parent
+    assert (
+        await client.find_owned_acceptance_commit(root, "task-123", "accept-123")
+        == accepted
+    )
+    assert await client.find_owned_acceptance_commit(root, "task-123", "wrong") is None
+    assert git("show", "-s", "--format=%an <%ae>", "HEAD", cwd=root) == (
+        "Crucible <crucible@local.invalid>"
+    )
