@@ -80,6 +80,50 @@ async def test_invalid_repository_path_has_stable_error_contract(
     assert "does not exist" in response.json()["detail"]
 
 
+async def test_repository_validation_settings_contract(
+    database: Database, tmp_path: Path
+) -> None:
+    root = tmp_path / "settings-repository"
+    create_repository(root)
+    service = RepositoryService(
+        SubprocessGitClient(), uow_factory(database), FixedClock()
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(service)), base_url="http://test"
+    ) as client:
+        created = await client.post("/api/repositories", json={"path": str(root)})
+        updated = await client.put(
+            f"/api/repositories/{created.json()['id']}/settings",
+            json={
+                "validationCommands": [
+                    {
+                        "executable": "python",
+                        "arguments": ["-m", "pytest"],
+                        "cwd": ".",
+                        "timeoutSeconds": 60,
+                        "network": "none",
+                        "environment": {"CI": "1"},
+                        "image": "runner@sha256:" + "a" * 64,
+                        "reason": "Authoritative tests",
+                        "limits": {
+                            "cpus": 1,
+                            "memoryBytes": 1073741824,
+                            "pids": 64,
+                            "outputBytes": 100000,
+                        },
+                    }
+                ],
+                "validationRepairLimit": 2,
+            },
+        )
+
+    assert updated.status_code == 200
+    assert updated.json()["settings"]["validationCommands"][0]["arguments"] == [
+        "-m",
+        "pytest",
+    ]
+
+
 async def test_default_application_wires_repository_service(
     database: Database,
     database_url: str,

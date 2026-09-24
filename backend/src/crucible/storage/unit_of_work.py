@@ -7,6 +7,7 @@ from crucible.application.ports import (
     ApprovalStore,
     ArtifactMetadataStore,
     CompactionStore,
+    CompletionProposalStore,
     ContextManifestStore,
     EventStore,
     ExternalResourceStore,
@@ -29,6 +30,7 @@ from crucible.storage.repositories import (
     ApprovalRepository,
     ArtifactRepository,
     CompactionRepository,
+    CompletionProposalRepository,
     ContextManifestRepository,
     EventRepository,
     ExternalResourceRepository,
@@ -64,6 +66,7 @@ class SqlAlchemyUnitOfWork:
     events: EventStore
     idempotency: IdempotencyStorePort
     compactions: CompactionStore
+    completion_proposals: CompletionProposalStore
     validation_attempts: ValidationAttemptStore
     validation_command_results: ValidationCommandResultStore
     result_revisions: ResultRevisionStore
@@ -90,6 +93,7 @@ class SqlAlchemyUnitOfWork:
         self.events = EventRepository(self.session)
         self.idempotency = IdempotencyRepository(self.session)
         self.compactions = CompactionRepository(self.session)
+        self.completion_proposals = CompletionProposalRepository(self.session)
         self.validation_attempts = ValidationAttemptRepository(self.session)
         self.validation_command_results = ValidationCommandResultRepository(
             self.session

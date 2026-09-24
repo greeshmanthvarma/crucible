@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def to_camel(value: str) -> str:
@@ -18,11 +18,60 @@ class RegisterRepositoryRequest(ApiModel):
     path: str
 
 
+class CommandLimitsSettings(ApiModel):
+    cpus: float = Field(gt=0)
+    memory_bytes: int = Field(gt=0)
+    pids: int = Field(gt=0)
+    output_bytes: int = Field(gt=0)
+
+
+class ValidationCommandSettings(ApiModel):
+    executable: str
+    arguments: list[str]
+    cwd: str
+    timeout_seconds: int = Field(ge=1, le=3600)
+    network: Literal["none", "outbound"]
+    environment: dict[str, str]
+    image: str
+    reason: str
+    limits: CommandLimitsSettings
+
+
+class RepositorySettingsRequest(ApiModel):
+    validation_commands: list[ValidationCommandSettings] | None = None
+    sandbox_image: str | None = None
+    sandbox_network: Literal["none", "outbound"] | None = None
+    validation_repair_limit: int | None = Field(default=None, ge=0)
+    default_cwd: str | None = None
+    compaction_threshold: float | None = Field(default=None, gt=0, le=1)
+    compaction_model: str | None = None
+    compaction_prompt_version: str | None = None
+    compaction_attempt_limit: int | None = Field(default=None, ge=0)
+    model_input_limit: int | None = Field(default=None, gt=0)
+    model_output_reserve: int | None = Field(default=None, ge=0)
+
+
+class RepositorySettingsResponse(ApiModel):
+    validation_commands: list[ValidationCommandSettings]
+    sandbox_image: str
+    sandbox_network: str
+    validation_repair_limit: int
+    default_cwd: str
+    compaction_threshold: float
+    compaction_model: str | None
+    compaction_prompt_version: str
+    compaction_attempt_limit: int
+    model_input_limit: int
+    model_output_reserve: int
+    schema_version: int
+
+
 class RepositoryResponse(ApiModel):
     id: UUID
     root_path: str
     head_revision: str
     created_at: datetime
+    settings: RepositorySettingsResponse
 
 
 class ErrorResponse(ApiModel):

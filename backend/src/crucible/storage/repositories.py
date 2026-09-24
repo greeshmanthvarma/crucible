@@ -40,6 +40,7 @@ from crucible.domain.tools import (
     ToolResultStatus,
 )
 from crucible.domain.validation import (
+    CompletionProposal,
     ValidationAttempt,
     ValidationCommandResult,
     ValidationStatus,
@@ -200,6 +201,14 @@ class RepositoryRepository:
             )
             for row in rows
         )
+
+    async def update(self, repository: Repository) -> None:
+        await self._session.execute(
+            update(models.repositories)
+            .where(models.repositories.c.id == str(repository.id))
+            .values(settings_json=_settings_json(repository.settings))
+        )
+        await self._session.flush()
 
 
 class TaskRepository:
@@ -373,7 +382,9 @@ class RunRepository:
         rows = (
             await self._session.execute(
                 select(models.runs)
-                .where(models.runs.c.status == RunStatus.RUNNING)
+                .where(
+                    models.runs.c.status.in_((RunStatus.RUNNING, RunStatus.VALIDATING))
+                )
                 .order_by(models.runs.c.created_at, models.runs.c.id)
             )
         ).mappings()
@@ -396,7 +407,13 @@ class RunRepository:
                     select(models.runs)
                     .where(
                         models.runs.c.task_id == str(task_id),
-                        models.runs.c.status.in_((RunStatus.QUEUED, RunStatus.RUNNING)),
+                        models.runs.c.status.in_(
+                            (
+                                RunStatus.QUEUED,
+                                RunStatus.RUNNING,
+                                RunStatus.VALIDATING,
+                            )
+                        ),
                     )
                     .order_by(models.runs.c.created_at.desc(), models.runs.c.id.desc())
                     .limit(1)
@@ -414,7 +431,7 @@ class RunRepository:
             await self._session.execute(
                 select(models.runs)
                 .where(
-                    models.runs.c.status == RunStatus.RUNNING,
+                    models.runs.c.status.in_((RunStatus.RUNNING, RunStatus.VALIDATING)),
                     models.runs.c.execution_id != str(process_execution_id),
                 )
                 .order_by(models.runs.c.created_at, models.runs.c.id)
@@ -929,6 +946,23 @@ class MessageRepository:
                 )
             )
         return tuple(result)
+
+    async def get(self, message_id: UUID) -> Message | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.messages).where(
+                        models.messages.c.id == str(message_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        messages = await self.list_for_task(UUID(row["task_id"]))
+        return next(item for item in messages if item.id == message_id)
 
 
 class EventRepository:
@@ -1473,6 +1507,34 @@ class ValidationAttemptRepository:
             )
         )
 
+    async def update(self, value: ValidationAttempt) -> None:
+        await self._session.execute(
+            update(models.validation_attempts)
+            .where(models.validation_attempts.c.id == str(value.id))
+            .values(status=value.status, completed_at=value.completed_at)
+        )
+        await self._session.flush()
+
+    async def list_for_run(self, run_id: UUID) -> tuple[ValidationAttempt, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.validation_attempts)
+                .where(models.validation_attempts.c.run_id == str(run_id))
+                .order_by(models.validation_attempts.c.attempt_number)
+            )
+        ).mappings()
+        return tuple(
+            ValidationAttempt(
+                UUID(row["id"]),
+                UUID(row["run_id"]),
+                row["attempt_number"],
+                ValidationStatus(row["status"]),
+                row["created_at"],
+                row["completed_at"],
+            )
+            for row in rows
+        )
+
 
 class ValidationCommandResultRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -1495,6 +1557,81 @@ class ValidationCommandResultRepository:
             )
         )
         await self._session.flush()
+
+    async def list_for_attempt(
+        self, attempt_id: UUID
+    ) -> tuple[ValidationCommandResult, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.validation_command_results)
+                .where(
+                    models.validation_command_results.c.validation_attempt_id
+                    == str(attempt_id)
+                )
+                .order_by(models.validation_command_results.c.command_sequence)
+            )
+        ).mappings()
+        return tuple(
+            ValidationCommandResult(
+                UUID(row["id"]),
+                UUID(row["validation_attempt_id"]),
+                row["command_sequence"],
+                ValidationStatus(row["status"]),
+                UUID(row["approval_id"]) if row["approval_id"] else None,
+                UUID(row["tool_call_id"]) if row["tool_call_id"] else None,
+                UUID(row["artifact_id"]) if row["artifact_id"] else None,
+                row["exit_code"],
+                row["summary"],
+                row["created_at"],
+                row["completed_at"],
+            )
+            for row in rows
+        )
+
+
+class CompletionProposalRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, value: CompletionProposal) -> None:
+        await self._session.execute(
+            insert(models.completion_proposals).values(
+                id=str(value.id),
+                run_id=str(value.run_id),
+                assistant_message_id=str(value.assistant_message_id),
+                summary=value.summary,
+                claimed_files_json=list(value.claimed_files),
+                notes=value.notes,
+                created_at=value.created_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get_for_run(self, run_id: UUID) -> CompletionProposal | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.completion_proposals).where(
+                        models.completion_proposals.c.run_id == str(run_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return (
+            None
+            if row is None
+            else CompletionProposal(
+                UUID(row["id"]),
+                UUID(row["run_id"]),
+                UUID(row["assistant_message_id"]),
+                row["summary"],
+                tuple(row["claimed_files_json"]),
+                row["notes"],
+                row["created_at"],
+            )
+        )
 
 
 class ResultRevisionRepository:

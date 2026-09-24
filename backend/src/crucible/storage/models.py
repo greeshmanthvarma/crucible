@@ -94,7 +94,8 @@ runs = Table(
     Column("cancel_code", String),
     Column("settings_snapshot_json", JSON, nullable=False, server_default="{}"),
     CheckConstraint(
-        "status IN ('queued','running','completed','failed','interrupted','cancelled')",
+        "status IN "
+        "('queued','running','validating','completed','failed','interrupted','cancelled')",
         name="ck_runs_status",
     ),
     CheckConstraint("next_run_sequence > 0", name="ck_runs_next_run_sequence_positive"),
@@ -344,6 +345,18 @@ validation_attempts = Table(
     Column("created_at", UTCDateTime(), nullable=False),
     Column("completed_at", UTCDateTime()),
     UniqueConstraint("run_id", "attempt_number"),
+)
+
+completion_proposals = Table(
+    "completion_proposals",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("run_id", ForeignKey("runs.id"), nullable=False, unique=True),
+    Column("assistant_message_id", ForeignKey("messages.id"), nullable=False),
+    Column("summary", String, nullable=False),
+    Column("claimed_files_json", JSON, nullable=False),
+    Column("notes", String),
+    Column("created_at", UTCDateTime(), nullable=False),
 )
 
 validation_command_results = Table(

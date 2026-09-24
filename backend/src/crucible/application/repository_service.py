@@ -1,11 +1,13 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from uuid import UUID
 
+from crucible.application.errors import RepositoryNotFound
 from crucible.application.ports import UnitOfWork
 from crucible.domain.clock import Clock
 from crucible.domain.ids import new_id
-from crucible.domain.repository import Repository
+from crucible.domain.repository import Repository, RepositorySettings
 from crucible.workspaces.git import GitClient
 
 
@@ -54,3 +56,23 @@ class RepositoryService:
                 )
             )
         return tuple(results)
+
+    async def update_settings(
+        self, repository_id: UUID, settings: RepositorySettings
+    ) -> RegisteredRepository:
+        async with self._unit_of_work() as uow:
+            repository = await uow.repositories.get(repository_id)
+            if repository is None:
+                raise RepositoryNotFound(f"Repository {repository_id} was not found")
+            repository = replace(repository, settings=settings)
+            await uow.repositories.update(repository)
+            await uow.commit()
+        resolved = await self._git.resolve_repository(repository.root_path)
+        return RegisteredRepository(repository, resolved.head_revision, created=False)
+
+    async def get(self, repository_id: UUID) -> Repository:
+        async with self._unit_of_work() as uow:
+            repository = await uow.repositories.get(repository_id)
+        if repository is None:
+            raise RepositoryNotFound(f"Repository {repository_id} was not found")
+        return repository

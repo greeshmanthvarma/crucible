@@ -33,6 +33,7 @@ async def test_sqlite_policy_and_migrated_table_set(database: Database) -> None:
         "compactions",
         "validation_attempts",
         "validation_command_results",
+        "completion_proposals",
         "result_revisions",
         "integrations",
         "alembic_version",

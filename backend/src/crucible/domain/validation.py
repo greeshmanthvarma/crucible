@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 
@@ -6,6 +6,8 @@ from crucible.domain.clock import require_utc
 from crucible.domain.ids import (
     ApprovalId,
     ArtifactId,
+    CompletionProposalId,
+    MessageId,
     RunId,
     ToolCallId,
     ValidationAttemptId,
@@ -26,9 +28,16 @@ class ValidationStatus(StrEnum):
 
 @dataclass(frozen=True)
 class CompletionProposal:
+    id: CompletionProposalId
+    run_id: RunId
+    assistant_message_id: MessageId
     summary: str
-    claimed_files: tuple[str, ...] = ()
-    notes: str | None = None
+    claimed_files: tuple[str, ...]
+    notes: str | None
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        require_utc(self.created_at)
 
 
 @dataclass(frozen=True)
@@ -44,6 +53,11 @@ class ValidationAttempt:
         require_utc(self.created_at, self.completed_at)
         if self.attempt_number <= 0:
             raise ValueError("Validation attempt number must be positive")
+
+    def finish(self, status: ValidationStatus, now: datetime) -> "ValidationAttempt":
+        if status in (ValidationStatus.PENDING, ValidationStatus.RUNNING):
+            raise ValueError("Validation terminal status required")
+        return replace(self, status=status, completed_at=now)
 
 
 @dataclass(frozen=True)

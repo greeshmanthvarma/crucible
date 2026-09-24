@@ -14,6 +14,7 @@ RunSettingsSnapshot = RepositorySettings
 class RunStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
+    VALIDATING = "validating"
     COMPLETED = "completed"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
@@ -92,7 +93,8 @@ class Run:
         )
 
     def complete(self, *, now: datetime) -> Self:
-        self._require_status(RunStatus.RUNNING, RunStatus.COMPLETED)
+        if self.status not in (RunStatus.RUNNING, RunStatus.VALIDATING):
+            self._require_status(RunStatus.RUNNING, RunStatus.COMPLETED)
         return replace(
             self,
             status=RunStatus.COMPLETED,
@@ -100,8 +102,13 @@ class Run:
             completed_at=now,
         )
 
+    def start_validation(self) -> Self:
+        self._require_status(RunStatus.RUNNING, RunStatus.VALIDATING)
+        return replace(self, status=RunStatus.VALIDATING)
+
     def fail(self, code: str, detail: str, *, now: datetime) -> Self:
-        self._require_status(RunStatus.RUNNING, RunStatus.FAILED)
+        if self.status not in (RunStatus.RUNNING, RunStatus.VALIDATING):
+            self._require_status(RunStatus.RUNNING, RunStatus.FAILED)
         return replace(
             self,
             status=RunStatus.FAILED,
@@ -112,7 +119,8 @@ class Run:
         )
 
     def interrupt(self, code: str, detail: str, *, now: datetime) -> Self:
-        self._require_status(RunStatus.RUNNING, RunStatus.INTERRUPTED)
+        if self.status not in (RunStatus.RUNNING, RunStatus.VALIDATING):
+            self._require_status(RunStatus.RUNNING, RunStatus.INTERRUPTED)
         return replace(
             self,
             status=RunStatus.INTERRUPTED,
@@ -123,14 +131,22 @@ class Run:
         )
 
     def request_cancel(self, code: str, now: datetime) -> Self:
-        if self.status not in (RunStatus.QUEUED, RunStatus.RUNNING):
+        if self.status not in (
+            RunStatus.QUEUED,
+            RunStatus.RUNNING,
+            RunStatus.VALIDATING,
+        ):
             return self
         if self.cancel_requested_at is not None:
             return self
         return replace(self, cancel_requested_at=now, cancel_code=code)
 
     def cancel(self, code: str, detail: str, *, now: datetime) -> Self:
-        if self.status not in (RunStatus.QUEUED, RunStatus.RUNNING):
+        if self.status not in (
+            RunStatus.QUEUED,
+            RunStatus.RUNNING,
+            RunStatus.VALIDATING,
+        ):
             return self
         return replace(
             self,

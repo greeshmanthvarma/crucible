@@ -73,6 +73,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/repositories/{repository_id}/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update Repository Settings */
+        put: operations["update_repository_settings_api_repositories__repository_id__settings_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/repositories/{repository_id}/tasks": {
         parameters: {
             query?: never;
@@ -315,6 +332,17 @@ export interface components {
             /** Pids */
             pids: number;
         };
+        /** CommandLimitsSettings */
+        CommandLimitsSettings: {
+            /** Cpus */
+            cpus: number;
+            /** Memorybytes */
+            memoryBytes: number;
+            /** Outputbytes */
+            outputBytes: number;
+            /** Pids */
+            pids: number;
+        };
         /** ContextManifestSummary */
         ContextManifestSummary: {
             /** Estimatedtokens */
@@ -422,6 +450,59 @@ export interface components {
             id: string;
             /** Rootpath */
             rootPath: string;
+            settings: components["schemas"]["RepositorySettingsResponse"];
+        };
+        /** RepositorySettingsRequest */
+        RepositorySettingsRequest: {
+            /** Compactionattemptlimit */
+            compactionAttemptLimit?: number | null;
+            /** Compactionmodel */
+            compactionModel?: string | null;
+            /** Compactionpromptversion */
+            compactionPromptVersion?: string | null;
+            /** Compactionthreshold */
+            compactionThreshold?: number | null;
+            /** Defaultcwd */
+            defaultCwd?: string | null;
+            /** Modelinputlimit */
+            modelInputLimit?: number | null;
+            /** Modeloutputreserve */
+            modelOutputReserve?: number | null;
+            /** Sandboximage */
+            sandboxImage?: string | null;
+            /** Sandboxnetwork */
+            sandboxNetwork?: ("none" | "outbound") | null;
+            /** Validationcommands */
+            validationCommands?: components["schemas"]["ValidationCommandSettings"][] | null;
+            /** Validationrepairlimit */
+            validationRepairLimit?: number | null;
+        };
+        /** RepositorySettingsResponse */
+        RepositorySettingsResponse: {
+            /** Compactionattemptlimit */
+            compactionAttemptLimit: number;
+            /** Compactionmodel */
+            compactionModel: string | null;
+            /** Compactionpromptversion */
+            compactionPromptVersion: string;
+            /** Compactionthreshold */
+            compactionThreshold: number;
+            /** Defaultcwd */
+            defaultCwd: string;
+            /** Modelinputlimit */
+            modelInputLimit: number;
+            /** Modeloutputreserve */
+            modelOutputReserve: number;
+            /** Sandboximage */
+            sandboxImage: string;
+            /** Sandboxnetwork */
+            sandboxNetwork: string;
+            /** Schemaversion */
+            schemaVersion: number;
+            /** Validationcommands */
+            validationCommands: components["schemas"]["ValidationCommandSettings"][];
+            /** Validationrepairlimit */
+            validationRepairLimit: number;
         };
         /** StepTraceResponse */
         StepTraceResponse: {
@@ -581,6 +662,31 @@ export interface components {
              */
             toolCallId: string;
         };
+        /** ValidationCommandSettings */
+        ValidationCommandSettings: {
+            /** Arguments */
+            arguments: string[];
+            /** Cwd */
+            cwd: string;
+            /** Environment */
+            environment: {
+                [key: string]: string;
+            };
+            /** Executable */
+            executable: string;
+            /** Image */
+            image: string;
+            limits: components["schemas"]["CommandLimitsSettings"];
+            /**
+             * Network
+             * @enum {string}
+             */
+            network: "none" | "outbound";
+            /** Reason */
+            reason: string;
+            /** Timeoutseconds */
+            timeoutSeconds: number;
+        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -734,6 +840,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["RegisterRepositoryRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepositoryResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_repository_settings_api_repositories__repository_id__settings_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                repository_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RepositorySettingsRequest"];
             };
         };
         responses: {

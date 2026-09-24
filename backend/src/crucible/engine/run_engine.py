@@ -3,6 +3,7 @@ from collections.abc import Callable
 from uuid import UUID
 
 from crucible.application.ports import EventNotifier, UnitOfWork
+from crucible.application.validation_service import ValidationService
 from crucible.context.manager import (
     ContextLimitExceeded,
     ContextManager,
@@ -20,6 +21,7 @@ from crucible.domain.events import EventType
 from crucible.domain.ids import new_id
 from crucible.domain.run import Run
 from crucible.domain.steps import Step
+from crucible.domain.validation import CompletionProposal, ValidationStatus
 from crucible.engine.active_time import ActiveTimeBudget
 from crucible.engine.gateway import (
     CompleteToolCall,
@@ -37,7 +39,7 @@ from crucible.engine.journal import (
     JournalMutationRejected,
     RunJournal,
     claim_run_mutation,
-    completed_message_mutation,
+    complete_run_mutation,
     message_completed_mutation,
     terminal_run_mutation,
 )
@@ -60,6 +62,7 @@ class RunEngine:
         journal: RunJournal | None = None,
         context_manager: ContextManager | None = None,
         dispatcher: ToolDispatcher | None = None,
+        validation_service: ValidationService | None = None,
         max_steps: int = 20,
         max_tool_calls: int = 100,
         max_model_tokens: int = 200_000,
@@ -74,6 +77,9 @@ class RunEngine:
         registry = default_registry()
         self._dispatcher = dispatcher or ToolDispatcher(
             registry, unit_of_work, clock, journal=self._journal
+        )
+        self._validation = validation_service or ValidationService(
+            unit_of_work, clock, self._dispatcher
         )
         self._max_steps = max_steps
         self._max_tool_calls = max_tool_calls
@@ -263,7 +269,40 @@ class RunEngine:
                     "Model stopped for Tool Calls without emitting a call"
                 )
             await self._record_step(active_step.complete(now), EventType.STEP_COMPLETED)
-            await self._journal.record(completed_message_mutation(run, assistant, now))
+            await self._journal.record(message_completed_mutation(run, assistant))
+            await self._validation.record_proposal(
+                CompletionProposal(
+                    new_id(),
+                    run.id,
+                    assistant.id,
+                    "".join(text),
+                    (),
+                    "".join(reasoning) or None,
+                    now,
+                )
+            )
+            validation = await self._validation.validate(run.id)
+            async with self._unit_of_work() as uow:
+                validating_run = await uow.runs.get(run.id)
+            if validating_run is None:
+                raise ValueError(f"Run not found: {run.id}")
+            if validation.status in (
+                ValidationStatus.PASSED,
+                ValidationStatus.NOT_CONFIGURED,
+            ):
+                await self._journal.record(
+                    complete_run_mutation(validating_run, self._clock.now())
+                )
+            else:
+                await self._journal.record(
+                    terminal_run_mutation(
+                        validating_run,
+                        type=EventType.RUN_FAILED,
+                        code="validation_failed",
+                        detail=f"Validation ended with {validation.status.value}",
+                        now=self._clock.now(),
+                    )
+                )
             return False, 0, model_tokens
 
         tools_step = active_step.activate_tools(now)

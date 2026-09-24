@@ -18,7 +18,11 @@ from crucible.domain.run import Run
 from crucible.domain.steps import Step
 from crucible.domain.task import Task
 from crucible.domain.tools import ToolCall, ToolResult
-from crucible.domain.validation import ValidationAttempt, ValidationCommandResult
+from crucible.domain.validation import (
+    CompletionProposal,
+    ValidationAttempt,
+    ValidationCommandResult,
+)
 
 
 class RepositoryStore(Protocol):
@@ -26,6 +30,7 @@ class RepositoryStore(Protocol):
     async def get_by_root(self, root: Path) -> Repository | None: ...
     async def list(self) -> tuple[Repository, ...]: ...
     async def get(self, repository_id: UUID) -> Repository | None: ...
+    async def update(self, repository: Repository) -> None: ...
 
 
 class TaskStore(Protocol):
@@ -37,6 +42,7 @@ class TaskStore(Protocol):
 
 class MessageStore(Protocol):
     async def add(self, message: Message) -> Message: ...
+    async def get(self, message_id: UUID) -> Message | None: ...
     async def list_for_task(self, task_id: UUID) -> tuple[Message, ...]: ...
 
 
@@ -139,10 +145,20 @@ class CompactionStore(Protocol):
 class ValidationAttemptStore(Protocol):
     async def add(self, value: ValidationAttempt) -> None: ...
     async def get(self, value_id: UUID) -> ValidationAttempt | None: ...
+    async def update(self, value: ValidationAttempt) -> None: ...
+    async def list_for_run(self, run_id: UUID) -> tuple[ValidationAttempt, ...]: ...
 
 
 class ValidationCommandResultStore(Protocol):
     async def add(self, value: ValidationCommandResult) -> None: ...
+    async def list_for_attempt(
+        self, attempt_id: UUID
+    ) -> tuple[ValidationCommandResult, ...]: ...
+
+
+class CompletionProposalStore(Protocol):
+    async def add(self, value: CompletionProposal) -> None: ...
+    async def get_for_run(self, run_id: UUID) -> CompletionProposal | None: ...
 
 
 class ResultRevisionStore(Protocol):
@@ -182,6 +198,7 @@ class UnitOfWork(Protocol):
     compactions: CompactionStore
     validation_attempts: ValidationAttemptStore
     validation_command_results: ValidationCommandResultStore
+    completion_proposals: CompletionProposalStore
     result_revisions: ResultRevisionStore
     integrations: IntegrationStore
 
