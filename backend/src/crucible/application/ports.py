@@ -8,14 +8,17 @@ from crucible.application.idempotency import IdempotencyRecord
 from crucible.context.manifests import ContextManifest
 from crucible.domain.approvals import Approval
 from crucible.domain.artifacts import Artifact
+from crucible.domain.compaction import Compaction
 from crucible.domain.conversation import Message
 from crucible.domain.events import Event
 from crucible.domain.repository import Repository
 from crucible.domain.resources import ExternalResource
+from crucible.domain.results import Integration, ResultRevision
 from crucible.domain.run import Run
 from crucible.domain.steps import Step
 from crucible.domain.task import Task
 from crucible.domain.tools import ToolCall, ToolResult
+from crucible.domain.validation import ValidationAttempt, ValidationCommandResult
 
 
 class RepositoryStore(Protocol):
@@ -126,6 +129,30 @@ class IdempotencyStore(Protocol):
     async def get(self, scope: str, key: str) -> IdempotencyRecord | None: ...
 
 
+class CompactionStore(Protocol):
+    async def add(self, value: Compaction) -> None: ...
+    async def get(self, value_id: UUID) -> Compaction | None: ...
+
+
+class ValidationAttemptStore(Protocol):
+    async def add(self, value: ValidationAttempt) -> None: ...
+    async def get(self, value_id: UUID) -> ValidationAttempt | None: ...
+
+
+class ValidationCommandResultStore(Protocol):
+    async def add(self, value: ValidationCommandResult) -> None: ...
+
+
+class ResultRevisionStore(Protocol):
+    async def add(self, value: ResultRevision) -> None: ...
+    async def get(self, value_id: UUID) -> ResultRevision | None: ...
+
+
+class IntegrationStore(Protocol):
+    async def add(self, value: Integration) -> None: ...
+    async def get(self, value_id: UUID) -> Integration | None: ...
+
+
 class RunSupervisor(Protocol):
     async def submit(self, run_id: UUID) -> None: ...
     async def reconcile(self) -> None: ...
@@ -150,6 +177,11 @@ class UnitOfWork(Protocol):
     runs: RunStore
     events: EventStore
     idempotency: IdempotencyStore
+    compactions: CompactionStore
+    validation_attempts: ValidationAttemptStore
+    validation_command_results: ValidationCommandResultStore
+    result_revisions: ResultRevisionStore
+    integrations: IntegrationStore
 
     async def __aenter__(self) -> Self: ...
     async def __aexit__(

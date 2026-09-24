@@ -14,6 +14,13 @@ type ExecutionId = UUID
 type ApprovalId = UUID
 type ArtifactId = UUID
 type ExternalResourceId = UUID
+type CompactionId = UUID
+type ValidationAttemptId = UUID
+type ValidationCommandResultId = UUID
+type CompletionProposalId = UUID
+type ResultRevisionId = UUID
+type IntegrationId = UUID
+type AuthSessionId = UUID
 
 
 def new_id() -> UUID:

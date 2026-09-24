@@ -46,6 +46,7 @@ repositories = Table(
     Column("id", String(36), primary_key=True),
     Column("root_path", String, nullable=False, unique=True),
     Column("created_at", UTCDateTime(), nullable=False),
+    Column("settings_json", JSON, nullable=False, server_default="{}"),
 )
 
 tasks = Table(
@@ -91,6 +92,7 @@ runs = Table(
     Column("completed_at", UTCDateTime()),
     Column("cancel_requested_at", UTCDateTime()),
     Column("cancel_code", String),
+    Column("settings_snapshot_json", JSON, nullable=False, server_default="{}"),
     CheckConstraint(
         "status IN ('queued','running','completed','failed','interrupted','cancelled')",
         name="ck_runs_status",
@@ -304,4 +306,94 @@ idempotency_records = Table(
     Column("response_json", JSON, nullable=False),
     Column("created_at", UTCDateTime(), nullable=False),
     UniqueConstraint("scope", "key"),
+)
+
+compactions = Table(
+    "compactions",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("task_id", ForeignKey("tasks.id"), nullable=False),
+    Column("source_start_sequence", Integer, nullable=False),
+    Column("source_end_sequence", Integer, nullable=False),
+    Column("retained_tail_start_sequence", Integer, nullable=False),
+    Column("summary_artifact_id", ForeignKey("artifacts.id"), nullable=False),
+    Column("rendered_summary", String, nullable=False),
+    Column("previous_compaction_id", ForeignKey("compactions.id")),
+    Column("model", String, nullable=False),
+    Column("parameters_json", JSON, nullable=False),
+    Column("prompt_version", String, nullable=False),
+    Column("input_tokens", Integer, nullable=False),
+    Column("output_tokens", Integer, nullable=False),
+    Column("resulting_context_estimate", Integer, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    UniqueConstraint("task_id", "source_end_sequence"),
+    CheckConstraint(
+        "source_start_sequence > 0 AND source_end_sequence >= source_start_sequence"
+    ),
+    CheckConstraint("retained_tail_start_sequence > source_end_sequence"),
+)
+
+validation_attempts = Table(
+    "validation_attempts",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("run_id", ForeignKey("runs.id"), nullable=False),
+    Column("attempt_number", Integer, nullable=False),
+    Column("status", String, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    Column("completed_at", UTCDateTime()),
+    UniqueConstraint("run_id", "attempt_number"),
+)
+
+validation_command_results = Table(
+    "validation_command_results",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column(
+        "validation_attempt_id", ForeignKey("validation_attempts.id"), nullable=False
+    ),
+    Column("command_sequence", Integer, nullable=False),
+    Column("status", String, nullable=False),
+    Column("approval_id", ForeignKey("approvals.id")),
+    Column("tool_call_id", ForeignKey("tool_calls.id")),
+    Column("artifact_id", ForeignKey("artifacts.id")),
+    Column("exit_code", Integer),
+    Column("summary", String, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    Column("completed_at", UTCDateTime()),
+    UniqueConstraint("validation_attempt_id", "command_sequence"),
+)
+
+result_revisions = Table(
+    "result_revisions",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("task_id", ForeignKey("tasks.id"), nullable=False),
+    Column("commit_sha", String(40), nullable=False, unique=True),
+    Column("parent_revision", String(40), nullable=False),
+    Column("previous_result_revision_id", ForeignKey("result_revisions.id")),
+    Column("diff_artifact_id", ForeignKey("artifacts.id"), nullable=False),
+    Column("validation_snapshot_json", JSON, nullable=False),
+    Column("summary", String, nullable=False),
+    Column("created_by", String, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+)
+
+integrations = Table(
+    "integrations",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("result_revision_id", ForeignKey("result_revisions.id"), nullable=False),
+    Column("repository_id", ForeignKey("repositories.id"), nullable=False),
+    Column("target_ref", String, nullable=False),
+    Column("expected_target_revision", String(40), nullable=False),
+    Column("idempotency_key", String, nullable=False),
+    Column("status", String, nullable=False),
+    Column("observed_before_revision", String(40)),
+    Column("observed_after_revision", String(40)),
+    Column("failure_code", String),
+    Column("failure_detail", String),
+    Column("created_at", UTCDateTime(), nullable=False),
+    Column("completed_at", UTCDateTime()),
+    UniqueConstraint("result_revision_id", "idempotency_key"),
 )

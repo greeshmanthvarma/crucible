@@ -13,6 +13,7 @@ from crucible.context.manifests import ContextManifest
 from crucible.domain.approvals import Approval, ApprovalStatus
 from crucible.domain.artifacts import Artifact
 from crucible.domain.commands import CommandSpec
+from crucible.domain.compaction import Compaction
 from crucible.domain.conversation import (
     Message,
     MessagePart,
@@ -21,12 +22,13 @@ from crucible.domain.conversation import (
     MessageStatus,
 )
 from crucible.domain.events import Event, EventType
-from crucible.domain.repository import Repository
+from crucible.domain.repository import Repository, RepositorySettings
 from crucible.domain.resources import (
     ExternalResource,
     ExternalResourceKind,
     ExternalResourceStatus,
 )
+from crucible.domain.results import Integration, IntegrationStatus, ResultRevision
 from crucible.domain.run import Run, RunStatus
 from crucible.domain.steps import Step, StepStatus
 from crucible.domain.task import Task, TaskStatus
@@ -37,7 +39,77 @@ from crucible.domain.tools import (
     ToolResult,
     ToolResultStatus,
 )
+from crucible.domain.validation import (
+    ValidationAttempt,
+    ValidationCommandResult,
+    ValidationStatus,
+)
 from crucible.storage import models
+
+
+def _settings_json(settings: RepositorySettings) -> dict[str, object]:
+    return {
+        "validation_commands": [
+            command.as_dict() for command in settings.validation_commands
+        ],
+        "sandbox_image": settings.sandbox_image,
+        "sandbox_network": settings.sandbox_network,
+        "validation_repair_limit": settings.validation_repair_limit,
+        "default_cwd": settings.default_cwd,
+        "compaction_threshold": settings.compaction_threshold,
+        "compaction_model": settings.compaction_model,
+        "compaction_prompt_version": settings.compaction_prompt_version,
+        "compaction_attempt_limit": settings.compaction_attempt_limit,
+        "model_input_limit": settings.model_input_limit,
+        "model_output_reserve": settings.model_output_reserve,
+        "schema_version": settings.schema_version,
+    }
+
+
+def _settings_from_json(value: object) -> RepositorySettings:
+    data = cast(dict[str, object], value or {})
+    defaults = RepositorySettings()
+    return RepositorySettings(
+        validation_commands=tuple(
+            CommandSpec.from_dict(item)
+            for item in cast(
+                list[dict[str, object]], data.get("validation_commands", [])
+            )
+        ),
+        sandbox_image=str(data.get("sandbox_image", defaults.sandbox_image)),
+        sandbox_network=str(data.get("sandbox_network", defaults.sandbox_network)),
+        validation_repair_limit=int(
+            cast(
+                int,
+                data.get("validation_repair_limit", defaults.validation_repair_limit),
+            )
+        ),
+        default_cwd=str(data.get("default_cwd", defaults.default_cwd)),
+        compaction_threshold=float(
+            cast(float, data.get("compaction_threshold", defaults.compaction_threshold))
+        ),
+        compaction_model=cast(
+            str | None, data.get("compaction_model", defaults.compaction_model)
+        ),
+        compaction_prompt_version=str(
+            data.get("compaction_prompt_version", defaults.compaction_prompt_version)
+        ),
+        compaction_attempt_limit=int(
+            cast(
+                int,
+                data.get("compaction_attempt_limit", defaults.compaction_attempt_limit),
+            )
+        ),
+        model_input_limit=int(
+            cast(int, data.get("model_input_limit", defaults.model_input_limit))
+        ),
+        model_output_reserve=int(
+            cast(int, data.get("model_output_reserve", defaults.model_output_reserve))
+        ),
+        schema_version=int(
+            cast(int, data.get("schema_version", defaults.schema_version))
+        ),
+    )
 
 
 class RepositoryRepository:
@@ -50,6 +122,7 @@ class RepositoryRepository:
                 id=str(repository.id),
                 root_path=str(repository.root_path),
                 created_at=repository.created_at,
+                settings_json=_settings_json(repository.settings),
             )
         )
         await self._session.flush()
@@ -61,6 +134,7 @@ class RepositoryRepository:
                 id=str(repository.id),
                 root_path=str(repository.root_path),
                 created_at=repository.created_at,
+                settings_json=_settings_json(repository.settings),
             )
             .on_conflict_do_nothing(index_elements=["root_path"])
         )
@@ -85,6 +159,7 @@ class RepositoryRepository:
             id=UUID(row["id"]),
             root_path=Path(row["root_path"]),
             created_at=row["created_at"],
+            settings=_settings_from_json(row["settings_json"]),
         )
 
     async def get(self, repository_id: UUID) -> Repository | None:
@@ -105,6 +180,7 @@ class RepositoryRepository:
             id=UUID(row["id"]),
             root_path=Path(row["root_path"]),
             created_at=row["created_at"],
+            settings=_settings_from_json(row["settings_json"]),
         )
 
     async def list(self) -> tuple[Repository, ...]:
@@ -120,6 +196,7 @@ class RepositoryRepository:
                 id=UUID(row["id"]),
                 root_path=Path(row["root_path"]),
                 created_at=row["created_at"],
+                settings=_settings_from_json(row["settings_json"]),
             )
             for row in rows
         )
@@ -245,6 +322,7 @@ class RunRepository:
                 completed_at=run.completed_at,
                 cancel_requested_at=run.cancel_requested_at,
                 cancel_code=run.cancel_code,
+                settings_snapshot_json=_settings_json(run.settings_snapshot),
             )
         )
         await self._session.flush()
@@ -276,6 +354,7 @@ class RunRepository:
                 completed_at=run.completed_at,
                 cancel_requested_at=run.cancel_requested_at,
                 cancel_code=run.cancel_code,
+                settings_snapshot_json=_settings_json(run.settings_snapshot),
             )
         )
         await self._session.flush()
@@ -347,6 +426,7 @@ class RunRepository:
             completed_at=cast(datetime | None, values["completed_at"]),
             cancel_requested_at=cast(datetime | None, values["cancel_requested_at"]),
             cancel_code=cast(str | None, values["cancel_code"]),
+            settings_snapshot=_settings_from_json(values["settings_snapshot_json"]),
         )
 
     async def claim_queued(
@@ -1246,4 +1326,245 @@ class IdempotencyRepository:
             row["response_status"],
             row["response_json"],
             row["created_at"],
+        )
+
+
+class CompactionRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, value: Compaction) -> None:
+        await self._session.execute(
+            insert(models.compactions).values(
+                id=str(value.id),
+                task_id=str(value.task_id),
+                source_start_sequence=value.source_start_sequence,
+                source_end_sequence=value.source_end_sequence,
+                retained_tail_start_sequence=value.retained_tail_start_sequence,
+                summary_artifact_id=str(value.summary_artifact_id),
+                rendered_summary=value.rendered_summary,
+                previous_compaction_id=str(value.previous_compaction_id)
+                if value.previous_compaction_id
+                else None,
+                model=value.model,
+                parameters_json=value.parameters,
+                prompt_version=value.prompt_version,
+                input_tokens=value.input_tokens,
+                output_tokens=value.output_tokens,
+                resulting_context_estimate=value.resulting_context_estimate,
+                created_at=value.created_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get(self, value_id: UUID) -> Compaction | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.compactions).where(
+                        models.compactions.c.id == str(value_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        return Compaction(
+            UUID(row["id"]),
+            UUID(row["task_id"]),
+            row["source_start_sequence"],
+            row["source_end_sequence"],
+            row["retained_tail_start_sequence"],
+            UUID(row["summary_artifact_id"]),
+            row["rendered_summary"],
+            UUID(row["previous_compaction_id"])
+            if row["previous_compaction_id"]
+            else None,
+            row["model"],
+            row["parameters_json"],
+            row["prompt_version"],
+            row["input_tokens"],
+            row["output_tokens"],
+            row["resulting_context_estimate"],
+            row["created_at"],
+        )
+
+
+class ValidationAttemptRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, value: ValidationAttempt) -> None:
+        await self._session.execute(
+            insert(models.validation_attempts).values(
+                id=str(value.id),
+                run_id=str(value.run_id),
+                attempt_number=value.attempt_number,
+                status=value.status,
+                created_at=value.created_at,
+                completed_at=value.completed_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get(self, value_id: UUID) -> ValidationAttempt | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.validation_attempts).where(
+                        models.validation_attempts.c.id == str(value_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return (
+            None
+            if row is None
+            else ValidationAttempt(
+                UUID(row["id"]),
+                UUID(row["run_id"]),
+                row["attempt_number"],
+                ValidationStatus(row["status"]),
+                row["created_at"],
+                row["completed_at"],
+            )
+        )
+
+
+class ValidationCommandResultRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, value: ValidationCommandResult) -> None:
+        await self._session.execute(
+            insert(models.validation_command_results).values(
+                id=str(value.id),
+                validation_attempt_id=str(value.validation_attempt_id),
+                command_sequence=value.command_sequence,
+                status=value.status,
+                approval_id=str(value.approval_id) if value.approval_id else None,
+                tool_call_id=str(value.tool_call_id) if value.tool_call_id else None,
+                artifact_id=str(value.artifact_id) if value.artifact_id else None,
+                exit_code=value.exit_code,
+                summary=value.summary,
+                created_at=value.created_at,
+                completed_at=value.completed_at,
+            )
+        )
+        await self._session.flush()
+
+
+class ResultRevisionRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, value: ResultRevision) -> None:
+        await self._session.execute(
+            insert(models.result_revisions).values(
+                id=str(value.id),
+                task_id=str(value.task_id),
+                commit_sha=value.commit_sha,
+                parent_revision=value.parent_revision,
+                previous_result_revision_id=str(value.previous_result_revision_id)
+                if value.previous_result_revision_id
+                else None,
+                diff_artifact_id=str(value.diff_artifact_id),
+                validation_snapshot_json=value.validation_snapshot,
+                summary=value.summary,
+                created_by=value.created_by,
+                created_at=value.created_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get(self, value_id: UUID) -> ResultRevision | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.result_revisions).where(
+                        models.result_revisions.c.id == str(value_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return (
+            None
+            if row is None
+            else ResultRevision(
+                UUID(row["id"]),
+                UUID(row["task_id"]),
+                row["commit_sha"],
+                row["parent_revision"],
+                UUID(row["previous_result_revision_id"])
+                if row["previous_result_revision_id"]
+                else None,
+                UUID(row["diff_artifact_id"]),
+                row["validation_snapshot_json"],
+                row["summary"],
+                row["created_by"],
+                row["created_at"],
+            )
+        )
+
+
+class IntegrationRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, value: Integration) -> None:
+        await self._session.execute(
+            insert(models.integrations).values(
+                id=str(value.id),
+                result_revision_id=str(value.result_revision_id),
+                repository_id=str(value.repository_id),
+                target_ref=value.target_ref,
+                expected_target_revision=value.expected_target_revision,
+                idempotency_key=value.idempotency_key,
+                status=value.status,
+                observed_before_revision=value.observed_before_revision,
+                observed_after_revision=value.observed_after_revision,
+                failure_code=value.failure_code,
+                failure_detail=value.failure_detail,
+                created_at=value.created_at,
+                completed_at=value.completed_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get(self, value_id: UUID) -> Integration | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.integrations).where(
+                        models.integrations.c.id == str(value_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return (
+            None
+            if row is None
+            else Integration(
+                UUID(row["id"]),
+                UUID(row["result_revision_id"]),
+                UUID(row["repository_id"]),
+                row["target_ref"],
+                row["expected_target_revision"],
+                row["idempotency_key"],
+                IntegrationStatus(row["status"]),
+                row["observed_before_revision"],
+                row["observed_after_revision"],
+                row["failure_code"],
+                row["failure_detail"],
+                row["created_at"],
+                row["completed_at"],
+            )
         )

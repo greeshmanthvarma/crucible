@@ -6,6 +6,9 @@ from typing import Self
 from crucible.domain.clock import require_utc
 from crucible.domain.errors import InvalidTransition
 from crucible.domain.ids import ExecutionId, MessageId, RunId, TaskId
+from crucible.domain.repository import RepositorySettings
+
+RunSettingsSnapshot = RepositorySettings
 
 
 class RunStatus(StrEnum):
@@ -33,6 +36,7 @@ class Run:
     completed_at: datetime | None
     cancel_requested_at: datetime | None = None
     cancel_code: str | None = None
+    settings_snapshot: RunSettingsSnapshot = RunSettingsSnapshot()
 
     def __post_init__(self) -> None:
         require_utc(
@@ -52,6 +56,7 @@ class Run:
         task_id: TaskId,
         triggering_message_id: MessageId | None,
         created_at: datetime,
+        settings_snapshot: RunSettingsSnapshot | None = None,
     ) -> Self:
         return cls(
             id=run_id,
@@ -66,6 +71,7 @@ class Run:
             created_at=created_at,
             started_at=None,
             completed_at=None,
+            settings_snapshot=settings_snapshot or RunSettingsSnapshot(),
         )
 
     def claim(
