@@ -69,6 +69,11 @@ class ApprovalConflict(ApplicationError):
     status_code = 409
 
 
+class ArtifactNotFound(ApplicationError):
+    code = "artifact_not_found"
+    status_code = 404
+
+
 class TaskNotActive(ApplicationError):
     code = "task_not_active"
     status_code = 409

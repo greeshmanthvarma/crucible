@@ -8,12 +8,14 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
 from crucible.application.approval_service import ApprovalService
+from crucible.application.artifact_service import ArtifactService
 from crucible.application.event_service import TaskEventSource
 from crucible.application.message_service import MessageService
 from crucible.application.ports import UnitOfWork
 from crucible.application.reconciliation import StartupReconciler
 from crucible.application.repository_service import RepositoryService
 from crucible.application.task_service import TaskService
+from crucible.artifacts.store import LocalArtifactStore
 from crucible.context.manager import ContextManager, SimpleTokenEstimator
 from crucible.domain.clock import SystemClock
 from crucible.engine.approval_broker import InMemoryApprovalBroker
@@ -40,6 +42,7 @@ class ApplicationContainer:
     supervisor: LocalRunSupervisor
     event_source: TaskEventSource
     approval_service: ApprovalService
+    artifact_service: ArtifactService
     reconciler: StartupReconciler
     unit_of_work: Callable[[], UnitOfWork]
 
@@ -100,6 +103,9 @@ class ApplicationContainer:
             event_source=TaskEventSource(unit_of_work, notifier),
             approval_service=ApprovalService(
                 unit_of_work, clock, approval_broker, notifier
+            ),
+            artifact_service=ArtifactService(
+                LocalArtifactStore(data_dir / "artifacts", clock), unit_of_work
             ),
             reconciler=StartupReconciler(workspaces, unit_of_work, clock, notifier),
             unit_of_work=unit_of_work,
