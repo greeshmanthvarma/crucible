@@ -16,6 +16,7 @@ from crucible.application.message_service import MessageService
 from crucible.application.ports import UnitOfWork
 from crucible.application.reconciliation import StartupReconciler
 from crucible.application.repository_service import RepositoryService
+from crucible.application.run_service import RunService
 from crucible.application.task_service import TaskService
 from crucible.artifacts.store import LocalArtifactStore
 from crucible.context.manager import ContextManager, SimpleTokenEstimator
@@ -50,6 +51,7 @@ class ApplicationContainer:
     event_source: TaskEventSource
     approval_service: ApprovalService
     artifact_service: ArtifactService
+    run_service: RunService
     reconciler: StartupReconciler
     unit_of_work: Callable[[], UnitOfWork]
 
@@ -113,8 +115,14 @@ class ApplicationContainer:
             ),
         )
         supervisor = LocalRunSupervisor(
-            engine, unit_of_work, clock, notifier, journal=journal
+            engine,
+            unit_of_work,
+            clock,
+            notifier,
+            journal=journal,
+            approval_broker=approval_broker,
         )
+        run_service = RunService(unit_of_work, clock, supervisor, notifier)
         return cls(
             database=database,
             repository_service=RepositoryService(git, unit_of_work, clock),
@@ -126,6 +134,7 @@ class ApplicationContainer:
             event_source=TaskEventSource(unit_of_work, notifier),
             approval_service=approval_service,
             artifact_service=artifact_service,
+            run_service=run_service,
             reconciler=StartupReconciler(
                 workspaces, unit_of_work, clock, notifier, resource_manager
             ),

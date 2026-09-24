@@ -45,6 +45,11 @@ class TaskNotFound(ApplicationError):
     status_code = 404
 
 
+class RunNotFound(ApplicationError):
+    code = "run_not_found"
+    status_code = 404
+
+
 class WorkspaceProvisioningFailed(ApplicationError):
     code = "workspace_provisioning_failed"
 

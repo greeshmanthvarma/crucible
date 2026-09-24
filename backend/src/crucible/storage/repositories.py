@@ -243,6 +243,8 @@ class RunRepository:
                 created_at=run.created_at,
                 started_at=run.started_at,
                 completed_at=run.completed_at,
+                cancel_requested_at=run.cancel_requested_at,
+                cancel_code=run.cancel_code,
             )
         )
         await self._session.flush()
@@ -272,6 +274,8 @@ class RunRepository:
                 outcome_detail=run.outcome_detail,
                 started_at=run.started_at,
                 completed_at=run.completed_at,
+                cancel_requested_at=run.cancel_requested_at,
+                cancel_code=run.cancel_code,
             )
         )
         await self._session.flush()
@@ -331,6 +335,8 @@ class RunRepository:
             created_at=cast(datetime, values["created_at"]),
             started_at=cast(datetime | None, values["started_at"]),
             completed_at=cast(datetime | None, values["completed_at"]),
+            cancel_requested_at=cast(datetime | None, values["cancel_requested_at"]),
+            cancel_code=cast(str | None, values["cancel_code"]),
         )
 
     async def claim_queued(

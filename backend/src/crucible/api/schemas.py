@@ -163,3 +163,10 @@ class ApprovalResponse(ApiModel):
     decided_by: str | None
     created_at: datetime
     decided_at: datetime | None
+
+
+class CancelledRunResponse(ApiModel):
+    run_id: UUID
+    status: str
+    outcome_code: str | None
+    cancel_requested_at: datetime | None

@@ -27,11 +27,13 @@ class EventType(StrEnum):
     APPROVAL_REQUESTED = "approval.requested"
     APPROVAL_APPROVED = "approval.approved"
     APPROVAL_DENIED = "approval.denied"
+    APPROVAL_CANCELLED = "approval.cancelled"
     COMMAND_OUTPUT = "command.output"
     MESSAGE_COMPLETED = "message.completed"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
     RUN_INTERRUPTED = "run.interrupted"
+    RUN_CANCEL_REQUESTED = "run.cancel_requested"
 
 
 @dataclass(frozen=True)
