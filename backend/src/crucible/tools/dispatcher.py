@@ -96,6 +96,7 @@ class ToolDispatcher:
                     completion_sequence=completion_sequence,
                     created_at=self._clock.now(),
                     completed_at=self._clock.now(),
+                    artifact_id=outcome.artifact_id,
                 )
 
                 async def persist(uow: UnitOfWork) -> None:
@@ -142,9 +143,16 @@ class ToolDispatcher:
                 )
                 try:
                     outcome = await item.tool.invoke(
-                        ToolContext(context.workspace), item.arguments
+                        ToolContext(
+                            context.workspace,
+                            context.task_id,
+                            context.run_id,
+                            context.step_id,
+                            item.record.id,
+                        ),
+                        item.arguments,
                     )
-                    status = (
+                    status = outcome.status or (
                         ToolResultStatus.FAILED
                         if outcome.error_code is not None
                         else ToolResultStatus.SUCCEEDED

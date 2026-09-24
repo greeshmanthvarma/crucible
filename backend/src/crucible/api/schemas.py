@@ -124,6 +124,7 @@ class ToolResultResponse(ApiModel):
     display_text: str
     error_code: str | None
     completion_sequence: int
+    artifact_id: UUID | None
 
 
 class StepTraceResponse(ApiModel):

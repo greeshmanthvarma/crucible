@@ -2,6 +2,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -9,6 +10,7 @@ from sqlalchemy import text
 
 from crucible.application.approval_service import ApprovalService
 from crucible.application.artifact_service import ArtifactService
+from crucible.application.command_authority import CommandAuthority
 from crucible.application.event_service import TaskEventSource
 from crucible.application.message_service import MessageService
 from crucible.application.ports import UnitOfWork
@@ -25,10 +27,13 @@ from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
 from crucible.engine.supervisor import LocalRunSupervisor
 from crucible.models.litellm_gateway import LiteLLMModelGateway
+from crucible.sandbox.docker import DockerSandboxBackend
 from crucible.sandbox.docker_client import SubprocessDockerClient
 from crucible.sandbox.resources import TaskResourceManager
 from crucible.storage.database import Database
 from crucible.storage.unit_of_work import SqlAlchemyUnitOfWork
+from crucible.tools.command import ExecuteCommandTool
+from crucible.tools.definitions import Tool
 from crucible.tools.dispatcher import ToolDispatcher
 from crucible.tools.registry import default_registry
 from crucible.workspaces.git import SubprocessGitClient
@@ -61,9 +66,25 @@ class ApplicationContainer:
         notifier = TaskEventNotifier()
         approval_broker = InMemoryApprovalBroker()
         journal = RunJournal(unit_of_work, clock, notifier)
+        workspaces = WorkspaceManager(git, data_dir)
+        docker = SubprocessDockerClient()
+        resource_manager = TaskResourceManager(docker, unit_of_work, clock)
+        approval_service = ApprovalService(
+            unit_of_work, clock, approval_broker, notifier
+        )
+        artifact_service = ArtifactService(
+            LocalArtifactStore(data_dir / "artifacts", clock), unit_of_work
+        )
+        command_tool = ExecuteCommandTool(
+            CommandAuthority(approval_service, approval_broker, clock),
+            DockerSandboxBackend(docker, unit_of_work, clock),
+            resource_manager,
+            artifact_service,
+            journal=journal,
+        )
         model = os.environ.get("CRUCIBLE_MODEL", "fake")
         gateway = LiteLLMModelGateway() if model != "fake" else FakeModelGateway()
-        registry = default_registry()
+        registry = default_registry(cast(Tool, command_tool))
         context_manager = ContextManager(
             unit_of_work,
             clock,
@@ -94,11 +115,6 @@ class ApplicationContainer:
         supervisor = LocalRunSupervisor(
             engine, unit_of_work, clock, notifier, journal=journal
         )
-        workspaces = WorkspaceManager(git, data_dir)
-        resource_manager = TaskResourceManager(
-            SubprocessDockerClient(), unit_of_work, clock
-        )
-
         return cls(
             database=database,
             repository_service=RepositoryService(git, unit_of_work, clock),
@@ -108,12 +124,8 @@ class ApplicationContainer:
             message_service=MessageService(unit_of_work, clock, supervisor, notifier),
             supervisor=supervisor,
             event_source=TaskEventSource(unit_of_work, notifier),
-            approval_service=ApprovalService(
-                unit_of_work, clock, approval_broker, notifier
-            ),
-            artifact_service=ArtifactService(
-                LocalArtifactStore(data_dir / "artifacts", clock), unit_of_work
-            ),
+            approval_service=approval_service,
+            artifact_service=artifact_service,
             reconciler=StartupReconciler(
                 workspaces, unit_of_work, clock, notifier, resource_manager
             ),

@@ -75,6 +75,13 @@ class ApprovalStore(Protocol):
 class ArtifactMetadataStore(Protocol):
     async def add(self, artifact: Artifact) -> None: ...
     async def get(self, artifact_id: UUID) -> Artifact | None: ...
+    async def get_by_content(
+        self,
+        task_id: UUID,
+        content_hash: str,
+        media_type: str,
+        sensitivity: str,
+    ) -> Artifact | None: ...
 
 
 class ExternalResourceStore(Protocol):

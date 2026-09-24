@@ -110,6 +110,7 @@ async def get_task_trace(
                     display_text=result.display_text,
                     error_code=result.error_code,
                     completion_sequence=result.completion_sequence,
+                    artifact_id=result.artifact_id,
                 )
                 for result in trace.results
             ],

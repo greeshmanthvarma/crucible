@@ -1063,12 +1063,27 @@ class ArtifactRepository:
         await self._session.flush()
 
     async def get(self, artifact_id: UUID) -> Artifact | None:
+        return await self._one(models.artifacts.c.id == str(artifact_id))
+
+    async def get_by_content(
+        self,
+        task_id: UUID,
+        content_hash: str,
+        media_type: str,
+        sensitivity: str,
+    ) -> Artifact | None:
+        return await self._one(
+            (models.artifacts.c.task_id == str(task_id))
+            & (models.artifacts.c.content_hash == content_hash)
+            & (models.artifacts.c.media_type == media_type)
+            & (models.artifacts.c.sensitivity == sensitivity)
+        )
+
+    async def _one(self, criterion: object) -> Artifact | None:
         row = (
             (
                 await self._session.execute(
-                    select(models.artifacts).where(
-                        models.artifacts.c.id == str(artifact_id)
-                    )
+                    select(models.artifacts).where(criterion)  # type: ignore[arg-type]
                 )
             )
             .mappings()

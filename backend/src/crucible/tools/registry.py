@@ -23,18 +23,23 @@ class ToolRegistry:
         return tuple(tool.definition for tool in self._tools.values())
 
 
-def default_registry() -> ToolRegistry:
+def default_registry(command_tool: Tool | None = None) -> ToolRegistry:
     return ToolRegistry(
         cast(
             tuple[Tool, ...],
-            (
-                ListFilesTool(),
-                SearchFilesTool(),
-                ReadFileTool(),
-                WorkspaceStatusTool(),
-                WorkspaceDiffTool(),
-                ApplyPatchTool(),
-                WriteFileTool(),
+            tuple(
+                item
+                for item in (
+                    ListFilesTool(),
+                    SearchFilesTool(),
+                    ReadFileTool(),
+                    WorkspaceStatusTool(),
+                    WorkspaceDiffTool(),
+                    ApplyPatchTool(),
+                    WriteFileTool(),
+                    command_tool,
+                )
+                if item is not None
             ),
         )
     )

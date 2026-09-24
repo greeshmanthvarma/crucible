@@ -32,6 +32,11 @@ class ArtifactService:
             task_id, media_type, sensitivity, stream, hard_limit=hard_limit
         )
         async with self._unit_of_work() as uow:
+            existing = await uow.artifacts.get_by_content(
+                task_id, artifact.content_hash, media_type, sensitivity
+            )
+            if existing is not None:
+                return existing
             await uow.artifacts.add(artifact)
             await uow.commit()
         return artifact
