@@ -89,6 +89,8 @@ runs = Table(
     Column("created_at", UTCDateTime(), nullable=False),
     Column("started_at", UTCDateTime()),
     Column("completed_at", UTCDateTime()),
+    Column("cancel_requested_at", UTCDateTime()),
+    Column("cancel_code", String),
     CheckConstraint(
         "status IN ('queued','running','completed','failed','interrupted')"
     ),
@@ -204,9 +206,67 @@ tool_results = Table(
     Column("completion_sequence", Integer, nullable=False),
     Column("created_at", UTCDateTime(), nullable=False),
     Column("completed_at", UTCDateTime(), nullable=False),
+    Column("artifact_id", ForeignKey("artifacts.id")),
     UniqueConstraint("step_id", "completion_sequence"),
     CheckConstraint("completion_sequence > 0"),
     CheckConstraint("schema_version > 0"),
+)
+
+approvals = Table(
+    "approvals",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("task_id", ForeignKey("tasks.id"), nullable=False),
+    Column("run_id", ForeignKey("runs.id"), nullable=False),
+    Column("step_id", ForeignKey("steps.id"), nullable=False),
+    Column("tool_call_id", ForeignKey("tool_calls.id"), nullable=False, unique=True),
+    Column("spec_json", JSON, nullable=False),
+    Column("spec_digest", String(64), nullable=False),
+    Column("status", String, nullable=False),
+    Column("decision_reason", String),
+    Column("decided_by", String),
+    Column("created_at", UTCDateTime(), nullable=False),
+    Column("decided_at", UTCDateTime()),
+    CheckConstraint(
+        "status IN ('pending','approved','denied','cancelled','invalidated')"
+    ),
+)
+
+artifacts = Table(
+    "artifacts",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("task_id", ForeignKey("tasks.id"), nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("media_type", String, nullable=False),
+    Column("byte_length", Integer, nullable=False),
+    Column("storage_identity", String, nullable=False),
+    Column("sensitivity", String, nullable=False),
+    Column("metadata_json", JSON, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    UniqueConstraint("task_id", "content_hash", "media_type", "sensitivity"),
+    CheckConstraint("byte_length >= 0"),
+)
+
+external_resources = Table(
+    "external_resources",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("task_id", ForeignKey("tasks.id"), nullable=False),
+    Column("run_id", ForeignKey("runs.id")),
+    Column("tool_call_id", ForeignKey("tool_calls.id")),
+    Column("kind", String, nullable=False),
+    Column("external_identity", String, nullable=False, unique=True),
+    Column("mount_target", String),
+    Column("status", String, nullable=False),
+    Column("labels_json", JSON, nullable=False),
+    Column("metadata_json", JSON, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    Column("updated_at", UTCDateTime(), nullable=False),
+    CheckConstraint("kind IN ('volume','container')"),
+    CheckConstraint(
+        "status IN ('present','active','removed','missing','orphaned','error')"
+    ),
 )
 
 task_events = Table(

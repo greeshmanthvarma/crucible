@@ -24,6 +24,7 @@ class CommandLimits:
     output_bytes: int
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "cpus", float(self.cpus))
         if self.cpus <= 0 or self.memory_bytes <= 0 or self.pids <= 0:
             raise ValueError("Command resource limits must be positive")
         if self.output_bytes <= 0:

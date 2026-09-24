@@ -6,9 +6,12 @@ from uuid import UUID
 
 from crucible.application.idempotency import IdempotencyRecord
 from crucible.context.manifests import ContextManifest
+from crucible.domain.approvals import Approval
+from crucible.domain.artifacts import Artifact
 from crucible.domain.conversation import Message
 from crucible.domain.events import Event
 from crucible.domain.repository import Repository
+from crucible.domain.resources import ExternalResource
 from crucible.domain.run import Run
 from crucible.domain.steps import Step
 from crucible.domain.task import Task
@@ -57,6 +60,28 @@ class ToolCallStore(Protocol):
 class ToolResultStore(Protocol):
     async def add(self, result: ToolResult) -> None: ...
     async def list_for_step(self, step_id: UUID) -> tuple[ToolResult, ...]: ...
+
+
+class ApprovalStore(Protocol):
+    async def add(self, approval: Approval) -> None: ...
+    async def get(self, approval_id: UUID) -> Approval | None: ...
+    async def get_for_tool_call(self, tool_call_id: UUID) -> Approval | None: ...
+    async def update(self, approval: Approval) -> None: ...
+    async def list_for_task(self, task_id: UUID) -> tuple[Approval, ...]: ...
+    async def list_pending_for_run(self, run_id: UUID) -> tuple[Approval, ...]: ...
+
+
+class ArtifactMetadataStore(Protocol):
+    async def add(self, artifact: Artifact) -> None: ...
+    async def get(self, artifact_id: UUID) -> Artifact | None: ...
+
+
+class ExternalResourceStore(Protocol):
+    async def add(self, resource: ExternalResource) -> None: ...
+    async def get(self, resource_id: UUID) -> ExternalResource | None: ...
+    async def update(self, resource: ExternalResource) -> None: ...
+    async def list_for_task(self, task_id: UUID) -> tuple[ExternalResource, ...]: ...
+    async def list_managed(self) -> tuple[ExternalResource, ...]: ...
 
 
 class RunStore(Protocol):
@@ -108,6 +133,9 @@ class UnitOfWork(Protocol):
     context_manifests: ContextManifestStore
     tool_calls: ToolCallStore
     tool_results: ToolResultStore
+    approvals: ApprovalStore
+    artifacts: ArtifactMetadataStore
+    external_resources: ExternalResourceStore
     runs: RunStore
     events: EventStore
     idempotency: IdempotencyStore

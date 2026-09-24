@@ -4,8 +4,11 @@ from typing import Self
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crucible.application.ports import (
+    ApprovalStore,
+    ArtifactMetadataStore,
     ContextManifestStore,
     EventStore,
+    ExternalResourceStore,
     MessageStore,
     RepositoryStore,
     RunStore,
@@ -18,8 +21,11 @@ from crucible.application.ports import (
 from crucible.application.ports import IdempotencyStore as IdempotencyStorePort
 from crucible.storage.database import Database
 from crucible.storage.repositories import (
+    ApprovalRepository,
+    ArtifactRepository,
     ContextManifestRepository,
     EventRepository,
+    ExternalResourceRepository,
     IdempotencyRepository,
     MessageRepository,
     RepositoryRepository,
@@ -41,6 +47,9 @@ class SqlAlchemyUnitOfWork:
     context_manifests: ContextManifestStore
     tool_calls: ToolCallStore
     tool_results: ToolResultStore
+    approvals: ApprovalStore
+    artifacts: ArtifactMetadataStore
+    external_resources: ExternalResourceStore
     runs: RunStore
     events: EventStore
     idempotency: IdempotencyStorePort
@@ -59,6 +68,9 @@ class SqlAlchemyUnitOfWork:
         self.context_manifests = ContextManifestRepository(self.session)
         self.tool_calls = ToolCallRepository(self.session)
         self.tool_results = ToolResultRepository(self.session)
+        self.approvals = ApprovalRepository(self.session)
+        self.artifacts = ArtifactRepository(self.session)
+        self.external_resources = ExternalResourceRepository(self.session)
         self.runs = RunRepository(self.session)
         self.events = EventRepository(self.session)
         self.idempotency = IdempotencyRepository(self.session)

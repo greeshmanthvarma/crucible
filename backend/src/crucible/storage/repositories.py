@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from crucible.application.idempotency import IdempotencyRecord
 from crucible.context.manifests import ContextManifest
+from crucible.domain.approvals import Approval, ApprovalStatus
+from crucible.domain.artifacts import Artifact
+from crucible.domain.commands import CommandSpec
 from crucible.domain.conversation import (
     Message,
     MessagePart,
@@ -19,6 +22,11 @@ from crucible.domain.conversation import (
 )
 from crucible.domain.events import Event, EventType
 from crucible.domain.repository import Repository
+from crucible.domain.resources import (
+    ExternalResource,
+    ExternalResourceKind,
+    ExternalResourceStatus,
+)
 from crucible.domain.run import Run, RunStatus
 from crucible.domain.steps import Step, StepStatus
 from crucible.domain.task import Task, TaskStatus
@@ -651,6 +659,7 @@ class ToolResultRepository:
                 completion_sequence=result.completion_sequence,
                 created_at=result.created_at,
                 completed_at=result.completed_at,
+                artifact_id=str(result.artifact_id) if result.artifact_id else None,
             )
         )
         await self._session.flush()
@@ -678,6 +687,7 @@ class ToolResultRepository:
                 completion_sequence=row["completion_sequence"],
                 created_at=row["created_at"],
                 completed_at=row["completed_at"],
+                artifact_id=UUID(row["artifact_id"]) if row["artifact_id"] else None,
             )
             for row in rows
         )
@@ -891,6 +901,254 @@ class EventRepository:
             schema_version=cast(int, values["schema_version"]),
             payload=cast(dict[str, object], values["payload_json"]),
             created_at=cast(datetime, values["created_at"]),
+        )
+
+
+class ApprovalRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, approval: Approval) -> None:
+        await self._require_same_task(approval)
+        await self._session.execute(
+            insert(models.approvals).values(
+                id=str(approval.id),
+                task_id=str(approval.task_id),
+                run_id=str(approval.run_id),
+                step_id=str(approval.step_id),
+                tool_call_id=str(approval.tool_call_id),
+                spec_json=approval.spec.as_dict(),
+                spec_digest=approval.spec_digest,
+                status=approval.status,
+                decision_reason=approval.decision_reason,
+                decided_by=approval.decided_by,
+                created_at=approval.created_at,
+                decided_at=approval.decided_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get(self, approval_id: UUID) -> Approval | None:
+        return await self._one(models.approvals.c.id == str(approval_id))
+
+    async def get_for_tool_call(self, tool_call_id: UUID) -> Approval | None:
+        return await self._one(models.approvals.c.tool_call_id == str(tool_call_id))
+
+    async def update(self, approval: Approval) -> None:
+        result = await self._session.execute(
+            update(models.approvals)
+            .where(models.approvals.c.id == str(approval.id))
+            .values(
+                status=approval.status,
+                decision_reason=approval.decision_reason,
+                decided_by=approval.decided_by,
+                decided_at=approval.decided_at,
+            )
+        )
+        if cast(int, result.rowcount) != 1:  # type: ignore[attr-defined]
+            raise ValueError(f"Approval not found: {approval.id}")
+
+    async def list_for_task(self, task_id: UUID) -> tuple[Approval, ...]:
+        return await self._many(models.approvals.c.task_id == str(task_id))
+
+    async def list_pending_for_run(self, run_id: UUID) -> tuple[Approval, ...]:
+        return await self._many(
+            (models.approvals.c.run_id == str(run_id))
+            & (models.approvals.c.status == ApprovalStatus.PENDING)
+        )
+
+    async def _one(self, criterion: object) -> Approval | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.approvals).where(criterion)  # type: ignore[arg-type]
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else self._from_row(row)
+
+    async def _many(self, criterion: object) -> tuple[Approval, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.approvals)
+                .where(criterion)  # type: ignore[arg-type]
+                .order_by(models.approvals.c.created_at)
+            )
+        ).mappings()
+        return tuple(self._from_row(row) for row in rows)
+
+    @staticmethod
+    def _from_row(row: object) -> Approval:
+        value = cast(dict[str, object], row)
+        return Approval(
+            UUID(cast(str, value["id"])),
+            UUID(cast(str, value["task_id"])),
+            UUID(cast(str, value["run_id"])),
+            UUID(cast(str, value["step_id"])),
+            UUID(cast(str, value["tool_call_id"])),
+            CommandSpec.from_dict(cast(dict[str, object], value["spec_json"])),
+            cast(str, value["spec_digest"]),
+            ApprovalStatus(cast(str, value["status"])),
+            cast(str | None, value["decision_reason"]),
+            cast(str | None, value["decided_by"]),
+            cast(datetime, value["created_at"]),
+            cast(datetime | None, value["decided_at"]),
+        )
+
+    async def _require_same_task(self, approval: Approval) -> None:
+        row = (
+            await self._session.execute(
+                select(
+                    models.runs.c.task_id,
+                    models.steps.c.task_id,
+                    models.tool_calls.c.task_id,
+                )
+                .select_from(
+                    models.runs.join(
+                        models.steps, models.steps.c.run_id == models.runs.c.id
+                    ).join(
+                        models.tool_calls,
+                        models.tool_calls.c.id == str(approval.tool_call_id),
+                    )
+                )
+                .where(
+                    models.runs.c.id == str(approval.run_id),
+                    models.steps.c.id == str(approval.step_id),
+                )
+            )
+        ).one_or_none()
+        if row is None or any(value != str(approval.task_id) for value in row):
+            raise ValueError("Approval parents must belong to the same Task")
+
+
+class ArtifactRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, artifact: Artifact) -> None:
+        await self._session.execute(
+            insert(models.artifacts).values(
+                id=str(artifact.id),
+                task_id=str(artifact.task_id),
+                content_hash=artifact.content_hash,
+                media_type=artifact.media_type,
+                byte_length=artifact.byte_length,
+                storage_identity=artifact.storage_identity,
+                sensitivity=artifact.sensitivity,
+                metadata_json=dict(artifact.metadata),
+                created_at=artifact.created_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get(self, artifact_id: UUID) -> Artifact | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.artifacts).where(
+                        models.artifacts.c.id == str(artifact_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        return Artifact(
+            UUID(row["id"]),
+            UUID(row["task_id"]),
+            row["content_hash"],
+            row["media_type"],
+            row["byte_length"],
+            row["storage_identity"],
+            row["sensitivity"],
+            row["metadata_json"],
+            row["created_at"],
+        )
+
+
+class ExternalResourceRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, resource: ExternalResource) -> None:
+        await self._session.execute(
+            insert(models.external_resources).values(**self._values(resource))
+        )
+        await self._session.flush()
+
+    async def get(self, resource_id: UUID) -> ExternalResource | None:
+        rows = await self._query(models.external_resources.c.id == str(resource_id))
+        return rows[0] if rows else None
+
+    async def update(self, resource: ExternalResource) -> None:
+        values = self._values(resource)
+        values.pop("id")
+        result = await self._session.execute(
+            update(models.external_resources)
+            .where(models.external_resources.c.id == str(resource.id))
+            .values(**values)
+        )
+        if cast(int, result.rowcount) != 1:  # type: ignore[attr-defined]
+            raise ValueError(f"External resource not found: {resource.id}")
+
+    async def list_for_task(self, task_id: UUID) -> tuple[ExternalResource, ...]:
+        return await self._query(models.external_resources.c.task_id == str(task_id))
+
+    async def list_managed(self) -> tuple[ExternalResource, ...]:
+        return await self._query()
+
+    async def _query(
+        self, criterion: object | None = None
+    ) -> tuple[ExternalResource, ...]:
+        statement = select(models.external_resources)
+        if criterion is not None:
+            statement = statement.where(criterion)  # type: ignore[arg-type]
+        rows = (
+            await self._session.execute(
+                statement.order_by(models.external_resources.c.created_at)
+            )
+        ).mappings()
+        return tuple(self._from_row(row) for row in rows)
+
+    @staticmethod
+    def _values(resource: ExternalResource) -> dict[str, object]:
+        return {
+            "id": str(resource.id),
+            "task_id": str(resource.task_id),
+            "run_id": str(resource.run_id) if resource.run_id else None,
+            "tool_call_id": str(resource.tool_call_id)
+            if resource.tool_call_id
+            else None,
+            "kind": resource.kind,
+            "external_identity": resource.external_identity,
+            "mount_target": resource.mount_target,
+            "status": resource.status,
+            "labels_json": dict(resource.labels),
+            "metadata_json": dict(resource.metadata),
+            "created_at": resource.created_at,
+            "updated_at": resource.updated_at,
+        }
+
+    @staticmethod
+    def _from_row(row: object) -> ExternalResource:
+        value = cast(dict[str, object], row)
+        return ExternalResource(
+            UUID(cast(str, value["id"])),
+            UUID(cast(str, value["task_id"])),
+            UUID(cast(str, value["run_id"])) if value["run_id"] else None,
+            UUID(cast(str, value["tool_call_id"])) if value["tool_call_id"] else None,
+            ExternalResourceKind(cast(str, value["kind"])),
+            cast(str, value["external_identity"]),
+            cast(str | None, value["mount_target"]),
+            ExternalResourceStatus(cast(str, value["status"])),
+            cast(dict[str, str], value["labels_json"]),
+            cast(dict[str, object], value["metadata_json"]),
+            cast(datetime, value["created_at"]),
+            cast(datetime, value["updated_at"]),
         )
 
 
