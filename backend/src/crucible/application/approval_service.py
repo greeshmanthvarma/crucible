@@ -168,7 +168,7 @@ def approval_response(approval: Approval) -> dict[str, object]:
         "runId": str(approval.run_id),
         "stepId": str(approval.step_id),
         "toolCallId": str(approval.tool_call_id),
-        "spec": approval.spec.as_dict(),
+        "spec": public_command_spec(approval),
         "specDigest": approval.spec_digest,
         "status": approval.status.value,
         "decisionReason": approval.decision_reason,
@@ -177,4 +177,24 @@ def approval_response(approval: Approval) -> dict[str, object]:
         "decidedAt": (
             approval.decided_at.isoformat() if approval.decided_at is not None else None
         ),
+    }
+
+
+def public_command_spec(approval: Approval) -> dict[str, object]:
+    spec = approval.spec
+    return {
+        "executable": spec.executable,
+        "arguments": list(spec.arguments),
+        "cwd": spec.cwd,
+        "timeoutSeconds": spec.timeout_seconds,
+        "network": spec.network.value,
+        "environmentNames": sorted(spec.environment),
+        "image": spec.image,
+        "reason": spec.reason,
+        "limits": {
+            "cpus": spec.limits.cpus,
+            "memoryBytes": spec.limits.memory_bytes,
+            "pids": spec.limits.pids,
+            "outputBytes": spec.limits.output_bytes,
+        },
     }

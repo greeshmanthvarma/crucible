@@ -150,13 +150,32 @@ class ApprovalDecisionRequest(ApiModel):
     reason: str | None = None
 
 
+class CommandLimitsResponse(ApiModel):
+    cpus: float
+    memory_bytes: int
+    pids: int
+    output_bytes: int
+
+
+class ApprovalCommandSpecResponse(ApiModel):
+    executable: str
+    arguments: list[str]
+    cwd: str
+    timeout_seconds: int
+    network: str
+    environment_names: list[str]
+    image: str
+    reason: str
+    limits: CommandLimitsResponse
+
+
 class ApprovalResponse(ApiModel):
     id: UUID
     task_id: UUID
     run_id: UUID
     step_id: UUID
     tool_call_id: UUID
-    spec: dict[str, object]
+    spec: ApprovalCommandSpecResponse
     spec_digest: str
     status: str
     decision_reason: str | None

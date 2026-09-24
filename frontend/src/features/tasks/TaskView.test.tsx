@@ -59,6 +59,7 @@ it("renders canonical messages, sends, and refreshes once for a deduplicated com
       statusTruncated: false,
       diffTruncated: false,
     }),
+    getApprovals: vi.fn().mockResolvedValue([]),
     sendMessage: vi.fn().mockResolvedValue({
       messageId: "message-2",
       runId: "run-2",
@@ -113,6 +114,7 @@ it("keeps the draft available when submission fails", async () => {
       statusTruncated: false,
       diffTruncated: false,
     }),
+    getApprovals: vi.fn().mockResolvedValue([]),
     sendMessage: vi.fn().mockRejectedValue(new Error("offline")),
   } as unknown as CrucibleClient;
   const streamFactory: EventStreamFactory = () => ({ close: vi.fn() });
@@ -127,4 +129,72 @@ it("keeps the draft available when submission fails", async () => {
 
   await view.findByRole("alert");
   expect(input).toHaveValue("keep this");
+});
+
+it("reconstructs a pending approval and submits the displayed digest", async () => {
+  const approval = {
+    id: "approval",
+    taskId: "task",
+    runId: "run",
+    stepId: "step",
+    toolCallId: "call",
+    spec: {
+      executable: "python",
+      arguments: ["-V"],
+      cwd: ".",
+      timeoutSeconds: 30,
+      network: "none",
+      environmentNames: ["CI"],
+      image: "runner@sha256:digest",
+      reason: "Check Python",
+      limits: {
+        cpus: 1,
+        memoryBytes: 1024,
+        pids: 16,
+        outputBytes: 100,
+      },
+    },
+    specDigest: "digest",
+    status: "pending",
+    decisionReason: null,
+    decidedBy: null,
+    createdAt: task.createdAt,
+    decidedAt: null,
+  };
+  const client = {
+    getTask: vi.fn().mockResolvedValue(task),
+    getMessages: vi.fn().mockResolvedValue([]),
+    getTaskTrace: vi.fn().mockResolvedValue([]),
+    getWorkspaceState: vi.fn().mockResolvedValue({
+      status: "",
+      diff: "",
+      statusTruncated: false,
+      diffTruncated: false,
+    }),
+    getApprovals: vi.fn().mockResolvedValue([approval]),
+    decideApproval: vi.fn().mockResolvedValue({
+      ...approval,
+      status: "approved",
+    }),
+  } as unknown as CrucibleClient;
+
+  render(
+    <TaskView
+      taskId="task"
+      client={client}
+      streamFactory={() => ({ close: vi.fn() })}
+    />,
+  );
+
+  expect(await screen.findByText("Network: none")).toBeVisible();
+  expect(screen.getByText("Environment names: CI")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+  await waitFor(() =>
+    expect(client.decideApproval).toHaveBeenCalledWith(
+      "approval",
+      "approved",
+      "digest",
+      expect.any(String),
+    ),
+  );
 });

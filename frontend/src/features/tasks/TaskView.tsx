@@ -6,6 +6,8 @@ import {
   type EventStreamFactory,
 } from "../../events/taskEventStream";
 import { ToolTrace } from "./ToolTrace";
+import { ApprovalPanel } from "./ApprovalPanel";
+import { CommandEvidence } from "./CommandEvidence";
 import { useTaskSession } from "./useTaskSession";
 import { WorkspaceDiff } from "./WorkspaceDiff";
 
@@ -60,6 +62,11 @@ export function TaskView({
         {session.pending && <li>sending: {session.pending.text}</li>}
       </ol>
       <ToolTrace steps={session.trace} />
+      <ApprovalPanel
+        approvals={session.approvals}
+        decide={session.decideApproval}
+      />
+      <CommandEvidence steps={session.trace} />
       <WorkspaceDiff workspace={session.workspace} />
       <form onSubmit={submit}>
         <label>

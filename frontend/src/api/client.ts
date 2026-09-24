@@ -8,6 +8,7 @@ export type SubmittedRunResponse =
 export type StepTraceResponse = components["schemas"]["StepTraceResponse"];
 export type WorkspaceStateResponse =
   components["schemas"]["WorkspaceStateResponse"];
+export type ApprovalResponse = components["schemas"]["ApprovalResponse"];
 
 export class ApiError extends Error {
   constructor(
@@ -46,6 +47,14 @@ export interface CrucibleClient {
   getMessages(taskId: string): Promise<MessageResponse[]>;
   getTaskTrace(taskId: string): Promise<StepTraceResponse[]>;
   getWorkspaceState(taskId: string): Promise<WorkspaceStateResponse>;
+  getApprovals(taskId: string): Promise<ApprovalResponse[]>;
+  decideApproval(
+    approvalId: string,
+    decision: "approved" | "denied",
+    specDigest: string,
+    idempotencyKey: string,
+    reason?: string,
+  ): Promise<ApprovalResponse>;
   sendMessage(
     taskId: string,
     text: string,
@@ -69,6 +78,13 @@ export const apiClient: CrucibleClient = {
   getMessages: (taskId) => request(`/api/tasks/${taskId}/messages`),
   getTaskTrace: (taskId) => request(`/api/tasks/${taskId}/trace`),
   getWorkspaceState: (taskId) => request(`/api/tasks/${taskId}/workspace`),
+  getApprovals: (taskId) => request(`/api/tasks/${taskId}/approvals`),
+  decideApproval: (approvalId, decision, specDigest, idempotencyKey, reason) =>
+    request(`/api/approvals/${approvalId}/decision`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ decision, specDigest, reason }),
+    }),
   sendMessage: (taskId, text, idempotencyKey) =>
     request(`/api/tasks/${taskId}/messages`, {
       method: "POST",

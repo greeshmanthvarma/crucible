@@ -4,7 +4,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header
 
 from crucible.api.dependencies import get_approval_service
-from crucible.api.schemas import ApprovalDecisionRequest, ApprovalResponse
+from crucible.api.schemas import (
+    ApprovalCommandSpecResponse,
+    ApprovalDecisionRequest,
+    ApprovalResponse,
+    CommandLimitsResponse,
+)
 from crucible.application.approval_service import ApprovalService
 from crucible.application.errors import IdempotencyKeyRequired
 from crucible.domain.approvals import Approval, ApprovalStatus
@@ -20,7 +25,22 @@ def to_response(approval: Approval) -> ApprovalResponse:
         run_id=approval.run_id,
         step_id=approval.step_id,
         tool_call_id=approval.tool_call_id,
-        spec=approval.spec.as_dict(),
+        spec=ApprovalCommandSpecResponse(
+            executable=approval.spec.executable,
+            arguments=list(approval.spec.arguments),
+            cwd=approval.spec.cwd,
+            timeout_seconds=approval.spec.timeout_seconds,
+            network=approval.spec.network,
+            environment_names=sorted(approval.spec.environment),
+            image=approval.spec.image,
+            reason=approval.spec.reason,
+            limits=CommandLimitsResponse(
+                cpus=approval.spec.limits.cpus,
+                memory_bytes=approval.spec.limits.memory_bytes,
+                pids=approval.spec.limits.pids,
+                output_bytes=approval.spec.limits.output_bytes,
+            ),
+        ),
         spec_digest=approval.spec_digest,
         status=approval.status,
         decision_reason=approval.decision_reason,

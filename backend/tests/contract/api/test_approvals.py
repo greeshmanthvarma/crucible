@@ -90,6 +90,8 @@ async def test_decision_is_single_use_digest_bound_and_idempotent(
     assert approved.status_code == 200
     assert missing_key.status_code == 400
     assert approved.json()["status"] == "approved"
+    assert approved.json()["spec"]["environmentNames"] == ["CI"]
+    assert "environment" not in approved.json()["spec"]
     assert replay.json() == approved.json()
     assert stale.status_code == 409
     assert listed.json() == [approved.json()]
