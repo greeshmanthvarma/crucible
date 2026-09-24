@@ -33,6 +33,8 @@ class ToolResultStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     INTERRUPTED = "interrupted"
+    DENIED = "denied"
+    TIMED_OUT = "timed_out"
 
 
 @dataclass(frozen=True)
