@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -140,3 +141,24 @@ class WorkspaceStateResponse(ApiModel):
     diff: str
     status_truncated: bool
     diff_truncated: bool
+
+
+class ApprovalDecisionRequest(ApiModel):
+    decision: Literal["approved", "denied"]
+    spec_digest: str
+    reason: str | None = None
+
+
+class ApprovalResponse(ApiModel):
+    id: UUID
+    task_id: UUID
+    run_id: UUID
+    step_id: UUID
+    tool_call_id: UUID
+    spec: dict[str, object]
+    spec_digest: str
+    status: str
+    decision_reason: str | None
+    decided_by: str | None
+    created_at: datetime
+    decided_at: datetime | None

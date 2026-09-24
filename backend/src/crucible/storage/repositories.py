@@ -948,6 +948,23 @@ class ApprovalRepository:
         if cast(int, result.rowcount) != 1:  # type: ignore[attr-defined]
             raise ValueError(f"Approval not found: {approval.id}")
 
+    async def decide_pending(self, approval: Approval) -> bool:
+        result = await self._session.execute(
+            update(models.approvals)
+            .where(
+                models.approvals.c.id == str(approval.id),
+                models.approvals.c.status == ApprovalStatus.PENDING,
+                models.approvals.c.spec_digest == approval.spec_digest,
+            )
+            .values(
+                status=approval.status,
+                decision_reason=approval.decision_reason,
+                decided_by=approval.decided_by,
+                decided_at=approval.decided_at,
+            )
+        )
+        return cast(int, result.rowcount) == 1  # type: ignore[attr-defined]
+
     async def list_for_task(self, task_id: UUID) -> tuple[Approval, ...]:
         return await self._many(models.approvals.c.task_id == str(task_id))
 
@@ -1016,6 +1033,8 @@ class ApprovalRepository:
                 .where(
                     models.runs.c.id == str(approval.run_id),
                     models.steps.c.id == str(approval.step_id),
+                    models.tool_calls.c.run_id == str(approval.run_id),
+                    models.tool_calls.c.step_id == str(approval.step_id),
                 )
             )
         ).one_or_none()

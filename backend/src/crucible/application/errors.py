@@ -59,6 +59,16 @@ class IdempotencyKeyRequired(ApplicationError):
     status_code = 400
 
 
+class ApprovalNotFound(ApplicationError):
+    code = "approval_not_found"
+    status_code = 404
+
+
+class ApprovalConflict(ApplicationError):
+    code = "approval_conflict"
+    status_code = 409
+
+
 class TaskNotActive(ApplicationError):
     code = "task_not_active"
     status_code = 409

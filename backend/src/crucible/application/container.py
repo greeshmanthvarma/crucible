@@ -7,6 +7,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
+from crucible.application.approval_service import ApprovalService
 from crucible.application.event_service import TaskEventSource
 from crucible.application.message_service import MessageService
 from crucible.application.ports import UnitOfWork
@@ -15,6 +16,7 @@ from crucible.application.repository_service import RepositoryService
 from crucible.application.task_service import TaskService
 from crucible.context.manager import ContextManager, SimpleTokenEstimator
 from crucible.domain.clock import SystemClock
+from crucible.engine.approval_broker import InMemoryApprovalBroker
 from crucible.engine.fake_gateway import FakeModelGateway
 from crucible.engine.journal import RunJournal
 from crucible.engine.notifier import TaskEventNotifier
@@ -37,6 +39,7 @@ class ApplicationContainer:
     message_service: MessageService
     supervisor: LocalRunSupervisor
     event_source: TaskEventSource
+    approval_service: ApprovalService
     reconciler: StartupReconciler
     unit_of_work: Callable[[], UnitOfWork]
 
@@ -51,6 +54,7 @@ class ApplicationContainer:
         clock = SystemClock()
         git = SubprocessGitClient()
         notifier = TaskEventNotifier()
+        approval_broker = InMemoryApprovalBroker()
         journal = RunJournal(unit_of_work, clock, notifier)
         model = os.environ.get("CRUCIBLE_MODEL", "fake")
         gateway = LiteLLMModelGateway() if model != "fake" else FakeModelGateway()
@@ -94,6 +98,9 @@ class ApplicationContainer:
             message_service=MessageService(unit_of_work, clock, supervisor, notifier),
             supervisor=supervisor,
             event_source=TaskEventSource(unit_of_work, notifier),
+            approval_service=ApprovalService(
+                unit_of_work, clock, approval_broker, notifier
+            ),
             reconciler=StartupReconciler(workspaces, unit_of_work, clock, notifier),
             unit_of_work=unit_of_work,
         )
