@@ -67,3 +67,31 @@ class ExternalResource:
             now,
             now,
         )
+
+    @classmethod
+    def container(
+        cls,
+        resource_id: ExternalResourceId,
+        task_id: TaskId,
+        run_id: RunId,
+        tool_call_id: ToolCallId,
+        external_identity: str,
+        now: datetime,
+        *,
+        labels: Mapping[str, str],
+        metadata: Mapping[str, object] | None = None,
+    ) -> "ExternalResource":
+        return cls(
+            resource_id,
+            task_id,
+            run_id,
+            tool_call_id,
+            ExternalResourceKind.CONTAINER,
+            external_identity,
+            None,
+            ExternalResourceStatus.ACTIVE,
+            labels,
+            metadata or {},
+            now,
+            now,
+        )

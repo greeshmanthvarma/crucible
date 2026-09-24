@@ -50,6 +50,7 @@ class SandboxTermination(StrEnum):
     TIMED_OUT = "timed_out"
     CANCELLED = "cancelled"
     BACKEND_ERROR = "backend_error"
+    OUTPUT_LIMIT = "output_limit"
 
 
 @dataclass(frozen=True)
