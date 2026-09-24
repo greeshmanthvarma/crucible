@@ -163,6 +163,7 @@ async def submit_message(
         message_id=result.message_id,
         run_id=result.run_id,
         run_status=result.run_status,
+        kind=result.kind,
     )
 
 

@@ -389,6 +389,24 @@ class RunRepository:
         ).mappings()
         return tuple(self._from_row(row) for row in rows)
 
+    async def get_nonterminal_for_task(self, task_id: UUID) -> Run | None:
+        rows = (
+            (
+                await self._session.execute(
+                    select(models.runs)
+                    .where(
+                        models.runs.c.task_id == str(task_id),
+                        models.runs.c.status.in_((RunStatus.QUEUED, RunStatus.RUNNING)),
+                    )
+                    .order_by(models.runs.c.created_at.desc(), models.runs.c.id.desc())
+                    .limit(1)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return self._from_row(rows) if rows is not None else None
+
     async def list_running_not_owned_by(
         self, process_execution_id: UUID
     ) -> tuple[Run, ...]:

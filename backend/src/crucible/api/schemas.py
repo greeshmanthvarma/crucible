@@ -62,6 +62,7 @@ class SubmittedRunResponse(ApiModel):
     message_id: UUID
     run_id: UUID
     run_status: str
+    kind: str
 
 
 class MessagePartResponse(ApiModel):

@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import func, select
 
 from crucible.application.errors import IdempotencyConflict
-from crucible.application.message_service import MessageService
+from crucible.application.message_service import MessageService, MessageSubmissionKind
 from crucible.application.ports import UnitOfWork
 from crucible.application.repository_service import RepositoryService
 from crucible.application.task_service import TaskService
@@ -158,3 +158,39 @@ async def test_same_key_is_independent_per_task_and_failure_rolls_back(
             for table in tables
         }
     assert after == before
+
+
+async def test_active_run_receives_steering_and_terminal_run_creates_next_run(
+    database: Database, tmp_path: Path
+) -> None:
+    task = await active_task(database, tmp_path, "steering")
+    supervisor = RecordingSupervisor()
+    service = MessageService(uow_factory(database), FixedClock(), supervisor)
+
+    first = await service.submit(task.id, "start", "start-key")
+    steering = await service.submit(task.id, "also inspect tests", "steer-key")
+
+    assert first.kind is MessageSubmissionKind.NEW_RUN
+    assert steering.kind is MessageSubmissionKind.STEERING
+    assert steering.run_id == first.run_id
+    assert supervisor.submissions == [first.run_id]
+
+    async with SqlAlchemyUnitOfWork(database) as uow:
+        run = await uow.runs.get(first.run_id)
+        assert run is not None
+        await uow.runs.update(
+            run.claim(
+                execution_id=UUID(int=1),
+                now=FixedClock().now(),
+                lease_expires_at=FixedClock().now(),
+            ).complete(now=FixedClock().now())
+        )
+        await uow.commit()
+
+    next_run = await service.submit(task.id, "continue", "next-key")
+    assert next_run.kind is MessageSubmissionKind.NEW_RUN
+    assert next_run.run_id != first.run_id
+    assert supervisor.submissions == [first.run_id, next_run.run_id]
+
+    retried = await service.submit(task.id, "also inspect tests", "steer-key")
+    assert retried == steering

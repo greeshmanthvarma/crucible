@@ -452,6 +452,8 @@ export interface components {
         };
         /** SubmittedRunResponse */
         SubmittedRunResponse: {
+            /** Kind */
+            kind: string;
             /**
              * Messageid
              * Format: uuid

@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from uuid import UUID
 
 from crucible.application.errors import (
@@ -29,11 +30,17 @@ from crucible.domain.task import TaskStatus
 logger = logging.getLogger(__name__)
 
 
+class MessageSubmissionKind(StrEnum):
+    STEERING = "steering"
+    NEW_RUN = "new_run"
+
+
 @dataclass(frozen=True)
 class SubmittedRun:
     message_id: UUID
     run_id: UUID
     run_status: RunStatus
+    kind: MessageSubmissionKind = MessageSubmissionKind.NEW_RUN
     response_status: int = 202
 
     def response_json(self) -> dict[str, object]:
@@ -41,6 +48,7 @@ class SubmittedRun:
             "messageId": str(self.message_id),
             "runId": str(self.run_id),
             "runStatus": self.run_status,
+            "kind": self.kind,
         }
 
 
@@ -74,6 +82,9 @@ class MessageService:
                     message_id=UUID(str(previous.response_json["messageId"])),
                     run_id=UUID(str(previous.response_json["runId"])),
                     run_status=RunStatus(str(previous.response_json["runStatus"])),
+                    kind=MessageSubmissionKind(
+                        str(previous.response_json.get("kind", "new_run"))
+                    ),
                     response_status=previous.response_status,
                 )
             task = await uow.tasks.get(task_id)
@@ -83,71 +94,133 @@ class MessageService:
                 raise TaskNotActive(f"Task is not active: {task_id}")
 
             now = self._clock.now()
-            message_id, run_id = new_id(), new_id()
-            run = Run.queued(
-                run_id=run_id,
-                task_id=task_id,
-                triggering_message_id=None,
-                created_at=now,
-            )
-            await uow.runs.add(run)
-            message = await uow.messages.add(
-                Message(
-                    id=message_id,
-                    task_id=task_id,
-                    run_id=run_id,
-                    step_id=None,
-                    conversation_sequence=0,
-                    role=MessageRole.USER,
-                    status=MessageStatus.COMPLETED,
-                    parts=(
-                        MessagePart(
-                            id=new_id(),
-                            part_sequence=1,
-                            kind=MessagePartKind.TEXT,
-                            text_content=text,
+            active_run = await uow.runs.get_nonterminal_for_task(task_id)
+            message_id = new_id()
+            if active_run is not None:
+                message = await uow.messages.add(
+                    Message(
+                        id=message_id,
+                        task_id=task_id,
+                        run_id=active_run.id,
+                        step_id=None,
+                        conversation_sequence=0,
+                        role=MessageRole.USER,
+                        status=MessageStatus.COMPLETED,
+                        parts=(
+                            MessagePart(
+                                id=new_id(),
+                                part_sequence=1,
+                                kind=MessagePartKind.TEXT,
+                                text_content=text,
+                            ),
                         ),
-                    ),
-                    created_at=now,
-                    completed_at=now,
+                        created_at=now,
+                        completed_at=now,
+                    )
                 )
-            )
-            await uow.runs.set_triggering_message(run_id, message.id)
-            await uow.events.append(
-                self._events.create(
-                    task_id=task_id,
+                await uow.events.append(
+                    self._events.create(
+                        task_id=task_id,
+                        run_id=active_run.id,
+                        type=EventType.MESSAGE_STEERING_ADDED,
+                        payload={
+                            "run_id": str(active_run.id),
+                            "message_id": str(message.id),
+                        },
+                        created_at=now,
+                    )
+                )
+                result = SubmittedRun(
+                    message.id,
+                    active_run.id,
+                    active_run.status,
+                    MessageSubmissionKind.STEERING,
+                )
+                await uow.idempotency.add(
+                    IdempotencyRecord(
+                        id=new_id(),
+                        scope=scope,
+                        key=idempotency_key,
+                        request_hash=request_hash,
+                        response_status=result.response_status,
+                        response_json=result.response_json(),
+                        created_at=now,
+                    )
+                )
+                await uow.commit()
+                run_id = active_run.id
+                should_submit = False
+            else:
+                run_id = new_id()
+                repository = await uow.repositories.get(task.repository_id)
+                if repository is None:
+                    raise TaskNotFound(f"Repository not found for Task: {task_id}")
+                run = Run.queued(
                     run_id=run_id,
-                    type=EventType.RUN_QUEUED,
-                    payload={
-                        "run_id": str(run_id),
-                        "message_id": str(message_id),
-                    },
+                    task_id=task_id,
+                    triggering_message_id=None,
                     created_at=now,
+                    settings_snapshot=repository.settings,
                 )
-            )
-            result = SubmittedRun(message_id, run_id, RunStatus.QUEUED)
-            await uow.idempotency.add(
-                IdempotencyRecord(
-                    id=new_id(),
-                    scope=scope,
-                    key=idempotency_key,
-                    request_hash=request_hash,
-                    response_status=result.response_status,
-                    response_json=result.response_json(),
-                    created_at=now,
+                await uow.runs.add(run)
+                message = await uow.messages.add(
+                    Message(
+                        id=message_id,
+                        task_id=task_id,
+                        run_id=run_id,
+                        step_id=None,
+                        conversation_sequence=0,
+                        role=MessageRole.USER,
+                        status=MessageStatus.COMPLETED,
+                        parts=(
+                            MessagePart(
+                                id=new_id(),
+                                part_sequence=1,
+                                kind=MessagePartKind.TEXT,
+                                text_content=text,
+                            ),
+                        ),
+                        created_at=now,
+                        completed_at=now,
+                    )
                 )
-            )
-            await uow.commit()
+                await uow.runs.set_triggering_message(run_id, message.id)
+                await uow.events.append(
+                    self._events.create(
+                        task_id=task_id,
+                        run_id=run_id,
+                        type=EventType.RUN_QUEUED,
+                        payload={"run_id": str(run_id), "message_id": str(message_id)},
+                        created_at=now,
+                    )
+                )
+                result = SubmittedRun(
+                    message_id, run_id, RunStatus.QUEUED, MessageSubmissionKind.NEW_RUN
+                )
+                await uow.idempotency.add(
+                    IdempotencyRecord(
+                        id=new_id(),
+                        scope=scope,
+                        key=idempotency_key,
+                        request_hash=request_hash,
+                        response_status=result.response_status,
+                        response_json=result.response_json(),
+                        created_at=now,
+                    )
+                )
+                await uow.commit()
+                should_submit = True
 
         if self._notifier is not None:
             await self._notifier.notify(task_id)
-        try:
-            await self._supervisor.submit(run_id)
-        except Exception:
-            logger.exception(
-                "Run submission failed after durable commit",
-                extra={"run_id": str(run_id)},
-            )
+        if should_submit:
+            try:
+                await self._supervisor.submit(run_id)
+            except Exception:
+                logger.exception(
+                    "Run submission failed after durable commit",
+                    extra={"run_id": str(run_id)},
+                )
         return result
 
     async def list(self, task_id: UUID) -> tuple[Message, ...]:
