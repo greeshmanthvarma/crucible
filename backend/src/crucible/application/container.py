@@ -25,6 +25,8 @@ from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
 from crucible.engine.supervisor import LocalRunSupervisor
 from crucible.models.litellm_gateway import LiteLLMModelGateway
+from crucible.sandbox.docker_client import SubprocessDockerClient
+from crucible.sandbox.resources import TaskResourceManager
 from crucible.storage.database import Database
 from crucible.storage.unit_of_work import SqlAlchemyUnitOfWork
 from crucible.tools.dispatcher import ToolDispatcher
@@ -93,11 +95,16 @@ class ApplicationContainer:
             engine, unit_of_work, clock, notifier, journal=journal
         )
         workspaces = WorkspaceManager(git, data_dir)
+        resource_manager = TaskResourceManager(
+            SubprocessDockerClient(), unit_of_work, clock
+        )
 
         return cls(
             database=database,
             repository_service=RepositoryService(git, unit_of_work, clock),
-            task_service=TaskService(workspaces, unit_of_work, clock, notifier),
+            task_service=TaskService(
+                workspaces, unit_of_work, clock, notifier, resource_manager
+            ),
             message_service=MessageService(unit_of_work, clock, supervisor, notifier),
             supervisor=supervisor,
             event_source=TaskEventSource(unit_of_work, notifier),
@@ -107,7 +114,9 @@ class ApplicationContainer:
             artifact_service=ArtifactService(
                 LocalArtifactStore(data_dir / "artifacts", clock), unit_of_work
             ),
-            reconciler=StartupReconciler(workspaces, unit_of_work, clock, notifier),
+            reconciler=StartupReconciler(
+                workspaces, unit_of_work, clock, notifier, resource_manager
+            ),
             unit_of_work=unit_of_work,
         )
 
