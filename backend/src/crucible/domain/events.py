@@ -28,6 +28,7 @@ class EventType(StrEnum):
     APPROVAL_APPROVED = "approval.approved"
     APPROVAL_DENIED = "approval.denied"
     APPROVAL_CANCELLED = "approval.cancelled"
+    APPROVAL_INVALIDATED = "approval.invalidated"
     COMMAND_OUTPUT = "command.output"
     MESSAGE_COMPLETED = "message.completed"
     RUN_COMPLETED = "run.completed"

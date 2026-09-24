@@ -114,8 +114,13 @@ class DockerSandboxBackend:
             termination = SandboxTermination.BACKEND_ERROR
             raise
         finally:
-            await self._cleanup(container_id)
-            await self._mark_removed(resource)
+            cleaned = await self._cleanup(container_id)
+            await self._mark_status(
+                resource,
+                ExternalResourceStatus.REMOVED
+                if cleaned
+                else ExternalResourceStatus.ERROR,
+            )
 
         return SandboxOutcome(
             exit_code,
@@ -133,12 +138,19 @@ class DockerSandboxBackend:
         await self._cleanup(container_id)
 
     async def reconcile(self, resources: tuple[ExternalResource, ...]) -> None:
-        by_identity = {resource.external_identity: resource for resource in resources}
-        containers = await self._docker.list_containers(f"{MANAGED_LABEL}=true")
-        for container in containers:
-            resource = by_identity.get(container.identity)
-            if resource is None:
-                continue
+        discovered = {
+            container.identity: container
+            for container in await self._docker.list_containers(f"{MANAGED_LABEL}=true")
+        }
+        for resource in resources:
+            container = discovered.get(resource.external_identity)
+            if container is None:
+                container = await self._docker.inspect_container(
+                    resource.external_identity
+                )
+                if container is None:
+                    await self._mark_status(resource, ExternalResourceStatus.MISSING)
+                    continue
             expected = {
                 MANAGED_LABEL: "true",
                 TASK_LABEL: str(resource.task_id),
@@ -148,8 +160,15 @@ class DockerSandboxBackend:
             if all(
                 container.labels.get(key) == value for key, value in expected.items()
             ):
-                await self._cleanup(container.identity)
-                await self._mark_removed(resource)
+                cleaned = await self._cleanup(container.identity)
+                await self._mark_status(
+                    resource,
+                    ExternalResourceStatus.REMOVED
+                    if cleaned
+                    else ExternalResourceStatus.ERROR,
+                )
+            else:
+                await self._mark_status(resource, ExternalResourceStatus.ERROR)
 
     def _create_arguments(
         self, request: SandboxRequest, labels: dict[str, str]
@@ -213,7 +232,7 @@ class DockerSandboxBackend:
         )
         return tuple(arguments)
 
-    async def _cleanup(self, container_id: str) -> None:
+    async def _cleanup(self, container_id: str) -> bool:
         try:
             await self._docker.stop_container(container_id, self._cleanup_grace_seconds)
         except DockerClientError:
@@ -225,14 +244,17 @@ class DockerSandboxBackend:
             try:
                 await self._docker.remove_container(container_id)
             except DockerClientError:
-                pass
+                return False
+        return True
 
-    async def _mark_removed(self, resource: ExternalResource) -> None:
-        removed = replace(
+    async def _mark_status(
+        self, resource: ExternalResource, status: ExternalResourceStatus
+    ) -> None:
+        updated = replace(
             resource,
-            status=ExternalResourceStatus.REMOVED,
+            status=status,
             updated_at=self._clock.now(),
         )
         async with self._unit_of_work() as uow:
-            await uow.external_resources.update(removed)
+            await uow.external_resources.update(updated)
             await uow.commit()

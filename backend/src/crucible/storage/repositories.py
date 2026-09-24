@@ -290,6 +290,16 @@ class RunRepository:
         ).mappings()
         return tuple(self._from_row(row) for row in rows)
 
+    async def list_running(self) -> tuple[Run, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.runs)
+                .where(models.runs.c.status == RunStatus.RUNNING)
+                .order_by(models.runs.c.created_at, models.runs.c.id)
+            )
+        ).mappings()
+        return tuple(self._from_row(row) for row in rows)
+
     async def list_for_task(self, task_id: UUID) -> tuple[Run, ...]:
         rows = (
             await self._session.execute(
@@ -979,6 +989,9 @@ class ApprovalRepository:
             (models.approvals.c.run_id == str(run_id))
             & (models.approvals.c.status == ApprovalStatus.PENDING)
         )
+
+    async def list_for_run(self, run_id: UUID) -> tuple[Approval, ...]:
+        return await self._many(models.approvals.c.run_id == str(run_id))
 
     async def _one(self, criterion: object) -> Approval | None:
         row = (

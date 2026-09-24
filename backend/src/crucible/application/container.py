@@ -17,6 +17,7 @@ from crucible.application.ports import UnitOfWork
 from crucible.application.reconciliation import StartupReconciler
 from crucible.application.repository_service import RepositoryService
 from crucible.application.run_service import RunService
+from crucible.application.sandbox_reconciliation import SandboxReconciler
 from crucible.application.task_service import TaskService
 from crucible.artifacts.store import LocalArtifactStore
 from crucible.context.manager import ContextManager, SimpleTokenEstimator
@@ -52,6 +53,7 @@ class ApplicationContainer:
     approval_service: ApprovalService
     artifact_service: ArtifactService
     run_service: RunService
+    sandbox_reconciler: SandboxReconciler
     reconciler: StartupReconciler
     unit_of_work: Callable[[], UnitOfWork]
 
@@ -77,9 +79,10 @@ class ApplicationContainer:
         artifact_service = ArtifactService(
             LocalArtifactStore(data_dir / "artifacts", clock), unit_of_work
         )
+        sandbox_backend = DockerSandboxBackend(docker, unit_of_work, clock)
         command_tool = ExecuteCommandTool(
             CommandAuthority(approval_service, approval_broker, clock),
-            DockerSandboxBackend(docker, unit_of_work, clock),
+            sandbox_backend,
             resource_manager,
             artifact_service,
             journal=journal,
@@ -123,6 +126,13 @@ class ApplicationContainer:
             approval_broker=approval_broker,
         )
         run_service = RunService(unit_of_work, clock, supervisor, notifier)
+        sandbox_reconciler = SandboxReconciler(
+            sandbox_backend,
+            resource_manager,
+            unit_of_work,
+            clock,
+            approval_broker,
+        )
         return cls(
             database=database,
             repository_service=RepositoryService(git, unit_of_work, clock),
@@ -135,6 +145,7 @@ class ApplicationContainer:
             approval_service=approval_service,
             artifact_service=artifact_service,
             run_service=run_service,
+            sandbox_reconciler=sandbox_reconciler,
             reconciler=StartupReconciler(
                 workspaces, unit_of_work, clock, notifier, resource_manager
             ),
@@ -142,6 +153,7 @@ class ApplicationContainer:
         )
 
     async def start(self) -> None:
+        await self.sandbox_reconciler.reconcile()
         await self.reconciler.reconcile()
         await self.supervisor.reconcile()
 

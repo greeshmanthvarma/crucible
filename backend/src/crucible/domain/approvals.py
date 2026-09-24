@@ -77,6 +77,19 @@ class Approval:
     def invalidate(self, reason: str, now: datetime) -> "Approval":
         return self._decide(ApprovalStatus.INVALIDATED, "harness", reason, now)
 
+    def invalidate_for_recovery(self, reason: str, now: datetime) -> "Approval":
+        if self.status not in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED):
+            raise InvalidApprovalTransition(
+                f"Cannot invalidate Approval in state {self.status}"
+            )
+        return replace(
+            self,
+            status=ApprovalStatus.INVALIDATED,
+            decided_by="harness",
+            decision_reason=reason,
+            decided_at=now,
+        )
+
     def _decide(
         self,
         status: ApprovalStatus,
