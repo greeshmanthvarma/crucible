@@ -49,6 +49,10 @@ def test_command_rejects_shell_traversal_and_secret_environment() -> None:
         command(environment={"OPENAI_API_KEY": "secret"})
     with pytest.raises(ValueError, match="executable"):
         command(executable="")
+    with pytest.raises(ValueError, match="cwd"):
+        command(cwd="")
+    with pytest.raises(ValueError, match="pinned"):
+        command(image="runner:latest")
 
 
 def test_approval_is_digest_bound_and_single_use() -> None:

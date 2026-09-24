@@ -53,7 +53,7 @@ async def test_cancel_endpoint_is_terminal_and_idempotent(database: Database) ->
         replay = await client.post(endpoint, headers={"Idempotency-Key": "cancel-1"})
 
     assert missing.status_code == 400
-    assert cancelled.json()["status"] == RunStatus.INTERRUPTED
+    assert cancelled.json()["status"] == RunStatus.CANCELLED
     assert cancelled.json()["outcomeCode"] == "cancelled"
     assert replay.json() == cancelled.json()
     assert supervisor.calls == 1

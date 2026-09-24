@@ -35,6 +35,7 @@ class EventType(StrEnum):
     RUN_FAILED = "run.failed"
     RUN_INTERRUPTED = "run.interrupted"
     RUN_CANCEL_REQUESTED = "run.cancel_requested"
+    RUN_CANCELLED = "run.cancelled"
 
 
 @dataclass(frozen=True)

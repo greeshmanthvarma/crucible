@@ -14,6 +14,7 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True)
@@ -127,7 +128,7 @@ class Run:
             return self
         return replace(
             self,
-            status=RunStatus.INTERRUPTED,
+            status=RunStatus.CANCELLED,
             lease_expires_at=None,
             outcome_code=code,
             outcome_detail=detail,

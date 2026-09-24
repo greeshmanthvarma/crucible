@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -61,9 +62,9 @@ async def test_command_waits_for_exact_approval_then_returns_bounded_evidence(
             NOW,
             "sha256:" + "b" * 64,
             "container",
+            8,
             2,
-            2,
-            False,
+            True,
         ),
         (OutputChunk(OutputStream.STDOUT, 1, b"ok"),),
     )
@@ -73,9 +74,11 @@ async def test_command_waits_for_exact_approval_then_returns_bounded_evidence(
     tool = ExecuteCommandTool(authority, sandbox, resources, artifacts)
     dispatcher = ToolDispatcher(ToolRegistry((tool,)), factory, CLOCK)
     call_id = new_id()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     execution = asyncio.create_task(
         dispatcher.execute_batch(
-            DispatchContext(task.id, run.id, step.id, message.id, task.workspace_path),
+            DispatchContext(task.id, run.id, step.id, message.id, workspace),
             (
                 CompleteToolCall(
                     call_id,
@@ -116,6 +119,16 @@ async def test_command_waits_for_exact_approval_then_returns_bounded_evidence(
     assert result.status is ToolResultStatus.SUCCEEDED
     assert result.artifact_id is not None
     assert result.result["exit_code"] == 0
+    assert result.result["original_bytes"] == 8
+    assert result.result["truncated"] is True
+    _, content = await artifacts.read(result.artifact_id)
+    summary = json.loads(content.splitlines()[-1])
+    assert summary == {
+        "type": "summary",
+        "original_bytes": 8,
+        "retained_bytes": 2,
+        "truncated": True,
+    }
 
 
 async def test_denial_never_reaches_sandbox(database: Database, tmp_path: Path) -> None:
@@ -147,9 +160,11 @@ async def test_denial_never_reaches_sandbox(database: Database, tmp_path: Path) 
         ArtifactService(LocalArtifactStore(tmp_path / "artifacts", CLOCK), factory),
     )
     dispatcher = ToolDispatcher(ToolRegistry((tool,)), factory, CLOCK)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     execution = asyncio.create_task(
         dispatcher.execute_batch(
-            DispatchContext(task.id, run.id, step.id, message.id, task.workspace_path),
+            DispatchContext(task.id, run.id, step.id, message.id, workspace),
             (
                 CompleteToolCall(
                     new_id(),

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from crucible.domain.ids import ArtifactId, RunId, StepId, TaskId, ToolCallId
 from crucible.domain.tools import ToolResultStatus
+from crucible.engine.active_time import ActiveTimeBudget
 from crucible.engine.gateway import ModelToolDefinition
 
 
@@ -52,6 +53,7 @@ class ToolContext:
     run_id: RunId | None = None
     step_id: StepId | None = None
     tool_call_id: ToolCallId | None = None
+    active_time: ActiveTimeBudget | None = None
 
 
 @dataclass(frozen=True)

@@ -92,9 +92,10 @@ runs = Table(
     Column("cancel_requested_at", UTCDateTime()),
     Column("cancel_code", String),
     CheckConstraint(
-        "status IN ('queued','running','completed','failed','interrupted')"
+        "status IN ('queued','running','completed','failed','interrupted','cancelled')",
+        name="ck_runs_status",
     ),
-    CheckConstraint("next_run_sequence > 0"),
+    CheckConstraint("next_run_sequence > 0", name="ck_runs_next_run_sequence_positive"),
 )
 
 steps = Table(

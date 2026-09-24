@@ -1,5 +1,4 @@
 import asyncio
-import time
 from collections.abc import Callable
 from uuid import UUID
 
@@ -21,6 +20,7 @@ from crucible.domain.events import EventType
 from crucible.domain.ids import new_id
 from crucible.domain.run import Run
 from crucible.domain.steps import Step
+from crucible.engine.active_time import ActiveTimeBudget
 from crucible.engine.gateway import (
     CompleteToolCall,
     ModelError,
@@ -117,22 +117,16 @@ class RunEngine:
                 existing_calls += len(await uow.tool_calls.list_for_step(step.id))
         used_calls = existing_calls
         used_tokens = 0
-        started = time.monotonic()
+        active_time = ActiveTimeBudget(self._max_active_seconds)
         for step_sequence in range(1, self._max_steps + 1):
             try:
-                if time.monotonic() - started > self._max_active_seconds:
-                    raise RunBudgetExceeded(
-                        "Run exceeded configured active-time budget"
-                    )
-                remaining_seconds = self._max_active_seconds - (
-                    time.monotonic() - started
-                )
-                async with asyncio.timeout(remaining_seconds):
+                async with active_time.track():
                     should_continue, step_calls, step_tokens = await self._execute_step(
                         run,
                         step_sequence,
                         call_budget=max(0, self._max_tool_calls - used_calls),
                         token_budget=max(0, self._max_model_tokens - used_tokens),
+                        active_time=active_time,
                     )
                 used_calls += step_calls
                 used_tokens += step_tokens
@@ -154,7 +148,7 @@ class RunEngine:
                     run_id,
                     error,
                     code="cancelled",
-                    event_type=EventType.RUN_INTERRUPTED,
+                    event_type=EventType.RUN_CANCELLED,
                 )
                 raise
             except Exception as error:
@@ -176,6 +170,7 @@ class RunEngine:
         *,
         call_budget: int,
         token_budget: int,
+        active_time: ActiveTimeBudget,
     ) -> tuple[bool, int, int]:
         step = Step.preparing(
             new_id(), run.task_id, run.id, step_sequence, self._clock.now()
@@ -280,6 +275,7 @@ class RunEngine:
                 step.id,
                 assistant.id,
                 task.workspace_path,
+                active_time,
             ),
             tuple(calls),
             call_budget=call_budget,

@@ -79,12 +79,23 @@ def upgrade() -> None:
             "fk_tool_results_artifact_id", "artifacts", ["artifact_id"], ["id"]
         )
     with op.batch_alter_table("runs") as batch:
+        batch.drop_constraint("ck_runs_status", type_="check")
+        batch.create_check_constraint(
+            "ck_runs_status",
+            "status IN "
+            "('queued','running','completed','failed','interrupted','cancelled')",
+        )
         batch.add_column(sa.Column("cancel_requested_at", sa.DateTime()))
         batch.add_column(sa.Column("cancel_code", sa.String()))
 
 
 def downgrade() -> None:
     with op.batch_alter_table("runs") as batch:
+        batch.drop_constraint("ck_runs_status", type_="check")
+        batch.create_check_constraint(
+            "ck_runs_status",
+            "status IN ('queued','running','completed','failed','interrupted')",
+        )
         batch.drop_column("cancel_code")
         batch.drop_column("cancel_requested_at")
     with op.batch_alter_table("tool_results") as batch:

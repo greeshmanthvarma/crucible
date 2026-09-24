@@ -17,6 +17,7 @@ from crucible.domain.tools import (
     ToolResult,
     ToolResultStatus,
 )
+from crucible.engine.active_time import ActiveTimeBudget
 from crucible.engine.gateway import CompleteToolCall
 from crucible.engine.journal import EventSpec, JournalMutation, RunJournal
 from crucible.tools.definitions import Tool, ToolContext, ToolOutcome
@@ -30,6 +31,7 @@ class DispatchContext:
     step_id: StepId
     assistant_message_id: MessageId
     workspace: Path
+    active_time: ActiveTimeBudget | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,7 @@ class ToolDispatcher:
                             context.run_id,
                             context.step_id,
                             item.record.id,
+                            context.active_time,
                         ),
                         item.arguments,
                     )

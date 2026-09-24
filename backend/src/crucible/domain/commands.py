@@ -9,6 +9,7 @@ from typing import Mapping, cast
 
 _ENVIRONMENT_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _SECRET_SUFFIXES = ("_TOKEN", "_SECRET", "_PASSWORD", "_KEY")
+_PINNED_IMAGE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 
 
 class CommandNetwork(StrEnum):
@@ -56,13 +57,15 @@ class CommandSpec:
             raise ValueError("Command executable must not be blank or contain NUL")
         if any("\x00" in value for value in self.arguments):
             raise ValueError("Command arguments must not contain NUL")
+        if not self.cwd:
+            raise ValueError("Command cwd must not be blank")
         cwd = PurePosixPath(self.cwd)
         if cwd.is_absolute() or ".." in cwd.parts:
             raise ValueError("Command cwd must be relative to the Workspace")
         if not 1 <= self.timeout_seconds <= 3600:
             raise ValueError("Command timeout must be between 1 and 3600 seconds")
-        if not self.image.strip():
-            raise ValueError("Command image must not be blank")
+        if not _PINNED_IMAGE.fullmatch(self.image):
+            raise ValueError("Command image must be pinned by sha256 digest")
         copied = dict(self.environment)
         for name, value in copied.items():
             if not _ENVIRONMENT_NAME.fullmatch(name):

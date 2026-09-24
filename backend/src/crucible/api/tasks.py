@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from typing import Annotated
 from uuid import UUID
 
@@ -95,7 +96,7 @@ async def get_task_trace(
                     id=call.id,
                     call_sequence=call.call_sequence,
                     name=call.name,
-                    arguments=dict(call.arguments),
+                    arguments=_public_tool_arguments(call.name, call.arguments),
                     status=call.status,
                     execution_mode=call.execution_mode,
                 )
@@ -117,6 +118,17 @@ async def get_task_trace(
         )
         for trace in await service.trace(task_id)
     ]
+
+
+def _public_tool_arguments(
+    name: str, arguments: Mapping[str, object]
+) -> dict[str, object]:
+    public = dict(arguments)
+    if name == "execute_command":
+        environment = public.pop("environment", {})
+        if isinstance(environment, Mapping):
+            public["environmentNames"] = sorted(str(key) for key in environment)
+    return public
 
 
 @router.get("/api/tasks/{task_id}/workspace", response_model=WorkspaceStateResponse)

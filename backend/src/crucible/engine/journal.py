@@ -136,6 +136,8 @@ def terminal_run_mutation(
         terminal = run.fail(code, detail, now=now)
     elif type is EventType.RUN_INTERRUPTED:
         terminal = run.interrupt(code, detail, now=now)
+    elif type is EventType.RUN_CANCELLED:
+        terminal = run.cancel(code, detail, now=now)
     else:
         raise ValueError(f"Unsupported terminal Run Event: {type}")
 
@@ -291,6 +293,6 @@ def cancellation_mutation(
                 if active_step is not None
                 else ()
             ),
-            EventSpec(EventType.RUN_INTERRUPTED, {"outcome_code": "cancelled"}),
+            EventSpec(EventType.RUN_CANCELLED, {"outcome_code": "cancelled"}),
         ),
     )

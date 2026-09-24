@@ -1,4 +1,5 @@
 import base64
+import json
 from collections.abc import AsyncIterator
 from typing import Literal
 
@@ -22,6 +23,7 @@ from crucible.sandbox.protocol import (
 )
 from crucible.sandbox.resources import TaskResourceManager
 from crucible.tools.definitions import ToolArguments, ToolContext, ToolOutcome
+from crucible.tools.filesystem import WorkspacePathResolver
 
 
 class CommandLimitArguments(ToolArguments):
@@ -89,6 +91,9 @@ class ExecuteCommandTool:
         assert context.step_id is not None
         assert context.tool_call_id is not None
         args = ExecuteCommandArguments.model_validate(arguments)
+        cwd = WorkspacePathResolver(context.workspace).resolve(args.cwd)
+        if not cwd.is_dir():
+            raise ValueError("Command cwd must be a Workspace directory")
         spec = CommandSpec(
             args.executable,
             tuple(args.arguments),
@@ -105,13 +110,23 @@ class ExecuteCommandTool:
                 args.limits.output_bytes,
             ),
         )
-        approval = await self._authority.request_and_wait(
-            context.task_id,
-            context.run_id,
-            context.step_id,
-            context.tool_call_id,
-            spec,
-        )
+        if context.active_time is None:
+            approval = await self._authority.request_and_wait(
+                context.task_id,
+                context.run_id,
+                context.step_id,
+                context.tool_call_id,
+                spec,
+            )
+        else:
+            async with context.active_time.pause():
+                approval = await self._authority.request_and_wait(
+                    context.task_id,
+                    context.run_id,
+                    context.step_id,
+                    context.tool_call_id,
+                    spec,
+                )
         if approval.status is not ApprovalStatus.APPROVED:
             return ToolOutcome(
                 {
@@ -144,7 +159,12 @@ class ExecuteCommandTool:
             context.task_id,
             "application/x-ndjson",
             "private",
-            self._artifact_stream(capture.artifact_ndjson()),
+            self._artifact_stream(
+                capture.artifact_ndjson(),
+                original_bytes=outcome.original_bytes,
+                retained_bytes=outcome.retained_bytes,
+                truncated=outcome.truncated,
+            ),
         )
         status, error_code = self._result_status(outcome.termination, outcome.exit_code)
         metadata = capture.metadata
@@ -156,12 +176,12 @@ class ExecuteCommandTool:
                 "image_digest": outcome.image_digest,
                 "exit_code": outcome.exit_code,
                 "termination": outcome.termination.value,
-                "original_bytes": metadata.original_bytes,
+                "original_bytes": outcome.original_bytes,
                 "model_retained_bytes": metadata.model.retained_bytes,
                 "artifact_retained_bytes": metadata.artifact.retained_bytes,
             },
             capture.model.decode(errors="replace"),
-            metadata.model.truncated,
+            outcome.truncated or metadata.model.truncated,
             error_code,
             status,
             artifact.id,
@@ -200,8 +220,26 @@ class ExecuteCommandTool:
         )
 
     @staticmethod
-    async def _artifact_stream(content: bytes) -> AsyncIterator[bytes]:
+    async def _artifact_stream(
+        content: bytes,
+        *,
+        original_bytes: int,
+        retained_bytes: int,
+        truncated: bool,
+    ) -> AsyncIterator[bytes]:
         yield content
+        yield (
+            json.dumps(
+                {
+                    "type": "summary",
+                    "original_bytes": original_bytes,
+                    "retained_bytes": retained_bytes,
+                    "truncated": truncated,
+                },
+                separators=(",", ":"),
+            ).encode()
+            + b"\n"
+        )
 
     @staticmethod
     def _result_status(
