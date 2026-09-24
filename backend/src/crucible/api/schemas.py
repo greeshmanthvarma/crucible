@@ -273,3 +273,35 @@ class IntegrationResponse(ApiModel):
     failure_detail: str | None
     created_at: datetime
     completed_at: datetime | None
+
+
+class ValidationCommandReviewResponse(ApiModel):
+    id: UUID
+    command_sequence: int
+    status: str
+    approval_id: UUID | None
+    tool_call_id: UUID | None
+    artifact_id: UUID | None
+    exit_code: int | None
+    summary: str
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class ValidationAttemptReviewResponse(ApiModel):
+    id: UUID
+    run_id: UUID
+    attempt_number: int
+    status: str
+    created_at: datetime
+    completed_at: datetime | None
+    commands: list[ValidationCommandReviewResponse]
+
+
+class TaskReviewResponse(ApiModel):
+    latest_run_status: str | None
+    completion_summary: str | None
+    claimed_files: list[str]
+    validation_attempts: list[ValidationAttemptReviewResponse]
+    result_revisions: list[ResultRevisionResponse]
+    integrations: list[IntegrationResponse]

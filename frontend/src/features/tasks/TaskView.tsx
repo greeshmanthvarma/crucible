@@ -10,6 +10,9 @@ import { ApprovalPanel } from "./ApprovalPanel";
 import { CommandEvidence } from "./CommandEvidence";
 import { useTaskSession } from "./useTaskSession";
 import { WorkspaceDiff } from "./WorkspaceDiff";
+import { ValidationTrace } from "./ValidationTrace";
+import { AcceptancePanel } from "./AcceptancePanel";
+import { IntegrationPanel } from "./IntegrationPanel";
 
 export function TaskView({
   taskId,
@@ -41,6 +44,18 @@ export function TaskView({
       : latestRunEvent?.type === "run.interrupted"
         ? "failed"
         : (latestRunEvent?.type.replace("run.", "") ?? "idle");
+  const canonicalRunStatus = session.review.latestRunStatus ?? runStatus;
+  const latestValidation = session.review.validationAttempts.at(-1);
+  const acceptanceEnabled =
+    session.task?.status === "active" &&
+    canonicalRunStatus === "completed" &&
+    (latestValidation?.status === "passed" ||
+      latestValidation?.status === "not_configured");
+  const acceptanceReason = ["queued", "running", "validating"].includes(
+    canonicalRunStatus,
+  )
+    ? "Acceptance is disabled while the Run is active"
+    : "Acceptance requires passed or not-configured Validation";
   return (
     <section>
       {session.task && (
@@ -51,7 +66,7 @@ export function TaskView({
           <p>Base revision: {session.task.baseRevision}</p>
         </header>
       )}
-      <p>Run: {runStatus}</p>
+      <p>Run: {canonicalRunStatus}</p>
       <ol aria-label="Conversation">
         {session.messages.map((message) => (
           <li key={message.id}>
@@ -68,6 +83,36 @@ export function TaskView({
       />
       <CommandEvidence steps={session.trace} />
       <WorkspaceDiff workspace={session.workspace} />
+      <section aria-label="Completion review">
+        <h3>Completion</h3>
+        <p>{session.review.completionSummary ?? "No completion proposal"}</p>
+        <p>
+          Changed files:{" "}
+          {session.review.claimedFiles.join(", ") || "None claimed"}
+        </p>
+      </section>
+      <ValidationTrace attempts={session.review.validationAttempts} />
+      {session.review.resultRevisions.map((result) => (
+        <article key={result.id}>
+          <h3>Result Revision</h3>
+          <p>Commit: {result.commitSha}</p>
+          <p>{result.summary}</p>
+          <a href={`/api/artifacts/${result.diffArtifactId}`}>Accepted diff</a>
+        </article>
+      ))}
+      <AcceptancePanel
+        enabled={acceptanceEnabled}
+        reason={acceptanceReason}
+        accept={session.accept}
+      />
+      {session.task && (
+        <IntegrationPanel
+          repositoryId={session.task.repositoryId}
+          results={session.review.resultRevisions}
+          integrations={session.review.integrations}
+          integrate={session.integrate}
+        />
+      )}
       <form onSubmit={submit}>
         <label>
           Message

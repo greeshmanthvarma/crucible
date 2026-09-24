@@ -20,9 +20,11 @@ from crucible.context.manifests import ContextManifest
 from crucible.domain.clock import Clock
 from crucible.domain.events import Event, EventFactory, EventType
 from crucible.domain.ids import new_id
+from crucible.domain.results import Integration, ResultRevision
 from crucible.domain.steps import Step
 from crucible.domain.task import Task
 from crucible.domain.tools import ToolCall, ToolResult
+from crucible.domain.validation import ValidationAttempt, ValidationCommandResult
 from crucible.workspaces.manager import WorkspaceManager
 
 if TYPE_CHECKING:
@@ -43,6 +45,22 @@ class WorkspaceState:
     diff: str
     status_truncated: bool
     diff_truncated: bool
+
+
+@dataclass(frozen=True)
+class ValidationReview:
+    attempt: ValidationAttempt
+    commands: tuple[ValidationCommandResult, ...]
+
+
+@dataclass(frozen=True)
+class TaskReview:
+    latest_run_status: str | None
+    completion_summary: str | None
+    claimed_files: tuple[str, ...]
+    validations: tuple[ValidationReview, ...]
+    result_revisions: tuple[ResultRevision, ...]
+    integrations: tuple[Integration, ...]
 
 
 class TaskService:
@@ -207,6 +225,40 @@ class TaskService:
             diff_text,
             status_truncated,
             diff_truncated,
+        )
+
+    async def review(self, task_id: UUID) -> TaskReview:
+        async with self._unit_of_work() as uow:
+            task = await uow.tasks.get(task_id)
+            if task is None:
+                raise TaskNotFound(f"Task not found: {task_id}")
+            runs = await uow.runs.list_for_task(task_id)
+            proposal = None
+            validations: list[ValidationReview] = []
+            for run in runs:
+                run_proposal = await uow.completion_proposals.get_for_run(run.id)
+                if run_proposal is not None:
+                    proposal = run_proposal
+                for attempt in await uow.validation_attempts.list_for_run(run.id):
+                    validations.append(
+                        ValidationReview(
+                            attempt,
+                            await uow.validation_command_results.list_for_attempt(
+                                attempt.id
+                            ),
+                        )
+                    )
+            results = await uow.result_revisions.list_for_task(task_id)
+            integrations: list[Integration] = []
+            for result in results:
+                integrations.extend(await uow.integrations.list_for_result(result.id))
+        return TaskReview(
+            runs[-1].status if runs else None,
+            proposal.summary if proposal else None,
+            proposal.claimed_files if proposal else (),
+            tuple(validations),
+            results,
+            tuple(integrations),
         )
 
     async def _record_unresolved_failure(

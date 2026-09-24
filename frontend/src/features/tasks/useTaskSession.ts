@@ -6,6 +6,7 @@ import type {
   MessageResponse,
   StepTraceResponse,
   TaskResponse,
+  TaskReviewResponse,
   WorkspaceStateResponse,
 } from "../../api/client";
 import {
@@ -14,6 +15,15 @@ import {
   type EventStreamFactory,
   type TaskEventState,
 } from "../../events/taskEventStream";
+
+const emptyReview: TaskReviewResponse = {
+  latestRunStatus: null,
+  completionSummary: null,
+  claimedFiles: [],
+  validationAttempts: [],
+  resultRevisions: [],
+  integrations: [],
+};
 
 export function useTaskSession(
   taskId: string,
@@ -25,6 +35,7 @@ export function useTaskSession(
   const [trace, setTrace] = useState<StepTraceResponse[]>([]);
   const [workspace, setWorkspace] = useState<WorkspaceStateResponse>();
   const [approvals, setApprovals] = useState<ApprovalResponse[]>([]);
+  const [review, setReview] = useState<TaskReviewResponse>(emptyReview);
   const [pending, setPending] = useState<{ text: string; key: string }>();
   const [error, setError] = useState("");
   const [events, setEvents] = useState<TaskEventState>({
@@ -34,17 +45,27 @@ export function useTaskSession(
   const eventState = useRef<TaskEventState>({ events: [], needsReplay: false });
 
   const refresh = useCallback(async () => {
-    const [loadedMessages, loadedTrace, loadedWorkspace, loadedApprovals] =
-      await Promise.all([
-        client.getMessages(taskId),
-        client.getTaskTrace(taskId),
-        client.getWorkspaceState(taskId),
-        client.getApprovals(taskId),
-      ]);
+    const [
+      loadedTask,
+      loadedMessages,
+      loadedTrace,
+      loadedWorkspace,
+      loadedApprovals,
+      loadedReview,
+    ] = await Promise.all([
+      client.getTask(taskId),
+      client.getMessages(taskId),
+      client.getTaskTrace(taskId),
+      client.getWorkspaceState(taskId),
+      client.getApprovals(taskId),
+      client.getTaskReview?.(taskId) ?? Promise.resolve(emptyReview),
+    ]);
+    setTask(loadedTask);
     setMessages(loadedMessages);
     setTrace(loadedTrace);
     setWorkspace(loadedWorkspace);
     setApprovals(loadedApprovals);
+    setReview(loadedReview);
   }, [client, taskId]);
 
   useEffect(() => {
@@ -56,6 +77,7 @@ export function useTaskSession(
       client.getTaskTrace(taskId),
       client.getWorkspaceState(taskId),
       client.getApprovals(taskId),
+      client.getTaskReview?.(taskId) ?? Promise.resolve(emptyReview),
     ]).then(
       ([
         loadedTask,
@@ -63,6 +85,7 @@ export function useTaskSession(
         loadedTrace,
         loadedWorkspace,
         loadedApprovals,
+        loadedReview,
       ]) => {
         if (disposed) return;
         setTask(loadedTask);
@@ -70,6 +93,7 @@ export function useTaskSession(
         setTrace(loadedTrace);
         setWorkspace(loadedWorkspace);
         setApprovals(loadedApprovals);
+        setReview(loadedReview);
         let opened = false;
         stream = streamFactory(
           taskId,
@@ -78,17 +102,7 @@ export function useTaskSession(
             if (next === eventState.current) return;
             eventState.current = next;
             setEvents(next);
-            if (
-              event.type === "message.completed" ||
-              event.type.startsWith("run.") ||
-              event.type.startsWith("step.") ||
-              event.type.startsWith("tool_call.") ||
-              event.type.startsWith("approval.") ||
-              event.type.startsWith("command.") ||
-              event.type === "context.prepared"
-            ) {
-              void refresh();
-            }
+            void refresh();
           },
           () => {
             if (opened) void refresh();
@@ -126,16 +140,41 @@ export function useTaskSession(
     await refresh();
   }
 
+  async function accept(key: string) {
+    await client.acceptTask(taskId, key);
+    await refresh();
+  }
+
+  async function integrate(
+    resultId: string,
+    repositoryId: string,
+    targetRef: string,
+    expectedRevision: string,
+    key: string,
+  ) {
+    await client.integrateResult(
+      resultId,
+      repositoryId,
+      targetRef,
+      expectedRevision,
+      key,
+    );
+    await refresh();
+  }
+
   return {
     task,
     messages,
     trace,
     workspace,
     approvals,
+    review,
     pending,
     error,
     events,
     send,
     decideApproval,
+    accept,
+    integrate,
   };
 }

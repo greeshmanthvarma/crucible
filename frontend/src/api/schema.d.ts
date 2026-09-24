@@ -227,6 +227,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tasks/{task_id}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Task Review */
+        get: operations["get_task_review_api_tasks__task_id__review_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/tasks/{task_id}/trace": {
         parameters: {
             query?: never;
@@ -737,6 +754,21 @@ export interface components {
             /** Workspacepath */
             workspacePath: string;
         };
+        /** TaskReviewResponse */
+        TaskReviewResponse: {
+            /** Claimedfiles */
+            claimedFiles: string[];
+            /** Completionsummary */
+            completionSummary: string | null;
+            /** Integrations */
+            integrations: components["schemas"]["IntegrationResponse"][];
+            /** Latestrunstatus */
+            latestRunStatus: string | null;
+            /** Resultrevisions */
+            resultRevisions: components["schemas"]["ResultRevisionResponse"][];
+            /** Validationattempts */
+            validationAttempts: components["schemas"]["ValidationAttemptReviewResponse"][];
+        };
         /** ToolCallResponse */
         ToolCallResponse: {
             /** Arguments */
@@ -783,6 +815,61 @@ export interface components {
              * Format: uuid
              */
             toolCallId: string;
+        };
+        /** ValidationAttemptReviewResponse */
+        ValidationAttemptReviewResponse: {
+            /** Attemptnumber */
+            attemptNumber: number;
+            /** Commands */
+            commands: components["schemas"]["ValidationCommandReviewResponse"][];
+            /** Completedat */
+            completedAt: string | null;
+            /**
+             * Createdat
+             * Format: date-time
+             */
+            createdAt: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Runid
+             * Format: uuid
+             */
+            runId: string;
+            /** Status */
+            status: string;
+        };
+        /** ValidationCommandReviewResponse */
+        ValidationCommandReviewResponse: {
+            /** Approvalid */
+            approvalId: string | null;
+            /** Artifactid */
+            artifactId: string | null;
+            /** Commandsequence */
+            commandSequence: number;
+            /** Completedat */
+            completedAt: string | null;
+            /**
+             * Createdat
+             * Format: date-time
+             */
+            createdAt: string;
+            /** Exitcode */
+            exitCode: number | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Status */
+            status: string;
+            /** Summary */
+            summary: string;
+            /** Toolcallid */
+            toolCallId: string | null;
         };
         /** ValidationCommandSettings */
         ValidationCommandSettings: {
@@ -1308,6 +1395,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SubmittedRunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_task_review_api_tasks__task_id__review_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskReviewResponse"];
                 };
             };
             /** @description Validation Error */
