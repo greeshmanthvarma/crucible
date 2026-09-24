@@ -1787,3 +1787,48 @@ class IntegrationRepository:
                 row["completed_at"],
             )
         )
+
+    async def update(self, value: Integration) -> None:
+        await self._session.execute(
+            update(models.integrations)
+            .where(models.integrations.c.id == str(value.id))
+            .values(
+                status=value.status,
+                observed_before_revision=value.observed_before_revision,
+                observed_after_revision=value.observed_after_revision,
+                failure_code=value.failure_code,
+                failure_detail=value.failure_detail,
+                completed_at=value.completed_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get_by_key(
+        self, result_revision_id: UUID, key: str
+    ) -> Integration | None:
+        value_id = await self._session.scalar(
+            select(models.integrations.c.id).where(
+                models.integrations.c.result_revision_id == str(result_revision_id),
+                models.integrations.c.idempotency_key == key,
+            )
+        )
+        return await self.get(UUID(value_id)) if value_id else None
+
+    async def list_for_result(
+        self, result_revision_id: UUID
+    ) -> tuple[Integration, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.integrations.c.id)
+                .where(
+                    models.integrations.c.result_revision_id == str(result_revision_id)
+                )
+                .order_by(models.integrations.c.created_at, models.integrations.c.id)
+            )
+        ).scalars()
+        values = []
+        for value_id in rows:
+            value = await self.get(UUID(value_id))
+            if value is not None:
+                values.append(value)
+        return tuple(values)

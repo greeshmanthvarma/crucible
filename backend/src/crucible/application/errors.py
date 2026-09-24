@@ -89,6 +89,11 @@ class AcceptanceRejected(ApplicationError):
     status_code = 409
 
 
+class ResultRevisionNotFound(ApplicationError):
+    code = "result_revision_not_found"
+    status_code = 404
+
+
 class EventCursorNotFound(ApplicationError):
     code = "event_cursor_not_found"
     status_code = 409

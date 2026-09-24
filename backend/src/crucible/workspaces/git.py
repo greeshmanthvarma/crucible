@@ -40,6 +40,14 @@ class AcceptanceCommit:
     parent_revision: str
 
 
+@dataclass(frozen=True)
+class TargetSnapshot:
+    head_revision: str
+    current_ref: str | None
+    status: str
+    index_tree: str
+
+
 class GitClient(Protocol):
     async def resolve_repository(self, candidate: Path) -> ResolvedRepository: ...
 
@@ -66,6 +74,14 @@ class GitClient(Protocol):
     async def commit_evidence(
         self, workspace: Path, commit_sha: str
     ) -> AcceptanceEvidence: ...
+    async def target_snapshot(self, root: Path) -> TargetSnapshot: ...
+    async def has_commit(self, root: Path, commit_sha: str) -> bool: ...
+    async def is_ancestor(self, root: Path, ancestor: str, descendant: str) -> bool: ...
+    async def cherry_pick(self, root: Path, commit_sha: str) -> GitResult: ...
+    async def abort_cherry_pick(self, root: Path) -> GitResult: ...
+    async def is_applied_cherry_pick(
+        self, root: Path, head_revision: str, source_commit: str, parent_revision: str
+    ) -> bool: ...
 
 
 class SubprocessGitClient:
@@ -268,6 +284,61 @@ class SubprocessGitClient:
             raise RuntimeError((names.stderr or diff_stderr.decode()).strip())
         return AcceptanceEvidence(
             tuple(name for name in names.stdout.split("\0") if name), diff_stdout
+        )
+
+    async def target_snapshot(self, root: Path) -> TargetSnapshot:
+        head = await self.worktree_revision(root)
+        branch = await self._run(root, "symbolic-ref", "--short", "HEAD", "--")
+        status = await self._run(
+            root, "status", "--porcelain=v2", "--untracked-files=all", "--"
+        )
+        index = await self._run(root, "write-tree")
+        if status.returncode != 0 or index.returncode != 0:
+            raise RuntimeError((status.stderr or index.stderr).strip())
+        return TargetSnapshot(
+            head,
+            branch.stdout.strip() if branch.returncode == 0 else None,
+            status.stdout,
+            index.stdout.strip(),
+        )
+
+    async def has_commit(self, root: Path, commit_sha: str) -> bool:
+        result = await self._run(
+            root, "cat-file", "-e", f"{commit_sha}^{{commit}}", "--"
+        )
+        return result.returncode == 0
+
+    async def is_ancestor(self, root: Path, ancestor: str, descendant: str) -> bool:
+        result = await self._run(
+            root, "merge-base", "--is-ancestor", ancestor, descendant, "--"
+        )
+        return result.returncode == 0
+
+    async def cherry_pick(self, root: Path, commit_sha: str) -> GitResult:
+        return await self._run(root, "cherry-pick", "-x", commit_sha, "--")
+
+    async def abort_cherry_pick(self, root: Path) -> GitResult:
+        return await self._run(root, "cherry-pick", "--abort")
+
+    async def is_applied_cherry_pick(
+        self, root: Path, head_revision: str, source_commit: str, parent_revision: str
+    ) -> bool:
+        shown = await self._run(
+            root,
+            "show",
+            "-s",
+            "--format=%H%x00%P%x00%B",
+            head_revision,
+            "--",
+        )
+        if shown.returncode != 0:
+            return False
+        commit_sha, parents, message = shown.stdout.split("\0", 2)
+        return (
+            commit_sha == head_revision
+            and parents.split() == [parent_revision]
+            and f"(cherry picked from commit {source_commit})"
+            in {line.strip() for line in message.splitlines()}
         )
 
     async def _run(

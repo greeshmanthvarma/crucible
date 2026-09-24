@@ -13,6 +13,7 @@ from crucible.application.approval_service import ApprovalService
 from crucible.application.artifact_service import ArtifactService
 from crucible.application.command_authority import CommandAuthority
 from crucible.application.event_service import TaskEventSource
+from crucible.application.integration_service import IntegrationService
 from crucible.application.message_service import MessageService
 from crucible.application.ports import UnitOfWork
 from crucible.application.reconciliation import StartupReconciler
@@ -57,6 +58,7 @@ class ApplicationContainer:
     artifact_service: ArtifactService
     run_service: RunService
     acceptance_service: AcceptanceService
+    integration_service: IntegrationService
     sandbox_reconciler: SandboxReconciler
     reconciler: StartupReconciler
     unit_of_work: Callable[[], UnitOfWork]
@@ -145,6 +147,7 @@ class ApplicationContainer:
         acceptance_service = AcceptanceService(
             git, artifact_service, unit_of_work, clock, notifier
         )
+        integration_service = IntegrationService(git, unit_of_work, clock, notifier)
         sandbox_reconciler = SandboxReconciler(
             sandbox_backend,
             resource_manager,
@@ -165,6 +168,7 @@ class ApplicationContainer:
             artifact_service=artifact_service,
             run_service=run_service,
             acceptance_service=acceptance_service,
+            integration_service=integration_service,
             sandbox_reconciler=sandbox_reconciler,
             reconciler=StartupReconciler(
                 workspaces, unit_of_work, clock, notifier, resource_manager

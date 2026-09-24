@@ -111,3 +111,29 @@ class Integration:
             observed_after_revision=observed_after_revision,
             completed_at=now,
         )
+
+    def fail(
+        self,
+        status: IntegrationStatus,
+        code: str,
+        detail: str,
+        now: datetime,
+        *,
+        observed_before_revision: str | None = None,
+    ) -> Self:
+        if status not in (
+            IntegrationStatus.FAILED,
+            IntegrationStatus.CONFLICT,
+            IntegrationStatus.RECOVERY_REQUIRED,
+        ):
+            raise ValueError("Integration failure status required")
+        if self.status is not IntegrationStatus.PENDING:
+            raise InvalidTransition(f"cannot fail Integration from {self.status}")
+        return replace(
+            self,
+            status=status,
+            observed_before_revision=observed_before_revision,
+            failure_code=code,
+            failure_detail=detail,
+            completed_at=now,
+        )

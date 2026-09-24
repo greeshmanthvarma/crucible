@@ -65,7 +65,8 @@ tasks = Table(
     Column("created_at", UTCDateTime(), nullable=False),
     Column("updated_at", UTCDateTime(), nullable=False),
     CheckConstraint(
-        "status IN ('provisioning','active','accepted','provisioning_failed')",
+        "status IN "
+        "('provisioning','active','accepted','integrated','provisioning_failed')",
         name="ck_tasks_status",
     ),
     CheckConstraint("next_task_sequence > 0"),

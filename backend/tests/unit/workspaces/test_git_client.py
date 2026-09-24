@@ -97,3 +97,26 @@ async def test_acceptance_evidence_is_binary_aware_and_commit_is_owned(
     assert git("show", "-s", "--format=%an <%ae>", "HEAD", cwd=root) == (
         "Crucible <crucible@local.invalid>"
     )
+
+
+async def test_cherry_pick_is_traceable_to_selected_result(tmp_path: Path) -> None:
+    root = tmp_path / "integration"
+    base = committed_repository(root)
+    target_ref = git("symbolic-ref", "--short", "HEAD", cwd=root)
+    git("checkout", "-qb", "result", cwd=root)
+    (root / "README.md").write_text("result\n")
+    git("add", "README.md", cwd=root)
+    git("commit", "-qm", "accepted result", cwd=root)
+    result = git("rev-parse", "HEAD", cwd=root)
+    git("checkout", "-q", target_ref, cwd=root)
+    client = SubprocessGitClient()
+
+    before = await client.target_snapshot(root)
+    applied = await client.cherry_pick(root, result)
+    after = await client.target_snapshot(root)
+
+    assert applied.returncode == 0
+    assert before.head_revision == base
+    assert await client.has_commit(root, result)
+    assert await client.is_ancestor(root, base, after.head_revision)
+    assert await client.is_applied_cherry_pick(root, after.head_revision, result, base)

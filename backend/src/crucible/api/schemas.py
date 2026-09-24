@@ -252,3 +252,24 @@ class ResultRevisionResponse(ApiModel):
     summary: str
     created_by: str
     created_at: datetime
+
+
+class IntegrationTargetRequest(ApiModel):
+    repository_id: UUID
+    target_ref: str
+    expected_revision: str
+
+
+class IntegrationResponse(ApiModel):
+    id: UUID
+    result_revision_id: UUID
+    repository_id: UUID
+    target_ref: str
+    expected_target_revision: str
+    status: str
+    observed_before_revision: str | None
+    observed_after_revision: str | None
+    failure_code: str | None
+    failure_detail: str | None
+    created_at: datetime
+    completed_at: datetime | None

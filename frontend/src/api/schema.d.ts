@@ -107,6 +107,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/result-revisions/{result_revision_id}/integrations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Integrate Result */
+        post: operations["integrate_result_api_result_revisions__result_revision_id__integrations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/runs/{run_id}/cancel": {
         parameters: {
             query?: never;
@@ -390,6 +407,57 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** IntegrationResponse */
+        IntegrationResponse: {
+            /** Completedat */
+            completedAt: string | null;
+            /**
+             * Createdat
+             * Format: date-time
+             */
+            createdAt: string;
+            /** Expectedtargetrevision */
+            expectedTargetRevision: string;
+            /** Failurecode */
+            failureCode: string | null;
+            /** Failuredetail */
+            failureDetail: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Observedafterrevision */
+            observedAfterRevision: string | null;
+            /** Observedbeforerevision */
+            observedBeforeRevision: string | null;
+            /**
+             * Repositoryid
+             * Format: uuid
+             */
+            repositoryId: string;
+            /**
+             * Resultrevisionid
+             * Format: uuid
+             */
+            resultRevisionId: string;
+            /** Status */
+            status: string;
+            /** Targetref */
+            targetRef: string;
+        };
+        /** IntegrationTargetRequest */
+        IntegrationTargetRequest: {
+            /** Expectedrevision */
+            expectedRevision: string;
+            /**
+             * Repositoryid
+             * Format: uuid
+             */
+            repositoryId: string;
+            /** Targetref */
+            targetRef: string;
         };
         /** MessagePartResponse */
         MessagePartResponse: {
@@ -976,6 +1044,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    integrate_result_api_result_revisions__result_revision_id__integrations_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                result_revision_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IntegrationTargetRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegrationResponse"];
                 };
             };
             /** @description Validation Error */

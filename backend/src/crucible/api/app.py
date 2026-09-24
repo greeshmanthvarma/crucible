@@ -10,6 +10,7 @@ from crucible.api.approvals import router as approvals_router
 from crucible.api.artifacts import router as artifacts_router
 from crucible.api.errors import application_error_handler
 from crucible.api.events import router as events_router
+from crucible.api.integrations import router as integrations_router
 from crucible.api.repositories import router as repositories_router
 from crucible.api.runs import router as runs_router
 from crucible.api.tasks import messages_router
@@ -20,6 +21,7 @@ from crucible.application.artifact_service import ArtifactService
 from crucible.application.container import ApplicationContainer
 from crucible.application.errors import ApplicationError
 from crucible.application.event_service import TaskEventSource
+from crucible.application.integration_service import IntegrationService
 from crucible.application.message_service import MessageService
 from crucible.application.repository_service import RepositoryService
 from crucible.application.run_service import RunService
@@ -35,6 +37,7 @@ def create_app(
     artifact_service: ArtifactService | None = None,
     run_service: RunService | None = None,
     acceptance_service: AcceptanceService | None = None,
+    integration_service: IntegrationService | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -49,6 +52,7 @@ def create_app(
                 artifact_service,
                 run_service,
                 acceptance_service,
+                integration_service,
             )
         ):
             app.state.repository_service = repository_service
@@ -59,6 +63,7 @@ def create_app(
             app.state.artifact_service = artifact_service
             app.state.run_service = run_service
             app.state.acceptance_service = acceptance_service
+            app.state.integration_service = integration_service
             yield
             return
         container = await ApplicationContainer.create(
@@ -73,6 +78,7 @@ def create_app(
         app.state.artifact_service = container.artifact_service
         app.state.run_service = container.run_service
         app.state.acceptance_service = container.acceptance_service
+        app.state.integration_service = container.integration_service
         await container.start()
         try:
             yield
@@ -91,6 +97,7 @@ def create_app(
             artifact_service,
             run_service,
             acceptance_service,
+            integration_service,
         )
     ):
         app.state.repository_service = repository_service
@@ -101,6 +108,7 @@ def create_app(
         app.state.artifact_service = artifact_service
         app.state.run_service = run_service
         app.state.acceptance_service = acceptance_service
+        app.state.integration_service = integration_service
     app.add_exception_handler(ApplicationError, application_error_handler)  # type: ignore[arg-type]
     app.include_router(repositories_router)
     if event_source is not None or repository_service is None:
@@ -117,6 +125,8 @@ def create_app(
         app.include_router(runs_router)
     if acceptance_service is not None or repository_service is None:
         app.include_router(acceptances_router)
+    if integration_service is not None or repository_service is None:
+        app.include_router(integrations_router)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
