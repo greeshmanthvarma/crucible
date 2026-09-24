@@ -170,6 +170,7 @@ context_manifests = Table(
     Column("instruction_digests_json", JSON, nullable=False),
     Column("tool_schema_digest", String, nullable=False),
     Column("created_at", UTCDateTime(), nullable=False),
+    Column("compaction_id", ForeignKey("compactions.id")),
 )
 
 tool_calls = Table(

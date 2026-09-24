@@ -7,13 +7,15 @@ from typing import Protocol
 from crucible.application.ports import UnitOfWork
 from crucible.context.compaction import (
     CompactionBoundary,
+    CompactionLifecycle,
     group_conversation_units,
     select_compaction_boundary,
 )
 from crucible.context.instructions import load_root_instructions
 from crucible.context.manifests import ContextManifest
 from crucible.domain.clock import Clock
-from crucible.domain.conversation import MessagePart
+from crucible.domain.compaction import Compaction
+from crucible.domain.conversation import Message, MessagePart
 from crucible.domain.events import EventType
 from crucible.domain.ids import ToolCallId, ToolResultId, new_id
 from crucible.domain.run import Run
@@ -83,6 +85,7 @@ class ContextManager:
         max_output_tokens: int | None = None,
         journal: RunJournal | None = None,
         recent_complete_units: int = 2,
+        compaction_lifecycle: CompactionLifecycle | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._clock = clock
@@ -97,6 +100,7 @@ class ContextManager:
         self._max_output_tokens = max_output_tokens or output_reserve
         self._journal = journal
         self._recent_complete_units = recent_complete_units
+        self._compaction_lifecycle = compaction_lifecycle
 
     async def prepare(self, run: Run, step: Step) -> PreparedContext:
         async with self._unit_of_work() as uow:
@@ -114,6 +118,7 @@ class ContextManager:
                 for candidate_step in await uow.steps.list_for_run(candidate.id)
                 for result in await uow.tool_results.list_for_step(candidate_step.id)
             }
+            latest_compaction = await uow.compactions.latest_for_task(run.task_id)
         if task is None:
             raise ValueError(f"Task not found: {run.task_id}")
 
@@ -127,17 +132,44 @@ class ContextManager:
             instruction_texts.append(repository.text)
             instruction_digests["repository"] = repository.digest
 
+        visible_messages = (
+            messages
+            if latest_compaction is None
+            else tuple(
+                message
+                for message in messages
+                if message.conversation_sequence
+                >= latest_compaction.retained_tail_start_sequence
+            )
+        )
+        compacted_prefix = (
+            []
+            if latest_compaction is None
+            else [
+                ModelMessage(
+                    ModelRole.SYSTEM,
+                    (
+                        ModelPart(
+                            "text",
+                            "Compacted Conversation context:\n"
+                            + latest_compaction.rendered_summary,
+                        ),
+                    ),
+                )
+            ]
+        )
         model_messages = tuple(
             [
                 ModelMessage(ModelRole.SYSTEM, (ModelPart("text", text),))
                 for text in instruction_texts
             ]
+            + compacted_prefix
             + [
                 ModelMessage(
                     ModelRole(message.role.value),
                     tuple(_model_part(part, calls, results) for part in message.parts),
                 )
-                for message in messages
+                for message in visible_messages
             ]
         )
         estimate = self._estimator.estimate(model_messages)
@@ -151,10 +183,50 @@ class ContextManager:
                 retain_complete_units=self._recent_complete_units,
             )
             if boundary is not None:
+                if self._compaction_lifecycle is not None:
+                    try:
+                        await self._compaction_lifecycle.compact(run, boundary)
+                    except Exception as error:
+                        absolute_capacity = self._input_limit - self._output_reserve
+                        if estimate <= absolute_capacity:
+                            return await self._persist_prepared(
+                                run,
+                                step,
+                                model_messages,
+                                messages,
+                                instruction_digests,
+                                estimate,
+                                latest_compaction,
+                            )
+                        raise ContextLimitExceeded(
+                            f"Compaction failed and context estimate {estimate} "
+                            f"exceeds limit {absolute_capacity}: {error}"
+                        ) from error
+                    return await self.prepare(run, step)
                 raise CompactionNeeded(boundary, estimate, capacity)
             raise ContextLimitExceeded(
                 f"Prepared context estimate {estimate} exceeds capacity {capacity}"
             )
+        return await self._persist_prepared(
+            run,
+            step,
+            model_messages,
+            messages,
+            instruction_digests,
+            estimate,
+            latest_compaction,
+        )
+
+    async def _persist_prepared(
+        self,
+        run: Run,
+        step: Step,
+        model_messages: tuple[ModelMessage, ...],
+        all_messages: tuple[Message, ...],
+        instruction_digests: dict[str, str],
+        estimate: int,
+        latest_compaction: Compaction | None,
+    ) -> PreparedContext:
         request = PreparedModelRequest(
             run_id=run.id,
             step_id=step.id,
@@ -174,11 +246,12 @@ class ContextManager:
             output_reserve=self._output_reserve,
             threshold=self._threshold,
             estimated_tokens=estimate,
-            message_ids=[message.id for message in messages],
-            part_ids=[part.id for message in messages for part in message.parts],
+            message_ids=[message.id for message in all_messages],
+            part_ids=[part.id for message in all_messages for part in message.parts],
             instruction_digests=instruction_digests,
             tool_schema_digest=_tool_digest(self._tools),
             created_at=self._clock.now(),
+            compaction_id=latest_compaction.id if latest_compaction else None,
         )
         if self._journal is None:
             async with self._unit_of_work() as uow:

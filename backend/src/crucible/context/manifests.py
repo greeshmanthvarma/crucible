@@ -5,6 +5,7 @@ from typing import Mapping
 
 from crucible.domain.clock import require_utc
 from crucible.domain.ids import (
+    CompactionId,
     ContextManifestId,
     MessageId,
     MessagePartId,
@@ -31,6 +32,7 @@ class ContextManifest:
     instruction_digests: Mapping[str, str]
     tool_schema_digest: str
     created_at: datetime
+    compaction_id: CompactionId | None = None
 
     def __post_init__(self) -> None:
         require_utc(self.created_at)

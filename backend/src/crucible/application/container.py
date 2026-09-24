@@ -20,10 +20,12 @@ from crucible.application.run_service import RunService
 from crucible.application.sandbox_reconciliation import SandboxReconciler
 from crucible.application.task_service import TaskService
 from crucible.artifacts.store import LocalArtifactStore
+from crucible.context.compaction import CompactionLifecycle
 from crucible.context.manager import ContextManager, SimpleTokenEstimator
 from crucible.domain.clock import SystemClock
 from crucible.engine.approval_broker import InMemoryApprovalBroker
-from crucible.engine.fake_gateway import FakeModelGateway
+from crucible.engine.compaction_gateway import ModelCompactionGateway
+from crucible.engine.fake_gateway import FakeCompactionGateway, FakeModelGateway
 from crucible.engine.journal import RunJournal
 from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
@@ -89,6 +91,11 @@ class ApplicationContainer:
         )
         model = os.environ.get("CRUCIBLE_MODEL", "fake")
         gateway = LiteLLMModelGateway() if model != "fake" else FakeModelGateway()
+        compaction_gateway = (
+            FakeCompactionGateway()
+            if model == "fake"
+            else ModelCompactionGateway(gateway)
+        )
         registry = default_registry(cast(Tool, command_tool))
         context_manager = ContextManager(
             unit_of_work,
@@ -101,6 +108,13 @@ class ApplicationContainer:
             output_reserve=int(os.environ.get("CRUCIBLE_MODEL_OUTPUT_RESERVE", "4096")),
             tools=registry.definitions,
             journal=journal,
+            compaction_lifecycle=CompactionLifecycle(
+                unit_of_work,
+                artifact_service,
+                compaction_gateway,
+                clock,
+                model=model,
+            ),
         )
         engine = RunEngine(
             unit_of_work,

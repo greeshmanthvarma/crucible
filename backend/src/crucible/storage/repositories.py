@@ -576,6 +576,9 @@ class ContextManifestRepository:
                 instruction_digests_json=dict(manifest.instruction_digests),
                 tool_schema_digest=manifest.tool_schema_digest,
                 created_at=manifest.created_at,
+                compaction_id=str(manifest.compaction_id)
+                if manifest.compaction_id
+                else None,
             )
         )
         await self._session.flush()
@@ -610,6 +613,7 @@ class ContextManifestRepository:
             instruction_digests=row["instruction_digests_json"],
             tool_schema_digest=row["tool_schema_digest"],
             created_at=row["created_at"],
+            compaction_id=UUID(row["compaction_id"]) if row["compaction_id"] else None,
         )
 
     async def _require_same_task(
@@ -1408,6 +1412,23 @@ class CompactionRepository:
             row["resulting_context_estimate"],
             row["created_at"],
         )
+
+    async def latest_for_task(self, task_id: UUID) -> Compaction | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.compactions)
+                    .where(models.compactions.c.task_id == str(task_id))
+                    .order_by(models.compactions.c.source_end_sequence.desc())
+                    .limit(1)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        return await self.get(UUID(row["id"]))
 
 
 class ValidationAttemptRepository:

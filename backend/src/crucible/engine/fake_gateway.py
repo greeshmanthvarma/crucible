@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
+from crucible.context.compaction import CompactionRequest, CompactionSummary
 from crucible.engine.gateway import (
     ModelStop,
     ModelStopReason,
@@ -70,3 +71,26 @@ class FakeModelGateway:
         text = "".join(part.text_content or "" for part in newest.parts)
         yield TextDelta(f"Fake response: {text}")
         yield ModelStop(ModelStopReason.COMPLETE)
+
+
+class FakeCompactionGateway:
+    async def compact(self, request: CompactionRequest) -> CompactionSummary:
+        texts = [
+            part.text_content or part.reasoning_content or ""
+            for unit in request.source_units
+            for message in unit.messages
+            for part in message.parts
+        ]
+        objective = " ".join(texts)[:500]
+        return CompactionSummary(
+            objective_and_constraints=objective,
+            decisions="No settled decisions recorded.",
+            repository_facts="Repository facts remain inspectable in the Workspace.",
+            changes="See the current Workspace diff.",
+            commands_and_validation="See retained command and Validation evidence.",
+            unresolved_problems="None recorded.",
+            execution_state="Continue from the retained Conversation tail.",
+            important_paths_and_symbols=(
+                "See retained Conversation and Workspace state."
+            ),
+        )
