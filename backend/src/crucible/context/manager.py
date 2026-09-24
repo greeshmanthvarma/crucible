@@ -21,6 +21,7 @@ from crucible.domain.ids import ToolCallId, ToolResultId, new_id
 from crucible.domain.run import Run
 from crucible.domain.steps import Step
 from crucible.domain.tools import ToolCall, ToolResult
+from crucible.domain.validation import ValidationStatus
 from crucible.engine.gateway import (
     ModelMessage,
     ModelPart,
@@ -119,6 +120,15 @@ class ContextManager:
                 for result in await uow.tool_results.list_for_step(candidate_step.id)
             }
             latest_compaction = await uow.compactions.latest_for_task(run.task_id)
+            validation_attempts = await uow.validation_attempts.list_for_run(run.id)
+            latest_validation = validation_attempts[-1] if validation_attempts else None
+            validation_results = (
+                await uow.validation_command_results.list_for_attempt(
+                    latest_validation.id
+                )
+                if latest_validation is not None
+                else ()
+            )
         if task is None:
             raise ValueError(f"Task not found: {run.task_id}")
 
@@ -158,12 +168,38 @@ class ContextManager:
                 )
             ]
         )
+        repair_context = []
+        if (
+            latest_validation is not None
+            and latest_validation.status is ValidationStatus.FAILED
+        ):
+            evidence = "\n".join(
+                f"Command {result.command_sequence}: {result.status.value}; "
+                f"exit_code={result.exit_code}; {result.summary[:4000]}"
+                for result in validation_results
+            )
+            if len(evidence) > 16_000:
+                evidence = evidence[:16_000] + "\n[validation evidence truncated]"
+            repair_context = [
+                ModelMessage(
+                    ModelRole.SYSTEM,
+                    (
+                        ModelPart(
+                            "text",
+                            "Validation repair evidence (harness-authored):\n"
+                            f"Attempt {latest_validation.attempt_number}: "
+                            f"{latest_validation.status.value}\n{evidence}",
+                        ),
+                    ),
+                )
+            ]
         model_messages = tuple(
             [
                 ModelMessage(ModelRole.SYSTEM, (ModelPart("text", text),))
                 for text in instruction_texts
             ]
             + compacted_prefix
+            + repair_context
             + [
                 ModelMessage(
                     ModelRole(message.role.value),

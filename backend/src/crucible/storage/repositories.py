@@ -1607,6 +1607,20 @@ class CompletionProposalRepository:
         )
         await self._session.flush()
 
+    async def update(self, value: CompletionProposal) -> None:
+        await self._session.execute(
+            update(models.completion_proposals)
+            .where(models.completion_proposals.c.run_id == str(value.run_id))
+            .values(
+                assistant_message_id=str(value.assistant_message_id),
+                summary=value.summary,
+                claimed_files_json=list(value.claimed_files),
+                notes=value.notes,
+                created_at=value.created_at,
+            )
+        )
+        await self._session.flush()
+
     async def get_for_run(self, run_id: UUID) -> CompletionProposal | None:
         row = (
             (

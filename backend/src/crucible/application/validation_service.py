@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Callable
 from typing import cast
 from uuid import UUID
@@ -14,6 +15,7 @@ from crucible.domain.validation import (
     ValidationCommandResult,
     ValidationStatus,
 )
+from crucible.engine.active_time import ActiveTimeBudget
 from crucible.engine.gateway import CompleteToolCall
 from crucible.tools.dispatcher import DispatchContext, ToolDispatcher
 
@@ -32,10 +34,16 @@ class ValidationService:
 
     async def record_proposal(self, proposal: CompletionProposal) -> None:
         async with self._unit_of_work() as uow:
-            await uow.completion_proposals.add(proposal)
+            existing = await uow.completion_proposals.get_for_run(proposal.run_id)
+            if existing is None:
+                await uow.completion_proposals.add(proposal)
+            else:
+                await uow.completion_proposals.update(proposal)
             await uow.commit()
 
-    async def validate(self, run_id: UUID) -> ValidationAttempt:
+    async def validate(
+        self, run_id: UUID, *, active_time: ActiveTimeBudget | None = None
+    ) -> ValidationAttempt:
         async with self._unit_of_work() as uow:
             run = await uow.runs.get(run_id)
             if run is None:
@@ -92,17 +100,22 @@ class ValidationService:
             CompleteToolCall(new_id(), "execute_command", command.as_dict())
             for command in commands
         )
-        results = await self._dispatcher.execute_batch(
-            DispatchContext(
-                run.task_id,
-                run.id,
-                message.step_id,
-                message.id,
-                task.workspace_path,
-            ),
-            calls,
-            call_budget=len(calls),
-        )
+        try:
+            results = await self._dispatcher.execute_batch(
+                DispatchContext(
+                    run.task_id,
+                    run.id,
+                    message.step_id,
+                    message.id,
+                    task.workspace_path,
+                    active_time,
+                ),
+                calls,
+                call_budget=len(calls),
+            )
+        except asyncio.CancelledError:
+            await self._finish(attempt, run.task_id, ValidationStatus.CANCELLED)
+            raise
         statuses: list[ValidationStatus] = []
         for sequence, result in enumerate(results, 1):
             status = _validation_status(result.status)

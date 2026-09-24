@@ -281,7 +281,14 @@ class RunEngine:
                     now,
                 )
             )
-            validation = await self._validation.validate(run.id)
+            validation_commands = run.settings_snapshot.validation_commands
+            if len(validation_commands) > call_budget:
+                raise RunBudgetExceeded(
+                    "Run exceeded configured Tool Call budget during Validation"
+                )
+            validation = await self._validation.validate(
+                run.id, active_time=active_time
+            )
             async with self._unit_of_work() as uow:
                 validating_run = await uow.runs.get(run.id)
             if validating_run is None:
@@ -293,17 +300,26 @@ class RunEngine:
                 await self._journal.record(
                     complete_run_mutation(validating_run, self._clock.now())
                 )
+            elif (
+                validation.status is ValidationStatus.FAILED
+                and validation.attempt_number
+                <= run.settings_snapshot.validation_repair_limit
+            ):
+                return True, len(validation_commands), model_tokens
             else:
                 await self._journal.record(
                     terminal_run_mutation(
                         validating_run,
                         type=EventType.RUN_FAILED,
                         code="validation_failed",
-                        detail=f"Validation ended with {validation.status.value}",
+                        detail=(
+                            f"Validation attempt {validation.id} ended with "
+                            f"{validation.status.value}"
+                        ),
                         now=self._clock.now(),
                     )
                 )
-            return False, 0, model_tokens
+            return False, len(validation_commands), model_tokens
 
         tools_step = active_step.activate_tools(now)
         await self._record_step(tools_step, EventType.STEP_TOOLS_ACTIVE)

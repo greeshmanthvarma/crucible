@@ -196,6 +196,7 @@ async def test_validation_uses_ordered_snapshotted_commands_and_harness_results(
         result.approval_id and result.tool_call_id and result.artifact_id
         for result in results
     )
+    assert len({result.approval_id for result in results}) == 2
 
 
 async def test_empty_validation_configuration_is_explicit(
