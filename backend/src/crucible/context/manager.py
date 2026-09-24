@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from crucible.application.ports import UnitOfWork
+from crucible.context.compaction import (
+    CompactionBoundary,
+    group_conversation_units,
+    select_compaction_boundary,
+)
 from crucible.context.instructions import load_root_instructions
 from crucible.context.manifests import ContextManifest
 from crucible.domain.clock import Clock
@@ -26,6 +31,19 @@ from crucible.engine.journal import EventSpec, JournalMutation, RunJournal
 
 class ContextLimitExceeded(Exception):
     pass
+
+
+class CompactionNeeded(Exception):
+    def __init__(
+        self, boundary: CompactionBoundary, estimated_tokens: int, capacity: int
+    ) -> None:
+        super().__init__(
+            f"Prepared context estimate {estimated_tokens} exceeds capacity "
+            f"{capacity}; Compaction required"
+        )
+        self.boundary = boundary
+        self.estimated_tokens = estimated_tokens
+        self.capacity = capacity
 
 
 class TokenEstimator(Protocol):
@@ -64,6 +82,7 @@ class ContextManager:
         tools: tuple[ModelToolDefinition, ...] = (),
         max_output_tokens: int | None = None,
         journal: RunJournal | None = None,
+        recent_complete_units: int = 2,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._clock = clock
@@ -77,6 +96,7 @@ class ContextManager:
         self._tools = tools
         self._max_output_tokens = max_output_tokens or output_reserve
         self._journal = journal
+        self._recent_complete_units = recent_complete_units
 
     async def prepare(self, run: Run, step: Step) -> PreparedContext:
         async with self._unit_of_work() as uow:
@@ -123,6 +143,15 @@ class ContextManager:
         estimate = self._estimator.estimate(model_messages)
         capacity = int(self._input_limit * self._threshold) - self._output_reserve
         if estimate > capacity:
+            result_to_call = {
+                result.id: result.tool_call_id for result in results.values()
+            }
+            boundary = select_compaction_boundary(
+                group_conversation_units(messages, result_to_call),
+                retain_complete_units=self._recent_complete_units,
+            )
+            if boundary is not None:
+                raise CompactionNeeded(boundary, estimate, capacity)
             raise ContextLimitExceeded(
                 f"Prepared context estimate {estimate} exceeds capacity {capacity}"
             )
