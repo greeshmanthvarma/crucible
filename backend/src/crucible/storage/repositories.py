@@ -12,6 +12,7 @@ from crucible.application.idempotency import IdempotencyRecord
 from crucible.context.manifests import ContextManifest
 from crucible.domain.approvals import Approval, ApprovalStatus
 from crucible.domain.artifacts import Artifact
+from crucible.domain.auth import BrowserSession
 from crucible.domain.commands import CommandSpec
 from crucible.domain.compaction import Compaction
 from crucible.domain.conversation import (
@@ -1832,3 +1833,52 @@ class IntegrationRepository:
             if value is not None:
                 values.append(value)
         return tuple(values)
+
+
+class BrowserSessionRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, value: BrowserSession) -> None:
+        await self._session.execute(
+            insert(models.browser_sessions).values(
+                session_hash=value.session_hash,
+                csrf_hash=value.csrf_hash,
+                created_at=value.created_at,
+                expires_at=value.expires_at,
+                revoked_at=value.revoked_at,
+            )
+        )
+        await self._session.flush()
+
+    async def get(self, session_hash: str) -> BrowserSession | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.browser_sessions).where(
+                        models.browser_sessions.c.session_hash == session_hash
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return (
+            None
+            if row is None
+            else BrowserSession(
+                row["session_hash"],
+                row["csrf_hash"],
+                row["created_at"],
+                row["expires_at"],
+                row["revoked_at"],
+            )
+        )
+
+    async def update(self, value: BrowserSession) -> None:
+        await self._session.execute(
+            update(models.browser_sessions)
+            .where(models.browser_sessions.c.session_hash == value.session_hash)
+            .values(csrf_hash=value.csrf_hash, revoked_at=value.revoked_at)
+        )
+        await self._session.flush()

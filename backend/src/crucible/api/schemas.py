@@ -305,3 +305,11 @@ class TaskReviewResponse(ApiModel):
     validation_attempts: list[ValidationAttemptReviewResponse]
     result_revisions: list[ResultRevisionResponse]
     integrations: list[IntegrationResponse]
+
+
+class BootstrapRequest(ApiModel):
+    secret: str
+
+
+class BootstrapResponse(ApiModel):
+    csrf_token: str

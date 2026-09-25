@@ -82,14 +82,15 @@ it("registers, creates a task, reconstructs it, and submits a message", async ()
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
   await waitFor(() =>
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/tasks/task/messages",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({
-          "Idempotency-Key": expect.any(String),
-        }),
+    expect(
+      fetchMock.mock.calls.some(([url, init]) => {
+        const headers = new Headers(init?.headers);
+        return (
+          url === "/api/tasks/task/messages" &&
+          init?.method === "POST" &&
+          Boolean(headers.get("Idempotency-Key"))
+        );
       }),
-    ),
+    ).toBe(true),
   );
 });

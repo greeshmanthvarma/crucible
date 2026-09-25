@@ -415,3 +415,13 @@ integrations = Table(
     Column("completed_at", UTCDateTime()),
     UniqueConstraint("result_revision_id", "idempotency_key"),
 )
+
+browser_sessions = Table(
+    "browser_sessions",
+    metadata,
+    Column("session_hash", String(64), primary_key=True),
+    Column("csrf_hash", String(64), nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    Column("expires_at", UTCDateTime(), nullable=False),
+    Column("revoked_at", UTCDateTime()),
+)

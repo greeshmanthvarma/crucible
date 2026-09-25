@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from crucible.application.ports import (
     ApprovalStore,
     ArtifactMetadataStore,
+    BrowserSessionStore,
     CompactionStore,
     CompletionProposalStore,
     ContextManifestStore,
@@ -29,6 +30,7 @@ from crucible.storage.database import Database
 from crucible.storage.repositories import (
     ApprovalRepository,
     ArtifactRepository,
+    BrowserSessionRepository,
     CompactionRepository,
     CompletionProposalRepository,
     ContextManifestRepository,
@@ -71,6 +73,7 @@ class SqlAlchemyUnitOfWork:
     validation_command_results: ValidationCommandResultStore
     result_revisions: ResultRevisionStore
     integrations: IntegrationStore
+    browser_sessions: BrowserSessionStore
 
     def __init__(self, database: Database) -> None:
         self._session_factory = async_sessionmaker(
@@ -100,6 +103,7 @@ class SqlAlchemyUnitOfWork:
         )
         self.result_revisions = ResultRevisionRepository(self.session)
         self.integrations = IntegrationRepository(self.session)
+        self.browser_sessions = BrowserSessionRepository(self.session)
         return self
 
     async def __aexit__(

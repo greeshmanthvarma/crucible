@@ -1,4 +1,5 @@
 import type { components } from "./schema";
+import { sessionFetch } from "../auth/session";
 
 export type RepositoryResponse = components["schemas"]["RepositoryResponse"];
 export type TaskResponse = components["schemas"]["TaskResponse"];
@@ -53,7 +54,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  const response = await sessionFetch(path, {
     ...init,
     headers: { "Content-Type": "application/json", ...init?.headers },
   });

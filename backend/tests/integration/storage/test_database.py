@@ -36,6 +36,7 @@ async def test_sqlite_policy_and_migrated_table_set(database: Database) -> None:
         "completion_proposals",
         "result_revisions",
         "integrations",
+        "browser_sessions",
         "alembic_version",
     }
     assert Path(database.path).exists()

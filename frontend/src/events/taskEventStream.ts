@@ -38,7 +38,9 @@ export const openTaskEventStream: EventStreamFactory = (
   onEvent,
   onOpen,
 ) => {
-  const source = new EventSource(`/api/tasks/${taskId}/events`);
+  const source = new EventSource(`/api/tasks/${taskId}/events`, {
+    withCredentials: true,
+  });
   source.addEventListener("task_event", (event) => {
     onEvent(
       JSON.parse((event as MessageEvent<string>).data) as TaskEventEnvelope,

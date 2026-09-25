@@ -118,8 +118,21 @@ Start the development server:
 
 ```sh
 uv run alembic upgrade head
-uv run uvicorn crucible.api.app:create_app --factory --reload
+uv run uvicorn crucible.api.app:create_app --factory --host 127.0.0.1 --reload
 ```
+
+The server prints a high-entropy, one-time bootstrap secret at startup. Open
+`http://127.0.0.1:8000/#bootstrap=<secret>` once to exchange it for an opaque,
+revocable `HttpOnly; SameSite=Strict` browser session. The secret is removed
+from the address bar after exchange; neither it nor the session credential is
+stored in browser storage.
+
+Production uses one origin by default (`http://127.0.0.1:8000`). For the Vite
+development server, set `CRUCIBLE_DEVELOPMENT_ORIGIN` to its one exact origin,
+for example `http://127.0.0.1:5173`; credentialed wildcard CORS is not enabled.
+Set `CRUCIBLE_ORIGIN` to the exact API origin when changing the port. HTTPS
+deployments must set `CRUCIBLE_SECURE_COOKIE=true`. All unsafe API requests
+require that exact Origin plus the in-memory CSRF token issued at bootstrap.
 
 ## Frontend
 

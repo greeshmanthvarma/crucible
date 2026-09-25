@@ -8,6 +8,7 @@ from crucible.application.idempotency import IdempotencyRecord
 from crucible.context.manifests import ContextManifest
 from crucible.domain.approvals import Approval
 from crucible.domain.artifacts import Artifact
+from crucible.domain.auth import BrowserSession
 from crucible.domain.compaction import Compaction
 from crucible.domain.conversation import Message
 from crucible.domain.events import Event
@@ -180,6 +181,12 @@ class IntegrationStore(Protocol):
     ) -> tuple[Integration, ...]: ...
 
 
+class BrowserSessionStore(Protocol):
+    async def add(self, value: BrowserSession) -> None: ...
+    async def get(self, session_hash: str) -> BrowserSession | None: ...
+    async def update(self, value: BrowserSession) -> None: ...
+
+
 class RunSupervisor(Protocol):
     async def submit(self, run_id: UUID) -> None: ...
     async def reconcile(self) -> None: ...
@@ -210,6 +217,7 @@ class UnitOfWork(Protocol):
     completion_proposals: CompletionProposalStore
     result_revisions: ResultRevisionStore
     integrations: IntegrationStore
+    browser_sessions: BrowserSessionStore
 
     async def __aenter__(self) -> Self: ...
     async def __aexit__(

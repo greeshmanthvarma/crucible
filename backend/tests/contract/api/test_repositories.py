@@ -134,12 +134,24 @@ async def test_default_application_wires_repository_service(
     root = tmp_path / "repository"
     create_repository(root)
     monkeypatch.setenv("CRUCIBLE_DATABASE_URL", database_url)
+    monkeypatch.setenv("CRUCIBLE_ORIGIN", "http://test")
+    monkeypatch.setattr("crucible.api.app.secrets.token_urlsafe", lambda _: "secret")
     app = create_app()
 
     async with app.router.lifespan_context(app):
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
-            response = await client.post("/api/repositories", json={"path": str(root)})
+            bootstrap = await client.post(
+                "/api/auth/bootstrap", json={"secret": "secret"}
+            )
+            response = await client.post(
+                "/api/repositories",
+                json={"path": str(root)},
+                headers={
+                    "Origin": "http://test",
+                    "X-CSRF-Token": bootstrap.json()["csrfToken"],
+                },
+            )
 
     assert response.status_code == 201
