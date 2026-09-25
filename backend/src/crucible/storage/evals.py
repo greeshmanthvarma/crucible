@@ -20,6 +20,7 @@ from crucible.domain.evals import (
     RunSummary,
     StepUsage,
     TrialStatus,
+    UsageSource,
 )
 from crucible.storage import models
 
@@ -262,6 +263,31 @@ class SqlAlchemyEvalStore:
                 source=value.source.value,
                 created_at=value.created_at,
             )
+        )
+
+    async def list_usage(self, run_id: UUID) -> tuple[StepUsage, ...]:
+        rows = (
+            (
+                await self._session.execute(
+                    select(models.step_usage)
+                    .where(models.step_usage.c.run_id == str(run_id))
+                    .order_by(models.step_usage.c.step_id)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        return tuple(
+            StepUsage(
+                UUID(row["step_id"]),
+                UUID(row["run_id"]),
+                row["model_id"],
+                row["input_tokens"],
+                row["output_tokens"],
+                UsageSource(row["source"]),
+                row["created_at"],
+            )
+            for row in rows
         )
 
     async def upsert_summary(self, value: RunSummary) -> None:

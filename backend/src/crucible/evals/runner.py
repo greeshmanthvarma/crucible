@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -26,6 +26,7 @@ from crucible.evals.manifests import (
     EvalPartition,
     EvalSuiteDefinition,
 )
+from crucible.evals.reporting import EvalReporter
 
 
 @dataclass(frozen=True)
@@ -86,12 +87,16 @@ class EvalRunner:
         fixtures: FixturePreparer,
         evaluators: EvaluatorRegistry,
         approval_prompter: ApprovalPrompter | None = None,
+        reporter: EvalReporter | None = None,
     ) -> None:
         self._container = container
         self._suite = suite
         self._fixtures = fixtures
         self._evaluators = evaluators
         self._approval_prompter = approval_prompter
+        self._reporter = reporter or EvalReporter(
+            container.unit_of_work, container.artifact_service
+        )
         models = {case.model for case in suite.cases}
         if len(models) != 1 or models != {container.model_id}:
             raise ValueError("selected Suite requires one matching effective model")
@@ -196,6 +201,10 @@ class EvalRunner:
                 None,
                 datetime.now(UTC),
             )
+            report = await self._reporter.create(
+                terminal, result, self._suite.suite_digest
+            )
+            result = replace(result, report_artifact_id=report.artifact_id)
             async with self._container.unit_of_work() as uow:
                 await uow.evals.add_result(result)
                 await uow.evals.update_trial(terminal)
