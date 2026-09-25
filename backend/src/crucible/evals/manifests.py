@@ -149,6 +149,8 @@ def load_case(
     if value.get("id") != case_id:
         raise ValueError("case ID does not match filename")
     fixture_rel = str(value["fixture"])
+    if PurePosixPath(fixture_rel).parts[:1] != ("fixtures",):
+        raise ValueError("fixture must live inside the partition fixtures directory")
     fixture = _safe_path(selected, fixture_rel)
     if not fixture.is_dir() and not (fixture.is_file() and fixture.suffix == ".bundle"):
         raise ValueError("fixture repository or bundle is missing")
@@ -178,6 +180,8 @@ def load_case(
         content_digest = None
         if kind == "hidden_command":
             hidden_rel = str(options.get("test_path", ""))
+            if PurePosixPath(hidden_rel).parts[:1] != ("tests",):
+                raise ValueError("hidden evaluator must live in partition tests")
             hidden = _safe_path(selected, hidden_rel)
             if not hidden.is_file():
                 raise ValueError("hidden evaluator file is missing")
