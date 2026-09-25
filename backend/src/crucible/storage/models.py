@@ -425,3 +425,92 @@ browser_sessions = Table(
     Column("expires_at", UTCDateTime(), nullable=False),
     Column("revoked_at", UTCDateTime()),
 )
+
+eval_suites = Table(
+    "eval_suites",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("partition", String, nullable=False),
+    Column("name", String, nullable=False),
+    Column("definition_digest", String(64), nullable=False),
+    Column("definition_json", JSON, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    UniqueConstraint("partition", "name", "definition_digest"),
+)
+
+eval_cases = Table(
+    "eval_cases",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("suite_id", ForeignKey("eval_suites.id"), nullable=False),
+    Column("name", String, nullable=False),
+    Column("definition_digest", String(64), nullable=False),
+    Column("definition_json", JSON, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    UniqueConstraint("suite_id", "name", "definition_digest"),
+)
+
+eval_trials = Table(
+    "eval_trials",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("suite_id", ForeignKey("eval_suites.id"), nullable=False),
+    Column("case_id", ForeignKey("eval_cases.id"), nullable=False),
+    Column("invocation_id", String(36), nullable=False),
+    Column("repeat_index", Integer, nullable=False),
+    Column("partition", String, nullable=False),
+    Column("case_digest", String(64), nullable=False),
+    Column("configuration_digest", String(64), nullable=False),
+    Column("configuration_snapshot_json", JSON),
+    Column("status", String, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    Column("updated_at", UTCDateTime(), nullable=False),
+    Column("fixture_commit", String(40)),
+    Column("fixture_content_digest", String(64)),
+    Column("fixture_root", String),
+    Column("repository_id", ForeignKey("repositories.id")),
+    Column("task_id", ForeignKey("tasks.id")),
+    Column("run_id", ForeignKey("runs.id")),
+    Column("failure_code", String),
+    UniqueConstraint("suite_id", "case_id", "repeat_index", "invocation_id"),
+    CheckConstraint("repeat_index > 0"),
+    CheckConstraint(
+        "status IN ('queued','preparing','running','evaluating',"
+        "'completed','failed','interrupted')"
+    ),
+)
+
+eval_results = Table(
+    "eval_results",
+    metadata,
+    Column("trial_id", ForeignKey("eval_trials.id"), primary_key=True),
+    Column("verdict", String, nullable=False),
+    Column("evaluator_results_json", JSON, nullable=False),
+    Column("report_artifact_id", ForeignKey("artifacts.id")),
+    Column("created_at", UTCDateTime(), nullable=False),
+    CheckConstraint("verdict IN ('passed','failed','error')"),
+)
+
+step_usage = Table(
+    "step_usage",
+    metadata,
+    Column("step_id", ForeignKey("steps.id"), primary_key=True),
+    Column("run_id", ForeignKey("runs.id"), nullable=False),
+    Column("model_id", String, nullable=False),
+    Column("input_tokens", Integer, nullable=False),
+    Column("output_tokens", Integer, nullable=False),
+    Column("source", String, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    CheckConstraint("source IN ('reported','estimated')"),
+    CheckConstraint("input_tokens >= 0 AND output_tokens >= 0"),
+)
+
+run_summaries = Table(
+    "run_summaries",
+    metadata,
+    Column("run_id", ForeignKey("runs.id"), primary_key=True),
+    Column("schema_version", Integer, nullable=False),
+    Column("projection_json", JSON, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    CheckConstraint("schema_version > 0"),
+)

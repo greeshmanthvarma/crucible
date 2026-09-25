@@ -1,0 +1,22 @@
+version = 1
+id = "sum"
+fixture = "fixtures/sum.bundle"
+revision = "ac35176695fd537631d75ae6f0f3d9b876158d34"
+prompt = "EVAL_CASE:sum Implement sum.sh so sh sum.sh A B prints their integer sum."
+model = "fake"
+
+[[evaluators]]
+kind = "required_file"
+path = "sum.sh"
+
+[[evaluators]]
+kind = "allowed_files"
+paths = ["sum.sh"]
+
+[[evaluators]]
+kind = "hidden_command"
+test_path = "tests/sum/check.sh"
+image = "alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
+executable = "sh"
+arguments = ["/tests/sum/check.sh"]
+timeout_seconds = 30

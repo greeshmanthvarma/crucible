@@ -74,7 +74,7 @@ class ExternalResource:
         resource_id: ExternalResourceId,
         task_id: TaskId,
         run_id: RunId,
-        tool_call_id: ToolCallId,
+        tool_call_id: ToolCallId | None,
         external_identity: str,
         now: datetime,
         *,

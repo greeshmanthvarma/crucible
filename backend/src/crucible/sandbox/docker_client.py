@@ -190,8 +190,9 @@ class SubprocessDockerClient:
         stdout, stderr = await process.communicate()
         if process.returncode != 0:
             detail = stderr.decode(errors="replace").strip()
-            if missing_ok and (
-                "No such volume" in detail or "No such container" in detail
+            if missing_ok and any(
+                marker in detail.lower()
+                for marker in ("no such volume", "no such container", "no such object")
             ):
                 return None
             raise DockerClientError(detail or "Docker command failed")

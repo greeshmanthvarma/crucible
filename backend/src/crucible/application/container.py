@@ -25,16 +25,18 @@ from crucible.artifacts.store import LocalArtifactStore
 from crucible.context.compaction import CompactionLifecycle
 from crucible.context.manager import ContextManager, SimpleTokenEstimator
 from crucible.domain.clock import SystemClock
+from crucible.domain.evals import EvalBudgets
 from crucible.engine.approval_broker import InMemoryApprovalBroker
 from crucible.engine.compaction_gateway import ModelCompactionGateway
 from crucible.engine.fake_gateway import FakeCompactionGateway, FakeModelGateway
+from crucible.engine.gateway import ModelGateway
 from crucible.engine.journal import RunJournal
 from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
 from crucible.engine.supervisor import LocalRunSupervisor
 from crucible.models.litellm_gateway import LiteLLMModelGateway
 from crucible.sandbox.docker import DockerSandboxBackend
-from crucible.sandbox.docker_client import SubprocessDockerClient
+from crucible.sandbox.docker_client import DockerClient, SubprocessDockerClient
 from crucible.sandbox.resources import TaskResourceManager
 from crucible.storage.database import Database
 from crucible.storage.unit_of_work import SqlAlchemyUnitOfWork
@@ -48,6 +50,7 @@ from crucible.workspaces.manager import WorkspaceManager
 
 @dataclass(frozen=True)
 class ApplicationContainer:
+    model_id: str
     database: Database
     repository_service: RepositoryService
     task_service: TaskService
@@ -62,9 +65,20 @@ class ApplicationContainer:
     sandbox_reconciler: SandboxReconciler
     reconciler: StartupReconciler
     unit_of_work: Callable[[], UnitOfWork]
+    eval_sandbox: DockerSandboxBackend
 
     @classmethod
-    async def create(cls, database_url: str, data_dir: Path) -> "ApplicationContainer":
+    async def create(
+        cls,
+        database_url: str,
+        data_dir: Path,
+        *,
+        gateway_factory: Callable[[], ModelGateway] | None = None,
+        model_id: str | None = None,
+        docker_client: DockerClient | None = None,
+        run_budgets: EvalBudgets | None = None,
+        context_limits: tuple[int, int] | None = None,
+    ) -> "ApplicationContainer":
         database = await Database.create(database_url)
         await _verify_current_revision(database)
 
@@ -77,7 +91,7 @@ class ApplicationContainer:
         approval_broker = InMemoryApprovalBroker()
         journal = RunJournal(unit_of_work, clock, notifier)
         workspaces = WorkspaceManager(git, data_dir)
-        docker = SubprocessDockerClient()
+        docker = docker_client or SubprocessDockerClient()
         resource_manager = TaskResourceManager(docker, unit_of_work, clock)
         approval_service = ApprovalService(
             unit_of_work, clock, approval_broker, notifier
@@ -93,8 +107,14 @@ class ApplicationContainer:
             artifact_service,
             journal=journal,
         )
-        model = os.environ.get("CRUCIBLE_MODEL", "fake")
-        gateway = LiteLLMModelGateway() if model != "fake" else FakeModelGateway()
+        model = model_id or os.environ.get("CRUCIBLE_MODEL", "fake")
+        gateway: ModelGateway = (
+            gateway_factory()
+            if gateway_factory is not None
+            else LiteLLMModelGateway()
+            if model != "fake"
+            else FakeModelGateway()
+        )
         compaction_gateway = (
             FakeCompactionGateway()
             if model == "fake"
@@ -108,8 +128,16 @@ class ApplicationContainer:
             harness_policy="Follow harness safety and execution policy.",
             tool_contract="Use only the structured tools supplied by the harness.",
             model=model,
-            input_limit=int(os.environ.get("CRUCIBLE_MODEL_INPUT_LIMIT", "100000")),
-            output_reserve=int(os.environ.get("CRUCIBLE_MODEL_OUTPUT_RESERVE", "4096")),
+            input_limit=(
+                context_limits[0]
+                if context_limits
+                else int(os.environ.get("CRUCIBLE_MODEL_INPUT_LIMIT", "100000"))
+            ),
+            output_reserve=(
+                context_limits[1]
+                if context_limits
+                else int(os.environ.get("CRUCIBLE_MODEL_OUTPUT_RESERVE", "4096"))
+            ),
             tools=registry.definitions,
             journal=journal,
             compaction_lifecycle=CompactionLifecycle(
@@ -128,11 +156,19 @@ class ApplicationContainer:
             journal=journal,
             context_manager=context_manager,
             dispatcher=ToolDispatcher(registry, unit_of_work, clock, journal=journal),
-            max_steps=int(os.environ.get("CRUCIBLE_MAX_STEPS", "20")),
-            max_tool_calls=int(os.environ.get("CRUCIBLE_MAX_TOOL_CALLS", "100")),
-            max_model_tokens=int(os.environ.get("CRUCIBLE_MAX_MODEL_TOKENS", "200000")),
+            max_steps=run_budgets.max_steps
+            if run_budgets
+            else int(os.environ.get("CRUCIBLE_MAX_STEPS", "20")),
+            max_tool_calls=run_budgets.max_tool_calls
+            if run_budgets
+            else int(os.environ.get("CRUCIBLE_MAX_TOOL_CALLS", "100")),
+            max_model_tokens=run_budgets.max_model_tokens
+            if run_budgets
+            else int(os.environ.get("CRUCIBLE_MAX_MODEL_TOKENS", "200000")),
             max_active_seconds=float(
-                os.environ.get("CRUCIBLE_MAX_ACTIVE_SECONDS", "600")
+                run_budgets.max_active_seconds
+                if run_budgets
+                else os.environ.get("CRUCIBLE_MAX_ACTIVE_SECONDS", "600")
             ),
         )
         supervisor = LocalRunSupervisor(
@@ -156,6 +192,7 @@ class ApplicationContainer:
             approval_broker,
         )
         return cls(
+            model_id=model,
             database=database,
             repository_service=RepositoryService(git, unit_of_work, clock),
             task_service=TaskService(
@@ -174,6 +211,7 @@ class ApplicationContainer:
                 workspaces, unit_of_work, clock, notifier, resource_manager
             ),
             unit_of_work=unit_of_work,
+            eval_sandbox=sandbox_backend,
         )
 
     async def start(self) -> None:

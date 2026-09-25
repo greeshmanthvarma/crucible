@@ -172,8 +172,52 @@ model smoke tests are explicit opt-in (`make smoke-real-model`) and require mode
 credentials. Supported local operation requires Git, Python 3.13, Node.js 24,
 pnpm, and Docker only for real sandbox execution.
 
-Milestone one stops here. Slice 5—the Eval Runner, behavioral suites,
-self-improvement campaigns, promotion, and rollback—is intentionally deferred.
+## Modest Eval Runner
+
+The Eval Runner is an explicit local command. It creates ordinary Tasks and Runs
+from pinned Git fixture commits, evaluates the resulting Workspace after each Run,
+and retains each Trial, report Artifact, and raw trace reference. A reachable Docker
+daemon and the pinned Alpine evaluator image in `evals/development/cases/` are
+required for the hidden behavioral checks. The `smoke` Suite has one harness Case
+and two small coding Cases; the latter check program behavior in isolated Docker
+containers. The hidden test source is never placed in the coding Task Workspace.
+
+From `backend/`, run a repeatable offline proof in a fresh data directory:
+
+```sh
+uv run crucible eval run smoke --deterministic --trials 2 --data-dir "$(mktemp -d /tmp/crucible-eval.XXXXXX)"
+```
+
+`make smoke-eval` runs one Trial per Case. The deterministic gateway uses the normal
+model and tool loop with a versioned local trajectory. It is limited to development
+Cases using the `fake` model; it needs no provider credentials. A live model run is
+opt-in: set a real model in your own Case manifest and invoke `eval run` without
+`--deterministic`, with that provider's credential available to LiteLLM.
+
+The command prints an invocation ID and one row per Trial. Use
+`uv run crucible eval show <invocation-id> --data-dir <same-dir>` to retrieve rows
+after restart. Each row links to a private JSON report Artifact. Reports include
+fixture and configuration digests, verdict, evaluator evidence IDs, metrics, and
+raw Run trace IDs. `--trials N` repeats each Case with a fresh fixture and separate
+Task/Run identities. `estimated_cost` is `null` until a versioned price table with
+an exact model and token-usage basis is supplied using `--price-table`.
+
+Case manifests may specify `[budgets]` for Run limits, `[settings]` for Repository
+settings and approved Validation command specs, and `[setup].required_paths` for
+files that must exist in the pinned fixture before Task creation. Setup is
+declarative; any dependencies needed by the coding Task belong in the pinned
+fixture or an explicitly approved command during the Run.
+
+If a Case requests `execute_command`, the CLI displays the exact command and
+Approval digest and waits for a human `approve` or `deny` response. Closing input
+or interrupting leaves durable failure/interruption evidence; no approval is
+implied. Normal lookup searches `evals/development` only. A protected run needs
+both `--partition held-out` and `--held-out-root <private-root>`; deterministic
+trajectories are unavailable in that partition. The included held-out sample
+demonstrates its layout. Eval execution does not trigger from interactive Tasks.
+
+This slice stops at local evaluation and reporting. Self-improvement campaigns,
+promotion, and rollback are future work.
 
 ## Frontend
 

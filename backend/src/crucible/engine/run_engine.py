@@ -17,6 +17,7 @@ from crucible.domain.conversation import (
     MessageRole,
     MessageStatus,
 )
+from crucible.domain.evals import StepUsage, UsageSource
 from crucible.domain.events import EventType
 from crucible.domain.ids import new_id
 from crucible.domain.run import Run
@@ -197,6 +198,8 @@ class RunEngine:
         stop: ModelStop | None = None
         model_tokens = 0
         usage_reported = False
+        reported_input = 0
+        reported_output = 0
         async for item in self._gateway.stream(prepared.request):
             if isinstance(item, TextDelta):
                 text.append(item.text)
@@ -209,18 +212,36 @@ class RunEngine:
             elif isinstance(item, ModelError):
                 raise RuntimeError(f"{item.code}: {item.detail}")
             elif isinstance(item, ModelUsage):
-                usage_reported = True
-                model_tokens += (item.input_tokens or 0) + (item.output_tokens or 0)
+                if item.input_tokens is not None or item.output_tokens is not None:
+                    usage_reported = True
+                    reported_input += item.input_tokens or 0
+                    reported_output += item.output_tokens or 0
+
+        model_tokens = reported_input + reported_output
 
         if stop is None:
             raise RuntimeError("Model stream ended without a terminal stop item")
         if not usage_reported:
             output_characters = sum(map(len, text)) + sum(map(len, reasoning))
-            model_tokens = prepared.manifest.estimated_tokens + max(
-                1, (output_characters + 3) // 4
-            )
+            reported_input = prepared.manifest.estimated_tokens
+            reported_output = max(1, (output_characters + 3) // 4)
+            model_tokens = reported_input + reported_output
         if model_tokens > token_budget:
             raise RunBudgetExceeded("Run exceeded configured model-token budget")
+
+        async with self._unit_of_work() as uow:
+            await uow.evals.add_usage(
+                StepUsage(
+                    step.id,
+                    run.id,
+                    prepared.request.model,
+                    reported_input,
+                    reported_output,
+                    UsageSource.REPORTED if usage_reported else UsageSource.ESTIMATED,
+                    self._clock.now(),
+                )
+            )
+            await uow.commit()
 
         now = self._clock.now()
         message_id = new_id()

@@ -13,6 +13,9 @@ dependencies = [
     "uvicorn[standard]",
 ]
 
+[project.scripts]
+crucible = "crucible.evals.cli:main"
+
 [dependency-groups]
 dev = [
     "httpx",

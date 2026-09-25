@@ -1,4 +1,4 @@
-.PHONY: install format lint typecheck test check milestone smoke-docker smoke-real-model dev-backend dev-frontend
+.PHONY: install format lint typecheck test check milestone smoke-eval smoke-docker smoke-real-model dev-backend dev-frontend
 
 install:
 	cd backend && uv sync --frozen
@@ -30,6 +30,9 @@ check: lint typecheck test
 
 milestone:
 	cd backend && uv run pytest -q tests/integration/test_milestone_one_workflow.py
+
+smoke-eval:
+	cd backend && uv run crucible eval run smoke --deterministic --data-dir "$$(mktemp -d /tmp/crucible-eval-smoke.XXXXXX)"
 
 smoke-docker:
 	cd backend && uv run pytest -q -m docker
