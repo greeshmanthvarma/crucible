@@ -1,0 +1,10 @@
+version = 1
+id = "tiny"
+fixture = "fixtures/tiny.bundle"
+revision = "109b100bb64337098d19b75ba8127cd11762ffff"
+prompt = "Create answer.txt containing the word ready."
+model = "fake"
+
+[[evaluators]]
+kind = "required_file"
+path = "answer.txt"
