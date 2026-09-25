@@ -16,7 +16,14 @@ from crucible.domain.repository import RepositorySettings
 DIGEST_VERSION = 1
 _ID = re.compile(r"^[a-z][a-z0-9_-]*$")
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
-_KINDS = {"required_file", "forbidden_file", "allowed_files", "hidden_command"}
+_KINDS = {
+    "required_file",
+    "forbidden_file",
+    "allowed_files",
+    "required_api",
+    "diff_constraints",
+    "hidden_command",
+}
 
 
 class EvalPartition(StrEnum):

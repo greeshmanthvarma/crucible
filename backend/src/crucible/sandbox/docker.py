@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import re
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -10,6 +11,7 @@ from crucible.domain.ids import new_id
 from crucible.domain.resources import ExternalResource, ExternalResourceStatus
 from crucible.sandbox.docker_client import DockerClient, DockerClientError
 from crucible.sandbox.protocol import (
+    EvalSandboxRequest,
     OutputCallback,
     OutputChunk,
     SandboxOutcome,
@@ -136,6 +138,145 @@ class DockerSandboxBackend:
 
     async def cancel(self, container_id: str) -> None:
         await self._cleanup(container_id)
+
+    async def evaluate(
+        self, request: EvalSandboxRequest, on_chunk: OutputCallback
+    ) -> SandboxOutcome:
+        """Run protected tests against read-only inputs after the coding Run."""
+        source = request.source_path.resolve(strict=True)
+        tests = request.tests_path.resolve(strict=True)
+        if source == tests or source in tests.parents or tests in source.parents:
+            raise ValueError("evaluator source and tests must be separate")
+        if not source.is_dir() or not tests.is_dir():
+            raise ValueError("evaluator inputs must be directories")
+        if re.fullmatch(r".+@sha256:[0-9a-f]{64}", request.image) is None:
+            raise ValueError("evaluator image must be digest pinned")
+        if not 1 <= request.timeout_seconds <= 3600 or request.output_bytes < 1:
+            raise ValueError("invalid evaluator bounds")
+        resource_id = new_id()
+        labels = {
+            MANAGED_LABEL: "true",
+            TASK_LABEL: str(request.task_id),
+            KIND_LABEL: "container",
+            RESOURCE_LABEL: str(resource_id),
+            "harness.run_id": str(request.run_id),
+            "harness.eval_trial_id": str(request.trial_id),
+        }
+        arguments = [
+            "create",
+            "--name",
+            f"crucible-eval-{request.trial_id}",
+            "--read-only",
+            "--user",
+            "65532:65532",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--network",
+            "none",
+            "--cpus",
+            "2",
+            "--memory",
+            str(1024**3),
+            "--pids-limit",
+            "128",
+        ]
+        for key, value in sorted(labels.items()):
+            arguments.extend(("--label", f"{key}={value}"))
+        arguments.extend(
+            (
+                "--env",
+                "PATH=/usr/local/bin:/usr/bin:/bin",
+                "--env",
+                "HOME=/tmp",
+                "--env",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "--mount",
+                f"type=bind,src={source},dst=/source,readonly",
+                "--mount",
+                f"type=bind,src={tests},dst=/tests,readonly",
+                "--workdir",
+                "/source",
+                "--tmpfs",
+                "/tmp:rw,nosuid,nodev,size=64m",
+                request.image,
+                request.executable,
+                *request.arguments,
+            )
+        )
+        started_at = self._clock.now()
+        container_id = await self._docker.create_container(tuple(arguments))
+        resource = ExternalResource.container(
+            resource_id,
+            request.task_id,
+            request.run_id,
+            None,
+            container_id,
+            started_at,
+            labels=labels,
+            metadata={"name": f"crucible-eval-{request.trial_id}"},
+        )
+        try:
+            async with self._unit_of_work() as uow:
+                await uow.external_resources.add(resource)
+                await uow.commit()
+        except BaseException:
+            await self._cleanup(container_id)
+            raise
+        original_bytes = 0
+        retained_bytes = 0
+        termination = SandboxTermination.COMPLETED
+        exit_code: int | None = None
+
+        async def bounded(chunk: OutputChunk) -> None:
+            nonlocal original_bytes, retained_bytes
+            original_bytes += len(chunk.data)
+            remaining = request.output_bytes - retained_bytes
+            retained = chunk.data[: max(0, remaining)]
+            retained_bytes += len(retained)
+            if retained:
+                emitted = on_chunk(OutputChunk(chunk.stream, chunk.sequence, retained))
+                if inspect.isawaitable(emitted):
+                    await emitted
+            if len(retained) < len(chunk.data):
+                raise _OutputLimitReached
+
+        try:
+            try:
+                exit_code = await asyncio.wait_for(
+                    self._docker.start_attached(container_id, bounded),
+                    timeout=request.timeout_seconds,
+                )
+            except TimeoutError:
+                termination = SandboxTermination.TIMED_OUT
+            except _OutputLimitReached:
+                termination = SandboxTermination.OUTPUT_LIMIT
+        except asyncio.CancelledError:
+            termination = SandboxTermination.CANCELLED
+            raise
+        except Exception:
+            termination = SandboxTermination.BACKEND_ERROR
+            raise
+        finally:
+            cleaned = await self._cleanup(container_id)
+            await self._mark_status(
+                resource,
+                ExternalResourceStatus.REMOVED
+                if cleaned
+                else ExternalResourceStatus.ERROR,
+            )
+        return SandboxOutcome(
+            exit_code,
+            termination,
+            started_at,
+            self._clock.now(),
+            request.image,
+            container_id,
+            original_bytes,
+            retained_bytes,
+            original_bytes > retained_bytes,
+        )
 
     async def reconcile(self, resources: tuple[ExternalResource, ...]) -> None:
         discovered = {

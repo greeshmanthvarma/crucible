@@ -45,6 +45,20 @@ class SandboxRequest:
     mounts: tuple[SandboxMount, ...]
 
 
+@dataclass(frozen=True)
+class EvalSandboxRequest:
+    task_id: TaskId
+    run_id: RunId
+    trial_id: ExternalResourceId
+    source_path: Path
+    tests_path: Path
+    image: str
+    executable: str
+    arguments: tuple[str, ...]
+    timeout_seconds: int
+    output_bytes: int = 65_536
+
+
 class SandboxTermination(StrEnum):
     COMPLETED = "completed"
     TIMED_OUT = "timed_out"
@@ -84,3 +98,9 @@ class SandboxBackend(Protocol):
     async def cancel(self, container_id: str) -> None: ...
 
     async def reconcile(self, resources: tuple[ExternalResource, ...]) -> None: ...
+
+
+class EvalSandboxBackend(Protocol):
+    async def evaluate(
+        self, request: EvalSandboxRequest, on_chunk: OutputCallback
+    ) -> SandboxOutcome: ...
