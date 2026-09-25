@@ -104,7 +104,10 @@ def build_report(
         "repeat_index": trial.repeat_index,
         "partition": trial.partition,
         "configuration_digest": trial.configuration_digest,
+        "configuration_snapshot": trial.configuration_snapshot,
         "fixture_commit": trial.fixture_commit,
+        "fixture_content_digest": trial.fixture_content_digest,
+        "fixture_root": trial.fixture_root,
         "repository_id": str(trial.repository_id) if trial.repository_id else None,
         "task_id": str(trial.task_id) if trial.task_id else None,
         "run_id": str(trial.run_id) if trial.run_id else None,
@@ -114,7 +117,7 @@ def build_report(
         "run_outcome": projection.get("outcome"),
         "policy": {
             "approval_decisions": sorted(approval_decisions),
-            "compliant": "pending" not in approval_decisions,
+            "compliant": all(decision == "approved" for decision in approval_decisions),
         },
         "tokens": {
             "input": sum(item.input_tokens for item in usage),

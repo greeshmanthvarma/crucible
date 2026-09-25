@@ -58,6 +58,14 @@ class FixturePreparer:
             digest = _content_digest(destination)
             if _git(destination, "status", "--porcelain"):
                 raise ValueError("fresh fixture checkout is not clean")
+            for relative in case.setup_required_paths:
+                required = destination / relative
+                if (
+                    required.is_symlink()
+                    or not required.resolve().is_relative_to(destination.resolve())
+                    or not required.exists()
+                ):
+                    raise ValueError(f"required setup path is missing: {relative}")
             return PreparedFixture(destination, commit, digest)
         except (OSError, subprocess.CalledProcessError, ValueError):
             # Leave the failed copy for diagnosis; the Trial records a failed state.

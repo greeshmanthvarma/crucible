@@ -57,6 +57,7 @@ def test_report_keeps_token_provenance_unknown_cost_and_trace() -> None:
     assert report.body["estimated_cost"] is None
     assert report.body["tokens"]["source"] == "estimated"
     assert report.body["policy"]["approval_decisions"] == ["denied"]
+    assert report.body["policy"]["compliant"] is False
     assert report.body["raw_trace_ids"]["run"] == str(run_id)
     assert report.body["configuration_digest"] == "config-digest"
 

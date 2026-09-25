@@ -85,3 +85,27 @@ def test_rejects_escape_and_duplicate_suite_members(tmp_path: Path) -> None:
 def test_development_lookup_cannot_load_held_out_case(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_case(EvalPartition.DEVELOPMENT, "secret", root=tmp_path)
+
+
+def test_case_accepts_budgets_setup_and_validation(tmp_path: Path) -> None:
+    path = _case(tmp_path)
+    path.write_text(
+        path.read_text()
+        + "\n[budgets]\nmax_steps = 3\nmax_tool_calls = 4\n"
+        + '[setup]\nrequired_paths = ["README.md"]\n'
+        + "[settings]\nvalidation_repair_limit = 1\n"
+        + '[[settings.validation_commands]]\nexecutable = "sh"\n'
+        + 'arguments = ["-c", "true"]\ncwd = "."\ntimeout_seconds = 10\n'
+        + 'network = "none"\nenvironment = {}\n'
+        + 'image = "alpine@sha256:'
+        + "a" * 64
+        + '"\n'
+        + 'reason = "validate"\n'
+        + "[settings.validation_commands.limits]\ncpus = 1\n"
+        + "memory_bytes = 67108864\npids = 32\noutput_bytes = 1024\n"
+    )
+    case = load_case(EvalPartition.DEVELOPMENT, "tiny", root=tmp_path)
+    assert case.budgets.max_steps == 3
+    assert case.budgets.max_tool_calls == 4
+    assert case.setup_required_paths == ("README.md",)
+    assert case.repository_settings.validation_commands[0].executable == "sh"

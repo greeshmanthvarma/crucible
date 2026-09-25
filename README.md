@@ -202,6 +202,12 @@ raw Run trace IDs. `--trials N` repeats each Case with a fresh fixture and separ
 Task/Run identities. `estimated_cost` is `null` until a versioned price table with
 an exact model and token-usage basis is supplied using `--price-table`.
 
+Case manifests may specify `[budgets]` for Run limits, `[settings]` for Repository
+settings and approved Validation command specs, and `[setup].required_paths` for
+files that must exist in the pinned fixture before Task creation. Setup is
+declarative; any dependencies needed by the coding Task belong in the pinned
+fixture or an explicitly approved command during the Run.
+
 If a Case requests `execute_command`, the CLI displays the exact command and
 Approval digest and waits for a human `approve` or `deny` response. Closing input
 or interrupting leaves durable failure/interruption evidence; no approval is

@@ -11,6 +11,8 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from crucible.domain.commands import CommandSpec
+from crucible.domain.evals import EvalBudgets
 from crucible.domain.repository import RepositorySettings
 
 DIGEST_VERSION = 1
@@ -50,6 +52,8 @@ class EvalCaseDefinition:
     case_digest: str
     partition: EvalPartition
     fixture_ref: str
+    budgets: EvalBudgets = EvalBudgets()
+    setup_required_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -151,6 +155,8 @@ def load_case(
             "prompt",
             "model",
             "settings",
+            "budgets",
+            "setup",
             "evaluators",
         },
     )
@@ -172,9 +178,39 @@ def load_case(
         "default_cwd",
         "model_input_limit",
         "model_output_reserve",
+        "validation_commands",
     }:
         raise ValueError("invalid repository settings")
-    settings = RepositorySettings(**settings_raw)
+    validation_raw = settings_raw.pop("validation_commands", [])
+    if not isinstance(validation_raw, list):
+        raise ValueError("validation commands must be an array")
+    settings = RepositorySettings(
+        validation_commands=tuple(
+            CommandSpec.from_dict(command) for command in validation_raw
+        ),
+        **settings_raw,
+    )
+    budgets_raw = value.get("budgets", {})
+    if not isinstance(budgets_raw, dict) or set(budgets_raw) - {
+        "max_steps",
+        "max_tool_calls",
+        "max_model_tokens",
+        "max_active_seconds",
+    }:
+        raise ValueError("invalid Eval budgets")
+    budgets = EvalBudgets(**budgets_raw)
+    setup_raw = value.get("setup", {})
+    if not isinstance(setup_raw, dict) or set(setup_raw) - {"required_paths"}:
+        raise ValueError("invalid Eval setup")
+    setup_paths = setup_raw.get("required_paths", [])
+    if not isinstance(setup_paths, list) or any(
+        not isinstance(item, str) or not item for item in setup_paths
+    ):
+        raise ValueError("setup required_paths must be a list of paths")
+    for item in setup_paths:
+        pure = PurePosixPath(item)
+        if pure.is_absolute() or ".." in pure.parts or "\\" in item:
+            raise ValueError("setup path must be fixture-relative")
     raw_evaluators = value.get("evaluators")
     if not isinstance(raw_evaluators, list) or not raw_evaluators:
         raise ValueError("case needs evaluators")
@@ -217,6 +253,8 @@ def load_case(
         _digest(snapshot),
         partition,
         fixture_rel,
+        budgets,
+        tuple(setup_paths),
     )
 
 

@@ -31,6 +31,26 @@ class UsageSource(StrEnum):
 
 
 @dataclass(frozen=True)
+class EvalBudgets:
+    max_steps: int = 20
+    max_tool_calls: int = 100
+    max_model_tokens: int = 200_000
+    max_active_seconds: float = 600.0
+
+    def __post_init__(self) -> None:
+        if (
+            min(
+                self.max_steps,
+                self.max_tool_calls,
+                self.max_model_tokens,
+                self.max_active_seconds,
+            )
+            <= 0
+        ):
+            raise ValueError("Eval budgets must be positive")
+
+
+@dataclass(frozen=True)
 class EvalSuite:
     id: UUID
     partition: str
@@ -68,6 +88,9 @@ class EvalTrial:
     task_id: UUID | None = None
     run_id: UUID | None = None
     failure_code: str | None = None
+    fixture_content_digest: str | None = None
+    fixture_root: str | None = None
+    configuration_snapshot: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         require_utc(self.created_at, self.updated_at)
@@ -86,6 +109,8 @@ class EvalTrial:
         case_digest: str,
         configuration_digest: str,
         now: datetime,
+        *,
+        configuration_snapshot: dict[str, object] | None = None,
     ) -> Self:
         return cls(
             id,
@@ -99,6 +124,7 @@ class EvalTrial:
             TrialStatus.QUEUED,
             now,
             now,
+            configuration_snapshot=configuration_snapshot,
         )
 
     def _advance(
@@ -117,6 +143,21 @@ class EvalTrial:
     def prepare(self, now: datetime) -> Self:
         return self._advance(TrialStatus.QUEUED, TrialStatus.PREPARING, now)
 
+    def record_fixture(
+        self, source_commit: str, content_digest: str, root: str, now: datetime
+    ) -> Self:
+        if self.status is not TrialStatus.PREPARING or self.fixture_commit is not None:
+            raise ValueError(
+                "fixture identity can only be recorded once while preparing"
+            )
+        return replace(
+            self,
+            fixture_commit=source_commit,
+            fixture_content_digest=content_digest,
+            fixture_root=root,
+            updated_at=now,
+        )
+
     def run(
         self,
         repository_id: UUID,
@@ -124,14 +165,21 @@ class EvalTrial:
         run_id: UUID,
         fixture_commit: str,
         now: datetime,
+        *,
+        fixture_content_digest: str | None = None,
+        fixture_root: str | None = None,
     ) -> Self:
         trial = self._advance(TrialStatus.PREPARING, TrialStatus.RUNNING, now)
+        if trial.fixture_commit is not None and trial.fixture_commit != fixture_commit:
+            raise ValueError("Run fixture commit differs from prepared fixture")
         return replace(
             trial,
             repository_id=repository_id,
             task_id=task_id,
             run_id=run_id,
             fixture_commit=fixture_commit,
+            fixture_content_digest=fixture_content_digest,
+            fixture_root=fixture_root,
         )
 
     def evaluate(self, now: datetime) -> Self:

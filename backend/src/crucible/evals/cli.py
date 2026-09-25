@@ -18,7 +18,7 @@ from crucible.application.approval_service import public_command_spec
 from crucible.application.container import ApplicationContainer
 from crucible.application.ports import UnitOfWork
 from crucible.domain.approvals import Approval, ApprovalStatus
-from crucible.domain.evals import EvalResult, ResultVerdict
+from crucible.domain.evals import EvalBudgets, EvalResult, ResultVerdict
 from crucible.domain.ids import new_id
 from crucible.engine.gateway import ModelGateway
 from crucible.evals.evaluators import EvaluatorRegistry
@@ -148,6 +148,8 @@ async def _open(
     model_id: str | None = None,
     gateway_factory: Callable[[], ModelGateway] | None = None,
     docker_client: DockerClient | None = None,
+    run_budgets: EvalBudgets | None = None,
+    context_limits: tuple[int, int] | None = None,
 ) -> ApplicationContainer:
     config = Config(Path(__file__).parents[3] / "alembic.ini")
     config.set_main_option("sqlalchemy.url", database_url)
@@ -158,6 +160,8 @@ async def _open(
         model_id=model_id,
         gateway_factory=gateway_factory,
         docker_client=docker_client,
+        run_budgets=run_budgets,
+        context_limits=context_limits,
     )
 
 
@@ -240,11 +244,7 @@ async def run_cli(
             f"case-suite-v1:{case.case_digest}".encode()
         ).hexdigest()
         suite = EvalSuiteDefinition(suite_id, (case,), digest, partition)
-    models = {item.model for item in suite.cases}
-    if len(models) != 1:
-        print("Mixed-model Suite is not supported", file=sys.stderr)
-        return 2
-    if args.deterministic and models != {"fake"}:
+    if args.deterministic and any(case.model != "fake" for case in suite.cases):
         parser.error("--deterministic requires Cases using the fake model")
     gateway_version = "deterministic-eval-v1" if args.deterministic else "default"
     effective_gateway_factory = (
@@ -255,42 +255,49 @@ async def run_cli(
         else None
     )
     price_table = load_price_table(args.price_table) if args.price_table else None
-    container = await _open(
-        database_url,
-        data_dir,
-        model_id=next(iter(models)),
-        gateway_factory=effective_gateway_factory,
-        docker_client=docker_client,
-    )
     invocation_id = new_id()
-    try:
-        async with container.unit_of_work() as uow:
-            uncertain = await uow.evals.list_incomplete_trials()
-        for trial in uncertain:
-            if trial.run_id is not None:
-                await container.supervisor.cancel(trial.run_id)
-        await reconcile_incomplete_trials(container.unit_of_work)
-        await container.start()
-        selected_root = root or Path(__file__).parents[4] / "evals" / partition.value
-        runner = EvalRunner(
-            container,
-            suite,
-            FixturePreparer(data_dir),
-            EvaluatorRegistry(
-                data_dir=data_dir,
-                artifacts=container.artifact_service,
-                partition_root=selected_root,
-                sandbox=container.eval_sandbox,
+    run_rows: list[dict[str, object]] = []
+    failed = False
+    for case in suite.cases:
+        container = await _open(
+            database_url,
+            data_dir,
+            model_id=case.model,
+            run_budgets=case.budgets,
+            context_limits=(
+                case.repository_settings.model_input_limit,
+                case.repository_settings.model_output_reserve,
             ),
-            _prompt_for_approval,
-            EvalReporter(
-                container.unit_of_work, container.artifact_service, price_table
-            ),
-            gateway_version,
+            gateway_factory=effective_gateway_factory,
+            docker_client=docker_client,
         )
-        trial_ids: list[UUID] = []
-        failed = False
-        for case in suite.cases:
+        try:
+            async with container.unit_of_work() as uow:
+                uncertain = await uow.evals.list_incomplete_trials()
+            for trial in uncertain:
+                if trial.run_id is not None:
+                    await container.supervisor.cancel(trial.run_id)
+            await reconcile_incomplete_trials(container.unit_of_work)
+            await container.start()
+            selected_root = (
+                root or Path(__file__).parents[4] / "evals" / partition.value
+            )
+            runner = EvalRunner(
+                container,
+                suite,
+                FixturePreparer(data_dir),
+                EvaluatorRegistry(
+                    data_dir=data_dir,
+                    artifacts=container.artifact_service,
+                    partition_root=selected_root,
+                    sandbox=container.eval_sandbox,
+                ),
+                _prompt_for_approval,
+                EvalReporter(
+                    container.unit_of_work, container.artifact_service, price_table
+                ),
+                gateway_version,
+            )
             for repeat_index in range(1, args.trials + 1):
                 result = await runner.run_trial(
                     TrialRequest(
@@ -302,17 +309,16 @@ async def run_cli(
                         invocation_id,
                     )
                 )
-                trial_ids.append(result.trial_id)
+                run_rows.append(await _trial_row(container, result.trial_id, data_dir))
                 failed |= result.verdict is not ResultVerdict.PASSED
-        rows = [await _trial_row(container, item, data_dir) for item in trial_ids]
-        print(
-            json.dumps(
-                {"invocation_id": str(invocation_id), "trials": rows}, sort_keys=True
-            )
+        finally:
+            await container.close()
+    print(
+        json.dumps(
+            {"invocation_id": str(invocation_id), "trials": run_rows}, sort_keys=True
         )
-        return 1 if failed else 0
-    finally:
-        await container.close()
+    )
+    return 1 if failed else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

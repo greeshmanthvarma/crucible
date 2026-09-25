@@ -57,6 +57,13 @@ def configuration_snapshot(
         "schema_version": 1,
         "model": case.model,
         "gateway_version": gateway_version,
+        "budgets": {
+            "max_steps": case.budgets.max_steps,
+            "max_tool_calls": case.budgets.max_tool_calls,
+            "max_model_tokens": case.budgets.max_model_tokens,
+            "max_active_seconds": case.budgets.max_active_seconds,
+        },
+        "setup": {"required_paths": list(case.setup_required_paths)},
         "settings": {
             "validation_commands": [
                 item.as_dict() for item in settings.validation_commands
@@ -104,9 +111,6 @@ class EvalRunner:
             container.unit_of_work, container.artifact_service
         )
         self._gateway_version = gateway_version
-        models = {case.model for case in suite.cases}
-        if len(models) != 1 or models != {container.model_id}:
-            raise ValueError("selected Suite requires one matching effective model")
 
     async def run_trial(self, request: TrialRequest) -> EvalResult:
         if (
@@ -120,6 +124,8 @@ class EvalRunner:
         )
         if case is None:
             raise ValueError(f"Case is not in Suite: {request.case_id}")
+        if case.model != self._container.model_id:
+            raise ValueError("selected Case model differs from the effective model")
         if request.configuration_digest != configuration_digest(
             case, self._gateway_version
         ):
@@ -136,6 +142,7 @@ class EvalRunner:
             case.case_digest,
             request.configuration_digest,
             now,
+            configuration_snapshot=configuration_snapshot(case, self._gateway_version),
         )
         async with self._container.unit_of_work() as uow:
             await uow.evals.add_trial(trial)
@@ -143,6 +150,14 @@ class EvalRunner:
         try:
             trial = await self._update(trial.prepare(datetime.now(UTC)))
             fixture = self._fixtures.prepare(case, trial.id)
+            trial = await self._update(
+                trial.record_fixture(
+                    fixture.source_commit,
+                    fixture.content_digest,
+                    str(fixture.root),
+                    datetime.now(UTC),
+                )
+            )
             registered = await self._container.repository_service.register(fixture.root)
             await self._container.repository_service.update_settings(
                 registered.repository.id, case.repository_settings
@@ -160,6 +175,8 @@ class EvalRunner:
                     submitted.run_id,
                     fixture.source_commit,
                     datetime.now(UTC),
+                    fixture_content_digest=fixture.content_digest,
+                    fixture_root=str(fixture.root),
                 )
             )
             run = await self._await_terminal(submitted.run_id)

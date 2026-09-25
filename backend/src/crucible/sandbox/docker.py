@@ -284,6 +284,11 @@ class DockerSandboxBackend:
             for container in await self._docker.list_containers(f"{MANAGED_LABEL}=true")
         }
         for resource in resources:
+            if resource.status not in (
+                ExternalResourceStatus.ACTIVE,
+                ExternalResourceStatus.ERROR,
+            ):
+                continue
             container = discovered.get(resource.external_identity)
             if container is None:
                 container = await self._docker.inspect_container(

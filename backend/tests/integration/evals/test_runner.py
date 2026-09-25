@@ -130,6 +130,8 @@ async def test_runner_uses_ordinary_task_message_run_and_fresh_fixture(
             "run"
         ] == str(run.id)
         assert trial.fixture_commit == case.fixture_revision
+        assert trial.fixture_content_digest is not None
+        assert trial.fixture_root is not None
     finally:
         await container.close()
 

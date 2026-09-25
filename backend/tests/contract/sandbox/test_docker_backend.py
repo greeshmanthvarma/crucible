@@ -118,6 +118,11 @@ async def test_create_uses_exact_hardening_and_default_no_network(
     async with SqlAlchemyUnitOfWork(database) as uow:
         resources = await uow.external_resources.list_for_task(task.id)
     assert resources[0].external_identity == "container-id"
+    assert resources[0].status == "removed"
+    await backend.reconcile(resources)
+    async with SqlAlchemyUnitOfWork(database) as uow:
+        after_reconcile = await uow.external_resources.list_for_task(task.id)
+    assert after_reconcile[0].status == "removed"
 
 
 async def test_output_limit_stops_and_removes_container(database: Database) -> None:

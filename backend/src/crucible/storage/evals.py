@@ -140,10 +140,13 @@ class SqlAlchemyEvalStore:
             partition=row["partition"],
             case_digest=row["case_digest"],
             configuration_digest=row["configuration_digest"],
+            configuration_snapshot=row["configuration_snapshot_json"],
             status=TrialStatus(row["status"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             fixture_commit=row["fixture_commit"],
+            fixture_content_digest=row["fixture_content_digest"],
+            fixture_root=row["fixture_root"],
             repository_id=UUID(row["repository_id"]) if row["repository_id"] else None,
             task_id=UUID(row["task_id"]) if row["task_id"] else None,
             run_id=UUID(row["run_id"]) if row["run_id"] else None,
@@ -168,6 +171,7 @@ class SqlAlchemyEvalStore:
             "partition",
             "case_digest",
             "configuration_digest",
+            "configuration_snapshot",
             "created_at",
         )
         if any(getattr(current, name) != getattr(value, name) for name in identity):
@@ -192,6 +196,7 @@ class SqlAlchemyEvalStore:
                         "partition",
                         "case_digest",
                         "configuration_digest",
+                        "configuration_snapshot_json",
                         "created_at",
                     }
                 }
@@ -569,10 +574,13 @@ def _trial_values(value: EvalTrial) -> dict[str, object]:
         "partition": value.partition,
         "case_digest": value.case_digest,
         "configuration_digest": value.configuration_digest,
+        "configuration_snapshot_json": value.configuration_snapshot,
         "status": value.status.value,
         "created_at": value.created_at,
         "updated_at": value.updated_at,
         "fixture_commit": value.fixture_commit,
+        "fixture_content_digest": value.fixture_content_digest,
+        "fixture_root": value.fixture_root,
         "repository_id": str(value.repository_id) if value.repository_id else None,
         "task_id": str(value.task_id) if value.task_id else None,
         "run_id": str(value.run_id) if value.run_id else None,
