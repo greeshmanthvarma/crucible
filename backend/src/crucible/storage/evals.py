@@ -252,6 +252,25 @@ class SqlAlchemyEvalStore:
         values = [await self.get_trial(UUID(item)) for item in ids]
         return tuple(value for value in values if value is not None)
 
+    async def list_incomplete_trials(self) -> tuple[EvalTrial, ...]:
+        ids = (
+            (
+                await self._session.execute(
+                    select(models.eval_trials.c.id)
+                    .where(
+                        models.eval_trials.c.status.in_(
+                            ("queued", "preparing", "running", "evaluating")
+                        )
+                    )
+                    .order_by(models.eval_trials.c.created_at, models.eval_trials.c.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        values = [await self.get_trial(UUID(item)) for item in ids]
+        return tuple(value for value in values if value is not None)
+
     async def add_usage(self, value: StepUsage) -> None:
         await self._session.execute(
             insert(models.step_usage).values(

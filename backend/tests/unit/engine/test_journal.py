@@ -27,11 +27,20 @@ class FixedClock:
         return NOW
 
 
+class RecordingEvals:
+    def __init__(self, actions: list[str]) -> None:
+        self.actions = actions
+
+    async def rebuild_summary(self, run_id, now) -> None:
+        self.actions.append("summary")
+
+
 class RecordingUnitOfWork:
     def __init__(self, actions: list[str], *, fail_commit: bool = False) -> None:
         self.actions = actions
         self.fail_commit = fail_commit
         self.events = RecordingEvents(actions)
+        self.evals = RecordingEvals(actions)
 
     async def __aenter__(self) -> Self:
         return self
@@ -87,6 +96,7 @@ async def test_journal_applies_mutation_appends_events_commits_then_notifies() -
         "mutation",
         "event:run.started",
         "event:run.completed",
+        "summary",
         "commit",
         "notify",
     ]
