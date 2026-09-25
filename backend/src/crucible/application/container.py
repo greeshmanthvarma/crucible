@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,13 +13,18 @@ from crucible.application.ports import UnitOfWork
 from crucible.application.reconciliation import StartupReconciler
 from crucible.application.repository_service import RepositoryService
 from crucible.application.task_service import TaskService
+from crucible.context.manager import ContextManager, SimpleTokenEstimator
 from crucible.domain.clock import SystemClock
 from crucible.engine.fake_gateway import FakeModelGateway
+from crucible.engine.journal import RunJournal
 from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
 from crucible.engine.supervisor import LocalRunSupervisor
+from crucible.models.litellm_gateway import LiteLLMModelGateway
 from crucible.storage.database import Database
 from crucible.storage.unit_of_work import SqlAlchemyUnitOfWork
+from crucible.tools.dispatcher import ToolDispatcher
+from crucible.tools.registry import default_registry
 from crucible.workspaces.git import SubprocessGitClient
 from crucible.workspaces.manager import WorkspaceManager
 
@@ -45,8 +51,40 @@ class ApplicationContainer:
         clock = SystemClock()
         git = SubprocessGitClient()
         notifier = TaskEventNotifier()
-        engine = RunEngine(unit_of_work, clock, FakeModelGateway(), notifier)
-        supervisor = LocalRunSupervisor(engine, unit_of_work, clock, notifier)
+        journal = RunJournal(unit_of_work, clock, notifier)
+        model = os.environ.get("CRUCIBLE_MODEL", "fake")
+        gateway = LiteLLMModelGateway() if model != "fake" else FakeModelGateway()
+        registry = default_registry()
+        context_manager = ContextManager(
+            unit_of_work,
+            clock,
+            SimpleTokenEstimator(),
+            harness_policy="Follow harness safety and execution policy.",
+            tool_contract="Use only the structured tools supplied by the harness.",
+            model=model,
+            input_limit=int(os.environ.get("CRUCIBLE_MODEL_INPUT_LIMIT", "100000")),
+            output_reserve=int(os.environ.get("CRUCIBLE_MODEL_OUTPUT_RESERVE", "4096")),
+            tools=registry.definitions,
+            journal=journal,
+        )
+        engine = RunEngine(
+            unit_of_work,
+            clock,
+            gateway,
+            notifier,
+            journal=journal,
+            context_manager=context_manager,
+            dispatcher=ToolDispatcher(registry, unit_of_work, clock, journal=journal),
+            max_steps=int(os.environ.get("CRUCIBLE_MAX_STEPS", "20")),
+            max_tool_calls=int(os.environ.get("CRUCIBLE_MAX_TOOL_CALLS", "100")),
+            max_model_tokens=int(os.environ.get("CRUCIBLE_MAX_MODEL_TOKENS", "200000")),
+            max_active_seconds=float(
+                os.environ.get("CRUCIBLE_MAX_ACTIVE_SECONDS", "600")
+            ),
+        )
+        supervisor = LocalRunSupervisor(
+            engine, unit_of_work, clock, notifier, journal=journal
+        )
         workspaces = WorkspaceManager(git, data_dir)
 
         return cls(

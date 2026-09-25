@@ -5,8 +5,7 @@ from uuid import UUID
 
 from crucible.application.ports import EventNotifier, UnitOfWork
 from crucible.domain.clock import Clock
-from crucible.domain.events import Event, EventType
-from crucible.domain.ids import new_id
+from crucible.engine.journal import RunJournal, recovery_mutation
 from crucible.engine.run_engine import RunEngine
 
 
@@ -17,11 +16,13 @@ class LocalRunSupervisor:
         unit_of_work: Callable[[], UnitOfWork],
         clock: Clock,
         notifier: EventNotifier | None = None,
+        journal: RunJournal | None = None,
     ) -> None:
         self._engine = engine
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._notifier = notifier
+        self._journal = journal or RunJournal(unit_of_work, clock, notifier)
         self._semaphore = asyncio.Semaphore(1)
         self._tasks: dict[UUID, asyncio.Task[None]] = {}
 
@@ -44,32 +45,26 @@ class LocalRunSupervisor:
     async def reconcile(self) -> None:
         async with self._unit_of_work() as uow:
             now = self._clock.now()
-            stale = await uow.runs.list_stale_running(now)
-            for run in stale:
-                await uow.runs.update(
-                    run.interrupt("stale_run", "Run lease expired", now=now)
-                )
-                await uow.events.append(
-                    Event(
-                        id=new_id(),
-                        task_id=run.task_id,
-                        run_id=run.id,
-                        task_sequence=0,
-                        run_sequence=0,
-                        type=EventType.RUN_INTERRUPTED,
-                        schema_version=1,
-                        payload={
-                            "schema_version": 1,
-                            "outcome_code": "stale_run",
-                        },
-                        created_at=now,
-                    )
-                )
+            prior_process_runs = await uow.runs.list_running_not_owned_by(
+                self._engine.process_execution_id
+            )
             queued = await uow.runs.list_queued()
-            await uow.commit()
-        if self._notifier is not None:
-            for run in stale:
-                await self._notifier.notify(run.task_id)
+        for run in prior_process_runs:
+            async with self._unit_of_work() as uow:
+                orphaned = await uow.tool_calls.list_without_result_for_run(run.id)
+                steps = await uow.steps.list_for_run(run.id)
+                active_step = next(
+                    (step for step in reversed(steps) if step.completed_at is None),
+                    None,
+                )
+            await self._journal.record(
+                recovery_mutation(
+                    run,
+                    now=now,
+                    orphaned_calls=orphaned,
+                    active_step=active_step,
+                )
+            )
         for run in queued:
             await self.submit(run.id)
 

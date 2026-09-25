@@ -52,18 +52,19 @@ async def test_engine_claims_and_completes_a_run_once(
             .all()
         )
 
-    assert run["status"] == "completed"
+    assert run["status"] == "completed", run["outcome_detail"]
     assert run["execution_id"] is not None
     assert run["lease_expires_at"] is None
     assert [message["conversation_sequence"] for message in messages] == [1, 2]
     assert [message["role"] for message in messages] == ["user", "assistant"]
-    assert [event["type"] for event in events][-3:] == [
-        "run.started",
-        "message.completed",
-        "run.completed",
-    ]
+    event_types = [event["type"] for event in events]
+    assert event_types[-2:] == ["message.completed", "run.completed"]
+    assert event_types.index("run.started") < event_types.index("step.preparing")
     assert len(gateway.requests) == 1
-    assert gateway.requests[0].messages[0].parts[0].text_content == "Explain the change"
+    user_message = next(
+        message for message in gateway.requests[0].messages if message.role == "user"
+    )
+    assert user_message.parts[0].text_content == "Explain the change"
 
 
 async def test_gateway_failure_persists_stable_outcome(

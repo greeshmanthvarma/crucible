@@ -95,19 +95,39 @@ runs = Table(
     CheckConstraint("next_run_sequence > 0"),
 )
 
+steps = Table(
+    "steps",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("task_id", ForeignKey("tasks.id"), nullable=False),
+    Column("run_id", ForeignKey("runs.id"), nullable=False),
+    Column("step_sequence", Integer, nullable=False),
+    Column("status", String, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    Column("started_at", UTCDateTime()),
+    Column("completed_at", UTCDateTime()),
+    UniqueConstraint("run_id", "step_sequence"),
+    CheckConstraint("step_sequence > 0"),
+    CheckConstraint(
+        "status IN "
+        "('preparing','model_active','tools_active','completed','failed','interrupted')"
+    ),
+)
+
 messages = Table(
     "messages",
     metadata,
     Column("id", String(36), primary_key=True),
     Column("task_id", ForeignKey("tasks.id"), nullable=False),
     Column("run_id", ForeignKey("runs.id")),
+    Column("step_id", ForeignKey("steps.id")),
     Column("conversation_sequence", Integer, nullable=False),
     Column("role", String, nullable=False),
     Column("status", String, nullable=False),
     Column("created_at", UTCDateTime(), nullable=False),
     Column("completed_at", UTCDateTime(), nullable=False),
     UniqueConstraint("task_id", "conversation_sequence"),
-    CheckConstraint("role IN ('user','assistant')"),
+    CheckConstraint("role IN ('user','assistant','system','tool')"),
     CheckConstraint("status IN ('completed','interrupted')"),
 )
 
@@ -118,10 +138,75 @@ message_parts = Table(
     Column("message_id", ForeignKey("messages.id", ondelete="CASCADE"), nullable=False),
     Column("part_sequence", Integer, nullable=False),
     Column("kind", String, nullable=False),
-    Column("text_content", String, nullable=False),
+    Column("text_content", String),
+    Column("reasoning_content", String),
+    Column("tool_call_id", String(36)),
+    Column("tool_result_id", String(36)),
     UniqueConstraint("message_id", "part_sequence"),
     CheckConstraint("part_sequence > 0"),
-    CheckConstraint("kind = 'text'"),
+    CheckConstraint("kind IN ('text','reasoning','tool_call','tool_result')"),
+)
+
+context_manifests = Table(
+    "context_manifests",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("task_id", ForeignKey("tasks.id"), nullable=False),
+    Column("run_id", ForeignKey("runs.id"), nullable=False),
+    Column("step_id", ForeignKey("steps.id"), nullable=False, unique=True),
+    Column("model", String, nullable=False),
+    Column("parameters_json", JSON, nullable=False),
+    Column("input_limit", Integer, nullable=False),
+    Column("output_reserve", Integer, nullable=False),
+    Column("threshold", String, nullable=False),
+    Column("estimated_tokens", Integer, nullable=False),
+    Column("message_ids_json", JSON, nullable=False),
+    Column("part_ids_json", JSON, nullable=False),
+    Column("instruction_digests_json", JSON, nullable=False),
+    Column("tool_schema_digest", String, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+)
+
+tool_calls = Table(
+    "tool_calls",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("task_id", ForeignKey("tasks.id"), nullable=False),
+    Column("run_id", ForeignKey("runs.id"), nullable=False),
+    Column("step_id", ForeignKey("steps.id"), nullable=False),
+    Column("assistant_message_id", ForeignKey("messages.id"), nullable=False),
+    Column("call_sequence", Integer, nullable=False),
+    Column("name", String, nullable=False),
+    Column("arguments_json", JSON, nullable=False),
+    Column("schema_version", Integer, nullable=False),
+    Column("provider_correlation_id", String),
+    Column("execution_mode", String, nullable=False),
+    Column("status", String, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    UniqueConstraint("step_id", "call_sequence"),
+    CheckConstraint("call_sequence > 0"),
+    CheckConstraint("schema_version > 0"),
+)
+
+tool_results = Table(
+    "tool_results",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("task_id", ForeignKey("tasks.id"), nullable=False),
+    Column("run_id", ForeignKey("runs.id"), nullable=False),
+    Column("step_id", ForeignKey("steps.id"), nullable=False),
+    Column("tool_call_id", ForeignKey("tool_calls.id"), nullable=False, unique=True),
+    Column("status", String, nullable=False),
+    Column("result_json", JSON, nullable=False),
+    Column("schema_version", Integer, nullable=False),
+    Column("display_text", String, nullable=False),
+    Column("error_code", String),
+    Column("completion_sequence", Integer, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+    Column("completed_at", UTCDateTime(), nullable=False),
+    UniqueConstraint("step_id", "completion_sequence"),
+    CheckConstraint("completion_sequence > 0"),
+    CheckConstraint("schema_version > 0"),
 )
 
 task_events = Table(

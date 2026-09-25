@@ -59,6 +59,7 @@ async def test_cross_task_message_is_rejected_before_flush(database: Database) -
             new_id(),
             second.id,
             run.id,
+            None,
             0,
             MessageRole.USER,
             MessageStatus.COMPLETED,
@@ -83,6 +84,7 @@ async def test_cross_task_triggering_message_is_rejected(database: Database) -> 
         message = Message(
             new_id(),
             second.id,
+            None,
             None,
             0,
             MessageRole.USER,

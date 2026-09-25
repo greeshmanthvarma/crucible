@@ -4,22 +4,30 @@ from typing import Self
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from crucible.application.ports import (
+    ContextManifestStore,
     EventStore,
     MessageStore,
     RepositoryStore,
     RunStore,
+    StepStore,
     TaskStore,
+    ToolCallStore,
+    ToolResultStore,
     UnitOfWork,
 )
 from crucible.application.ports import IdempotencyStore as IdempotencyStorePort
 from crucible.storage.database import Database
 from crucible.storage.repositories import (
+    ContextManifestRepository,
     EventRepository,
     IdempotencyRepository,
     MessageRepository,
     RepositoryRepository,
     RunRepository,
+    StepRepository,
     TaskRepository,
+    ToolCallRepository,
+    ToolResultRepository,
 )
 
 __all__ = ["SqlAlchemyUnitOfWork", "UnitOfWork"]
@@ -29,6 +37,10 @@ class SqlAlchemyUnitOfWork:
     repositories: RepositoryStore
     tasks: TaskStore
     messages: MessageStore
+    steps: StepStore
+    context_manifests: ContextManifestStore
+    tool_calls: ToolCallStore
+    tool_results: ToolResultStore
     runs: RunStore
     events: EventStore
     idempotency: IdempotencyStorePort
@@ -43,6 +55,10 @@ class SqlAlchemyUnitOfWork:
         self.repositories = RepositoryRepository(self.session)
         self.tasks = TaskRepository(self.session)
         self.messages = MessageRepository(self.session)
+        self.steps = StepRepository(self.session)
+        self.context_manifests = ContextManifestRepository(self.session)
+        self.tool_calls = ToolCallRepository(self.session)
+        self.tool_results = ToolResultRepository(self.session)
         self.runs = RunRepository(self.session)
         self.events = EventRepository(self.session)
         self.idempotency = IdempotencyRepository(self.session)

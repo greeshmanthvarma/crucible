@@ -3,8 +3,7 @@ from collections.abc import Callable
 from crucible.application.errors import ApplicationError, WorkspaceProvisioningFailed
 from crucible.application.ports import EventNotifier, UnitOfWork
 from crucible.domain.clock import Clock
-from crucible.domain.events import Event, EventType
-from crucible.domain.ids import new_id
+from crucible.domain.events import EventFactory, EventType
 from crucible.domain.task import Task, TaskStatus
 from crucible.workspaces.manager import WorkspaceManager, WorkspacePlan
 
@@ -21,6 +20,7 @@ class StartupReconciler:
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._notifier = notifier
+        self._events = EventFactory()
 
     async def reconcile(self) -> None:
         async with self._unit_of_work() as uow:
@@ -66,16 +66,11 @@ class StartupReconciler:
                 return
             await uow.tasks.update(task)
             await uow.events.append(
-                Event(
-                    id=new_id(),
+                self._events.create(
                     task_id=task.id,
                     run_id=None,
-                    task_sequence=0,
-                    run_sequence=None,
                     type=event_type,
-                    schema_version=1,
                     payload={
-                        "schema_version": 1,
                         "task_id": str(task.id),
                         "status": task.status,
                     },

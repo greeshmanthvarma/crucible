@@ -21,7 +21,7 @@ from crucible.domain.conversation import (
     MessageRole,
     MessageStatus,
 )
-from crucible.domain.events import Event, EventType
+from crucible.domain.events import EventFactory, EventType
 from crucible.domain.ids import new_id
 from crucible.domain.run import Run, RunStatus
 from crucible.domain.task import TaskStatus
@@ -56,6 +56,7 @@ class MessageService:
         self._clock = clock
         self._supervisor = supervisor
         self._notifier = notifier
+        self._events = EventFactory()
 
     async def submit(
         self, task_id: UUID, text: str, idempotency_key: str
@@ -95,6 +96,7 @@ class MessageService:
                     id=message_id,
                     task_id=task_id,
                     run_id=run_id,
+                    step_id=None,
                     conversation_sequence=0,
                     role=MessageRole.USER,
                     status=MessageStatus.COMPLETED,
@@ -112,16 +114,11 @@ class MessageService:
             )
             await uow.runs.set_triggering_message(run_id, message.id)
             await uow.events.append(
-                Event(
-                    id=new_id(),
+                self._events.create(
                     task_id=task_id,
                     run_id=run_id,
-                    task_sequence=0,
-                    run_sequence=0,
                     type=EventType.RUN_QUEUED,
-                    schema_version=1,
                     payload={
-                        "schema_version": 1,
                         "run_id": str(run_id),
                         "message_id": str(message_id),
                     },

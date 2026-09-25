@@ -5,6 +5,9 @@ export type TaskResponse = components["schemas"]["TaskResponse"];
 export type MessageResponse = components["schemas"]["MessageResponse"];
 export type SubmittedRunResponse =
   components["schemas"]["SubmittedRunResponse"];
+export type StepTraceResponse = components["schemas"]["StepTraceResponse"];
+export type WorkspaceStateResponse =
+  components["schemas"]["WorkspaceStateResponse"];
 
 export class ApiError extends Error {
   constructor(
@@ -34,9 +37,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export interface CrucibleClient {
   registerRepository(path: string): Promise<RepositoryResponse>;
-  createTask(repositoryId: string, sourceRef: string): Promise<TaskResponse>;
+  createTask(
+    repositoryId: string,
+    sourceRef: string,
+    idempotencyKey: string,
+  ): Promise<TaskResponse>;
   getTask(taskId: string): Promise<TaskResponse>;
   getMessages(taskId: string): Promise<MessageResponse[]>;
+  getTaskTrace(taskId: string): Promise<StepTraceResponse[]>;
+  getWorkspaceState(taskId: string): Promise<WorkspaceStateResponse>;
   sendMessage(
     taskId: string,
     text: string,
@@ -50,13 +59,16 @@ export const apiClient: CrucibleClient = {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
-  createTask: (repositoryId, sourceRef) =>
+  createTask: (repositoryId, sourceRef, idempotencyKey) =>
     request(`/api/repositories/${repositoryId}/tasks`, {
       method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({ sourceRef }),
     }),
   getTask: (taskId) => request(`/api/tasks/${taskId}`),
   getMessages: (taskId) => request(`/api/tasks/${taskId}/messages`),
+  getTaskTrace: (taskId) => request(`/api/tasks/${taskId}/trace`),
+  getWorkspaceState: (taskId) => request(`/api/tasks/${taskId}/workspace`),
   sendMessage: (taskId, text, idempotencyKey) =>
     request(`/api/tasks/${taskId}/messages`, {
       method: "POST",

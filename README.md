@@ -1,5 +1,45 @@
 # Crucible
 
+## Model configuration
+
+Crucible embeds LiteLLM `1.102.0` behind its provider-neutral model gateway. Set the
+credential environment variable required by the selected LiteLLM provider (for
+example `OPENAI_API_KEY`); secret values are read by the provider SDK and are never
+written to Events, Context Manifests, or Task worktrees. Real-provider smoke tests
+are opt-in; the default quality gate uses captured chunks and deterministic scripted
+gateways only.
+
+To opt into the live connectivity smoke for a provider/model pair, set
+`CRUCIBLE_REAL_MODEL` plus that provider's credential and run
+`uv run pytest tests/contract/models/test_real_model_smoke.py`. Passing this smoke
+records support only for the exact configured pair; it performs no repository writes.
+
+Select a model and its context budget before starting the backend:
+
+```sh
+export CRUCIBLE_MODEL=openai/gpt-5-mini
+export CRUCIBLE_MODEL_INPUT_LIMIT=100000
+export CRUCIBLE_MODEL_OUTPUT_RESERVE=4096
+export CRUCIBLE_MAX_STEPS=20
+export CRUCIBLE_MAX_TOOL_CALLS=100
+export CRUCIBLE_MAX_MODEL_TOKENS=200000
+export CRUCIBLE_MAX_ACTIVE_SECONDS=600
+```
+
+The model loop has a 20-Step default limit and admits at most 100 Tool Calls in one
+batch. Each model request records a Context Manifest with the selected model,
+estimated input size, root instruction digest, and Tool schema digest. If the input
+budget cannot fit the required evidence, the Run fails with `context_limit`; if the
+Step budget is exhausted, it fails with `budget_exhausted`.
+
+The Slice 2 repository tools are `list_files`, `search_files`, `read_file`,
+`write_file`, `apply_patch`, `workspace_status`, and `workspace_diff`. Paths are confined to the Task's
+isolated worktree, reads and outputs are bounded, writes are atomic, and a complete
+batch is validated before any call begins. Only the worktree-root `AGENTS.md` is
+loaded as repository instruction evidence in this slice. Nested instruction files,
+shell commands, Docker, approval flows, and executable tools are intentionally out
+of scope until later slices.
+
 Crucible is an eval-driven, self-improving coding-agent harness for observable,
 isolated repository-level software-engineering work.
 

@@ -64,6 +64,7 @@ async def test_task_create_and_get_contract(database: Database, tmp_path: Path) 
         created = await client.post(
             f"/api/repositories/{registered.repository.id}/tasks",
             json={"sourceRef": "HEAD"},
+            headers={"Idempotency-Key": "create-task-1"},
         )
         fetched = await client.get(f"/api/tasks/{created.json()['id']}")
 
@@ -86,11 +87,14 @@ async def test_task_errors_and_unresolved_ref_evidence(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
         unknown = await client.post(
-            f"/api/repositories/{uuid4()}/tasks", json={"sourceRef": "HEAD"}
+            f"/api/repositories/{uuid4()}/tasks",
+            json={"sourceRef": "HEAD"},
+            headers={"Idempotency-Key": "unknown-repository"},
         )
         invalid = await client.post(
             f"/api/repositories/{registered.repository.id}/tasks",
             json={"sourceRef": "missing"},
+            headers={"Idempotency-Key": "invalid-ref"},
         )
 
     async with database.engine.connect() as connection:
@@ -128,3 +132,41 @@ async def test_task_errors_and_unresolved_ref_evidence(
                     updated_at=datetime(2026, 9, 20, tzinfo=UTC),
                 )
             )
+
+
+async def test_task_creation_requires_idempotency_key_and_replays_response(
+    database: Database, tmp_path: Path
+) -> None:
+    root = tmp_path / "repository"
+    create_repository(root)
+    repositories, tasks = services(database, tmp_path / "data")
+    registered = await repositories.register(root)
+    app = create_app(repositories, tasks)
+    endpoint = f"/api/repositories/{registered.repository.id}/tasks"
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        missing = await client.post(endpoint, json={"sourceRef": "HEAD"})
+        created = await client.post(
+            endpoint,
+            json={"sourceRef": "HEAD"},
+            headers={"Idempotency-Key": "same-key"},
+        )
+        retried = await client.post(
+            endpoint,
+            json={"sourceRef": "HEAD"},
+            headers={"Idempotency-Key": "same-key"},
+        )
+        conflict = await client.post(
+            endpoint,
+            json={"sourceRef": "HEAD~0"},
+            headers={"Idempotency-Key": "same-key"},
+        )
+
+    assert missing.status_code == 400
+    assert missing.json()["code"] == "idempotency_key_required"
+    assert retried.status_code == 201
+    assert retried.json() == created.json()
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "idempotency_conflict"

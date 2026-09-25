@@ -108,10 +108,62 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tasks/{task_id}/trace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Task Trace */
+        get: operations["get_task_trace_api_tasks__task_id__trace_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks/{task_id}/workspace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Workspace State */
+        get: operations["get_workspace_state_api_tasks__task_id__workspace_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** ContextManifestSummary */
+        ContextManifestSummary: {
+            /** Estimatedtokens */
+            estimatedTokens: number;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Instructiondigests */
+            instructionDigests: {
+                [key: string]: string;
+            };
+            /** Model */
+            model: string;
+            /** Toolschemadigest */
+            toolSchemaDigest: string;
+        };
         /** CreateTaskRequest */
         CreateTaskRequest: {
             /**
@@ -136,8 +188,14 @@ export interface components {
             kind: string;
             /** Partsequence */
             partSequence: number;
+            /** Reasoningcontent */
+            reasoningContent: string | null;
             /** Textcontent */
-            textContent: string;
+            textContent: string | null;
+            /** Toolcallid */
+            toolCallId: string | null;
+            /** Toolresultid */
+            toolResultId: string | null;
         };
         /** MessageResponse */
         MessageResponse: {
@@ -166,6 +224,8 @@ export interface components {
             runId: string | null;
             /** Status */
             status: string;
+            /** Stepid */
+            stepId: string | null;
             /**
              * Taskid
              * Format: uuid
@@ -193,6 +253,28 @@ export interface components {
             id: string;
             /** Rootpath */
             rootPath: string;
+        };
+        /** StepTraceResponse */
+        StepTraceResponse: {
+            /** Calls */
+            calls: components["schemas"]["ToolCallResponse"][];
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            manifest: components["schemas"]["ContextManifestSummary"] | null;
+            /** Results */
+            results: components["schemas"]["ToolResultResponse"][];
+            /**
+             * Runid
+             * Format: uuid
+             */
+            runId: string;
+            /** Status */
+            status: string;
+            /** Stepsequence */
+            stepSequence: number;
         };
         /** SubmitMessageRequest */
         SubmitMessageRequest: {
@@ -281,6 +363,51 @@ export interface components {
             /** Workspacepath */
             workspacePath: string;
         };
+        /** ToolCallResponse */
+        ToolCallResponse: {
+            /** Arguments */
+            arguments: {
+                [key: string]: unknown;
+            };
+            /** Callsequence */
+            callSequence: number;
+            /** Executionmode */
+            executionMode: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /** Status */
+            status: string;
+        };
+        /** ToolResultResponse */
+        ToolResultResponse: {
+            /** Completionsequence */
+            completionSequence: number;
+            /** Displaytext */
+            displayText: string;
+            /** Errorcode */
+            errorCode: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Result */
+            result: {
+                [key: string]: unknown;
+            };
+            /** Status */
+            status: string;
+            /**
+             * Toolcallid
+             * Format: uuid
+             */
+            toolCallId: string;
+        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -293,6 +420,17 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /** WorkspaceStateResponse */
+        WorkspaceStateResponse: {
+            /** Diff */
+            diff: string;
+            /** Difftruncated */
+            diffTruncated: boolean;
+            /** Status */
+            status: string;
+            /** Statustruncated */
+            statusTruncated: boolean;
         };
     };
     responses: never;
@@ -381,7 +519,9 @@ export interface operations {
     create_task_api_repositories__repository_id__tasks_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 repository_id: string;
             };
@@ -530,6 +670,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SubmittedRunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_task_trace_api_tasks__task_id__trace_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StepTraceResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_workspace_state_api_tasks__task_id__workspace_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceStateResponse"];
                 };
             };
             /** @description Validation Error */
