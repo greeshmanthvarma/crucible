@@ -37,7 +37,16 @@ it("registers, creates a task, reconstructs it, and submits a message", async ()
       else if (url.endsWith("/tasks") && init?.method === "POST") body = task;
       else if (url === "/api/tasks/task") body = task;
       else if (url.endsWith("/approvals")) body = [];
-      else if (url.endsWith("/trace")) body = [];
+      else if (url.endsWith("/review")) {
+        body = {
+          latestRunStatus: null,
+          completionSummary: null,
+          claimedFiles: [],
+          validationAttempts: [],
+          resultRevisions: [],
+          integrations: [],
+        };
+      } else if (url.endsWith("/trace")) body = [];
       else if (url.endsWith("/workspace")) {
         body = {
           status: "",
@@ -73,14 +82,15 @@ it("registers, creates a task, reconstructs it, and submits a message", async ()
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
   await waitFor(() =>
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/tasks/task/messages",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({
-          "Idempotency-Key": expect.any(String),
-        }),
+    expect(
+      fetchMock.mock.calls.some(([url, init]) => {
+        const headers = new Headers(init?.headers);
+        return (
+          url === "/api/tasks/task/messages" &&
+          init?.method === "POST" &&
+          Boolean(headers.get("Idempotency-Key"))
+        );
       }),
-    ),
+    ).toBe(true),
   );
 });

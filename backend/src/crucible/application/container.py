@@ -8,10 +8,12 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
+from crucible.application.acceptance_service import AcceptanceService
 from crucible.application.approval_service import ApprovalService
 from crucible.application.artifact_service import ArtifactService
 from crucible.application.command_authority import CommandAuthority
 from crucible.application.event_service import TaskEventSource
+from crucible.application.integration_service import IntegrationService
 from crucible.application.message_service import MessageService
 from crucible.application.ports import UnitOfWork
 from crucible.application.reconciliation import StartupReconciler
@@ -20,10 +22,12 @@ from crucible.application.run_service import RunService
 from crucible.application.sandbox_reconciliation import SandboxReconciler
 from crucible.application.task_service import TaskService
 from crucible.artifacts.store import LocalArtifactStore
+from crucible.context.compaction import CompactionLifecycle
 from crucible.context.manager import ContextManager, SimpleTokenEstimator
 from crucible.domain.clock import SystemClock
 from crucible.engine.approval_broker import InMemoryApprovalBroker
-from crucible.engine.fake_gateway import FakeModelGateway
+from crucible.engine.compaction_gateway import ModelCompactionGateway
+from crucible.engine.fake_gateway import FakeCompactionGateway, FakeModelGateway
 from crucible.engine.journal import RunJournal
 from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
@@ -53,6 +57,8 @@ class ApplicationContainer:
     approval_service: ApprovalService
     artifact_service: ArtifactService
     run_service: RunService
+    acceptance_service: AcceptanceService
+    integration_service: IntegrationService
     sandbox_reconciler: SandboxReconciler
     reconciler: StartupReconciler
     unit_of_work: Callable[[], UnitOfWork]
@@ -89,6 +95,11 @@ class ApplicationContainer:
         )
         model = os.environ.get("CRUCIBLE_MODEL", "fake")
         gateway = LiteLLMModelGateway() if model != "fake" else FakeModelGateway()
+        compaction_gateway = (
+            FakeCompactionGateway()
+            if model == "fake"
+            else ModelCompactionGateway(gateway)
+        )
         registry = default_registry(cast(Tool, command_tool))
         context_manager = ContextManager(
             unit_of_work,
@@ -101,6 +112,13 @@ class ApplicationContainer:
             output_reserve=int(os.environ.get("CRUCIBLE_MODEL_OUTPUT_RESERVE", "4096")),
             tools=registry.definitions,
             journal=journal,
+            compaction_lifecycle=CompactionLifecycle(
+                unit_of_work,
+                artifact_service,
+                compaction_gateway,
+                clock,
+                model=model,
+            ),
         )
         engine = RunEngine(
             unit_of_work,
@@ -126,6 +144,10 @@ class ApplicationContainer:
             approval_broker=approval_broker,
         )
         run_service = RunService(unit_of_work, clock, supervisor, notifier)
+        acceptance_service = AcceptanceService(
+            git, artifact_service, unit_of_work, clock, notifier
+        )
+        integration_service = IntegrationService(git, unit_of_work, clock, notifier)
         sandbox_reconciler = SandboxReconciler(
             sandbox_backend,
             resource_manager,
@@ -145,6 +167,8 @@ class ApplicationContainer:
             approval_service=approval_service,
             artifact_service=artifact_service,
             run_service=run_service,
+            acceptance_service=acceptance_service,
+            integration_service=integration_service,
             sandbox_reconciler=sandbox_reconciler,
             reconciler=StartupReconciler(
                 workspaces, unit_of_work, clock, notifier, resource_manager

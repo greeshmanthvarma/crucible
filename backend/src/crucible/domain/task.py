@@ -12,6 +12,8 @@ from crucible.domain.ids import RepositoryId, TaskId
 class TaskStatus(StrEnum):
     PROVISIONING = "provisioning"
     ACTIVE = "active"
+    ACCEPTED = "accepted"
+    INTEGRATED = "integrated"
     PROVISIONING_FAILED = "provisioning_failed"
 
 
@@ -104,6 +106,21 @@ class Task:
             failure_detail=detail,
             updated_at=clock.now(),
         )
+
+    def accept(self, clock: Clock) -> Self:
+        if self.status is not TaskStatus.ACTIVE:
+            raise InvalidTransition(f"cannot accept Task from {self.status}")
+        return replace(self, status=TaskStatus.ACCEPTED, updated_at=clock.now())
+
+    def reopen(self, clock: Clock) -> Self:
+        if self.status is not TaskStatus.ACCEPTED:
+            raise InvalidTransition(f"cannot reopen Task from {self.status}")
+        return replace(self, status=TaskStatus.ACTIVE, updated_at=clock.now())
+
+    def integrate(self, clock: Clock) -> Self:
+        if self.status is not TaskStatus.ACCEPTED:
+            raise InvalidTransition(f"cannot integrate Task from {self.status}")
+        return replace(self, status=TaskStatus.INTEGRATED, updated_at=clock.now())
 
     def _require_provisioning(self, target: TaskStatus) -> None:
         if self.status is not TaskStatus.PROVISIONING:

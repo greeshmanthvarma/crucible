@@ -1,7 +1,9 @@
 from fastapi import Request
 
+from crucible.application.acceptance_service import AcceptanceService
 from crucible.application.approval_service import ApprovalService
 from crucible.application.artifact_service import ArtifactService
+from crucible.application.integration_service import IntegrationService
 from crucible.application.message_service import MessageService
 from crucible.application.repository_service import RepositoryService
 from crucible.application.run_service import RunService
@@ -10,6 +12,16 @@ from crucible.application.task_service import TaskService
 
 def get_repository_service(request: Request) -> RepositoryService:
     service: RepositoryService = request.app.state.repository_service
+    return service
+
+
+def get_acceptance_service(request: Request) -> AcceptanceService:
+    service: AcceptanceService = request.app.state.acceptance_service
+    return service
+
+
+def get_integration_service(request: Request) -> IntegrationService:
+    service: IntegrationService = request.app.state.integration_service
     return service
 
 

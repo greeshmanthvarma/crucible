@@ -8,14 +8,19 @@ from crucible.api.dependencies import get_message_service, get_task_service
 from crucible.api.schemas import (
     ContextManifestSummary,
     CreateTaskRequest,
+    IntegrationResponse,
     MessagePartResponse,
     MessageResponse,
+    ResultRevisionResponse,
     StepTraceResponse,
     SubmitMessageRequest,
     SubmittedRunResponse,
     TaskResponse,
+    TaskReviewResponse,
     ToolCallResponse,
     ToolResultResponse,
+    ValidationAttemptReviewResponse,
+    ValidationCommandReviewResponse,
     WorkspaceStateResponse,
 )
 from crucible.application.errors import IdempotencyKeyRequired
@@ -145,6 +150,76 @@ async def get_workspace_state(
     )
 
 
+@router.get("/api/tasks/{task_id}/review", response_model=TaskReviewResponse)
+async def get_task_review(
+    task_id: UUID, service: TaskServiceDependency
+) -> TaskReviewResponse:
+    review = await service.review(task_id)
+    return TaskReviewResponse(
+        latest_run_status=review.latest_run_status,
+        completion_summary=review.completion_summary,
+        claimed_files=list(review.claimed_files),
+        validation_attempts=[
+            ValidationAttemptReviewResponse(
+                id=item.attempt.id,
+                run_id=item.attempt.run_id,
+                attempt_number=item.attempt.attempt_number,
+                status=item.attempt.status,
+                created_at=item.attempt.created_at,
+                completed_at=item.attempt.completed_at,
+                commands=[
+                    ValidationCommandReviewResponse(
+                        id=command.id,
+                        command_sequence=command.command_sequence,
+                        status=command.status,
+                        approval_id=command.approval_id,
+                        tool_call_id=command.tool_call_id,
+                        artifact_id=command.artifact_id,
+                        exit_code=command.exit_code,
+                        summary=command.summary,
+                        created_at=command.created_at,
+                        completed_at=command.completed_at,
+                    )
+                    for command in item.commands
+                ],
+            )
+            for item in review.validations
+        ],
+        result_revisions=[
+            ResultRevisionResponse(
+                id=result.id,
+                task_id=result.task_id,
+                commit_sha=result.commit_sha,
+                parent_revision=result.parent_revision,
+                previous_result_revision_id=result.previous_result_revision_id,
+                diff_artifact_id=result.diff_artifact_id,
+                validation_snapshot=result.validation_snapshot,
+                summary=result.summary,
+                created_by=result.created_by,
+                created_at=result.created_at,
+            )
+            for result in review.result_revisions
+        ],
+        integrations=[
+            IntegrationResponse(
+                id=item.id,
+                result_revision_id=item.result_revision_id,
+                repository_id=item.repository_id,
+                target_ref=item.target_ref,
+                expected_target_revision=item.expected_target_revision,
+                status=item.status,
+                observed_before_revision=item.observed_before_revision,
+                observed_after_revision=item.observed_after_revision,
+                failure_code=item.failure_code,
+                failure_detail=item.failure_detail,
+                created_at=item.created_at,
+                completed_at=item.completed_at,
+            )
+            for item in review.integrations
+        ],
+    )
+
+
 @messages_router.post(
     "/api/tasks/{task_id}/messages",
     response_model=SubmittedRunResponse,
@@ -163,6 +238,7 @@ async def submit_message(
         message_id=result.message_id,
         run_id=result.run_id,
         run_status=result.run_status,
+        kind=result.kind,
     )
 
 

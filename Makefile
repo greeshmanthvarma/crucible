@@ -1,4 +1,4 @@
-.PHONY: install format lint typecheck test check dev-backend dev-frontend
+.PHONY: install format lint typecheck test check milestone smoke-docker smoke-real-model dev-backend dev-frontend
 
 install:
 	cd backend && uv sync --frozen
@@ -28,8 +28,17 @@ check: lint typecheck test
 	git diff --exit-code -- frontend/src/api/schema.d.ts
 	cd frontend && pnpm build
 
+milestone:
+	cd backend && uv run pytest -q tests/integration/test_milestone_one_workflow.py
+
+smoke-docker:
+	cd backend && uv run pytest -q -m docker
+
+smoke-real-model:
+	cd backend && uv run pytest -q -m real_model
+
 dev-backend:
-	cd backend && uv run alembic upgrade head && uv run uvicorn crucible.api.app:create_app --factory --reload
+	cd backend && uv run alembic upgrade head && uv run uvicorn crucible.api.app:create_app --factory --host 127.0.0.1 --reload
 
 dev-frontend:
 	cd frontend && pnpm dev

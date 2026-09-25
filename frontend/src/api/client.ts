@@ -1,4 +1,5 @@
 import type { components } from "./schema";
+import { sessionFetch } from "../auth/session";
 
 export type RepositoryResponse = components["schemas"]["RepositoryResponse"];
 export type TaskResponse = components["schemas"]["TaskResponse"];
@@ -9,6 +10,39 @@ export type StepTraceResponse = components["schemas"]["StepTraceResponse"];
 export type WorkspaceStateResponse =
   components["schemas"]["WorkspaceStateResponse"];
 export type ApprovalResponse = components["schemas"]["ApprovalResponse"];
+export type ResultRevisionResponse =
+  components["schemas"]["ResultRevisionResponse"];
+export type IntegrationResponse = components["schemas"]["IntegrationResponse"];
+
+export type ValidationCommandReview = {
+  id: string;
+  commandSequence: number;
+  status: string;
+  approvalId: string | null;
+  toolCallId: string | null;
+  artifactId: string | null;
+  exitCode: number | null;
+  summary: string;
+  createdAt: string;
+  completedAt: string | null;
+};
+export type ValidationAttemptReview = {
+  id: string;
+  runId: string;
+  attemptNumber: number;
+  status: string;
+  createdAt: string;
+  completedAt: string | null;
+  commands: ValidationCommandReview[];
+};
+export type TaskReviewResponse = {
+  latestRunStatus: string | null;
+  completionSummary: string | null;
+  claimedFiles: string[];
+  validationAttempts: ValidationAttemptReview[];
+  resultRevisions: ResultRevisionResponse[];
+  integrations: IntegrationResponse[];
+};
 
 export class ApiError extends Error {
   constructor(
@@ -20,7 +54,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  const response = await sessionFetch(path, {
     ...init,
     headers: { "Content-Type": "application/json", ...init?.headers },
   });
@@ -48,6 +82,18 @@ export interface CrucibleClient {
   getTaskTrace(taskId: string): Promise<StepTraceResponse[]>;
   getWorkspaceState(taskId: string): Promise<WorkspaceStateResponse>;
   getApprovals(taskId: string): Promise<ApprovalResponse[]>;
+  getTaskReview(taskId: string): Promise<TaskReviewResponse>;
+  acceptTask(
+    taskId: string,
+    idempotencyKey: string,
+  ): Promise<ResultRevisionResponse>;
+  integrateResult(
+    resultRevisionId: string,
+    repositoryId: string,
+    targetRef: string,
+    expectedRevision: string,
+    idempotencyKey: string,
+  ): Promise<IntegrationResponse>;
   decideApproval(
     approvalId: string,
     decision: "approved" | "denied",
@@ -79,6 +125,25 @@ export const apiClient: CrucibleClient = {
   getTaskTrace: (taskId) => request(`/api/tasks/${taskId}/trace`),
   getWorkspaceState: (taskId) => request(`/api/tasks/${taskId}/workspace`),
   getApprovals: (taskId) => request(`/api/tasks/${taskId}/approvals`),
+  getTaskReview: (taskId) => request(`/api/tasks/${taskId}/review`),
+  acceptTask: (taskId, idempotencyKey) =>
+    request(`/api/tasks/${taskId}/acceptances`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: "{}",
+    }),
+  integrateResult: (
+    resultRevisionId,
+    repositoryId,
+    targetRef,
+    expectedRevision,
+    idempotencyKey,
+  ) =>
+    request(`/api/result-revisions/${resultRevisionId}/integrations`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ repositoryId, targetRef, expectedRevision }),
+    }),
   decideApproval: (approvalId, decision, specDigest, idempotencyKey, reason) =>
     request(`/api/approvals/${approvalId}/decision`, {
       method: "POST",

@@ -84,6 +84,31 @@ class TaskNotActive(ApplicationError):
     status_code = 409
 
 
+class AcceptanceRejected(ApplicationError):
+    code = "acceptance_rejected"
+    status_code = 409
+
+
+class ResultRevisionNotFound(ApplicationError):
+    code = "result_revision_not_found"
+    status_code = 404
+
+
+class AuthenticationRequired(ApplicationError):
+    code = "authentication_required"
+    status_code = 401
+
+
+class OriginRejected(ApplicationError):
+    code = "origin_rejected"
+    status_code = 403
+
+
+class CsrfRejected(ApplicationError):
+    code = "csrf_rejected"
+    status_code = 403
+
+
 class EventCursorNotFound(ApplicationError):
     code = "event_cursor_not_found"
     status_code = 409

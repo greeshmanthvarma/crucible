@@ -6,11 +6,15 @@ from typing import Self
 from crucible.domain.clock import require_utc
 from crucible.domain.errors import InvalidTransition
 from crucible.domain.ids import ExecutionId, MessageId, RunId, TaskId
+from crucible.domain.repository import RepositorySettings
+
+RunSettingsSnapshot = RepositorySettings
 
 
 class RunStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
+    VALIDATING = "validating"
     COMPLETED = "completed"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
@@ -33,6 +37,7 @@ class Run:
     completed_at: datetime | None
     cancel_requested_at: datetime | None = None
     cancel_code: str | None = None
+    settings_snapshot: RunSettingsSnapshot = RunSettingsSnapshot()
 
     def __post_init__(self) -> None:
         require_utc(
@@ -52,6 +57,7 @@ class Run:
         task_id: TaskId,
         triggering_message_id: MessageId | None,
         created_at: datetime,
+        settings_snapshot: RunSettingsSnapshot | None = None,
     ) -> Self:
         return cls(
             id=run_id,
@@ -66,6 +72,7 @@ class Run:
             created_at=created_at,
             started_at=None,
             completed_at=None,
+            settings_snapshot=settings_snapshot or RunSettingsSnapshot(),
         )
 
     def claim(
@@ -86,7 +93,8 @@ class Run:
         )
 
     def complete(self, *, now: datetime) -> Self:
-        self._require_status(RunStatus.RUNNING, RunStatus.COMPLETED)
+        if self.status not in (RunStatus.RUNNING, RunStatus.VALIDATING):
+            self._require_status(RunStatus.RUNNING, RunStatus.COMPLETED)
         return replace(
             self,
             status=RunStatus.COMPLETED,
@@ -94,8 +102,13 @@ class Run:
             completed_at=now,
         )
 
+    def start_validation(self) -> Self:
+        self._require_status(RunStatus.RUNNING, RunStatus.VALIDATING)
+        return replace(self, status=RunStatus.VALIDATING)
+
     def fail(self, code: str, detail: str, *, now: datetime) -> Self:
-        self._require_status(RunStatus.RUNNING, RunStatus.FAILED)
+        if self.status not in (RunStatus.RUNNING, RunStatus.VALIDATING):
+            self._require_status(RunStatus.RUNNING, RunStatus.FAILED)
         return replace(
             self,
             status=RunStatus.FAILED,
@@ -106,7 +119,8 @@ class Run:
         )
 
     def interrupt(self, code: str, detail: str, *, now: datetime) -> Self:
-        self._require_status(RunStatus.RUNNING, RunStatus.INTERRUPTED)
+        if self.status not in (RunStatus.RUNNING, RunStatus.VALIDATING):
+            self._require_status(RunStatus.RUNNING, RunStatus.INTERRUPTED)
         return replace(
             self,
             status=RunStatus.INTERRUPTED,
@@ -117,14 +131,22 @@ class Run:
         )
 
     def request_cancel(self, code: str, now: datetime) -> Self:
-        if self.status not in (RunStatus.QUEUED, RunStatus.RUNNING):
+        if self.status not in (
+            RunStatus.QUEUED,
+            RunStatus.RUNNING,
+            RunStatus.VALIDATING,
+        ):
             return self
         if self.cancel_requested_at is not None:
             return self
         return replace(self, cancel_requested_at=now, cancel_code=code)
 
     def cancel(self, code: str, detail: str, *, now: datetime) -> Self:
-        if self.status not in (RunStatus.QUEUED, RunStatus.RUNNING):
+        if self.status not in (
+            RunStatus.QUEUED,
+            RunStatus.RUNNING,
+            RunStatus.VALIDATING,
+        ):
             return self
         return replace(
             self,

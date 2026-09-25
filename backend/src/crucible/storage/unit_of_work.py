@@ -6,34 +6,48 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from crucible.application.ports import (
     ApprovalStore,
     ArtifactMetadataStore,
+    BrowserSessionStore,
+    CompactionStore,
+    CompletionProposalStore,
     ContextManifestStore,
     EventStore,
     ExternalResourceStore,
+    IntegrationStore,
     MessageStore,
     RepositoryStore,
+    ResultRevisionStore,
     RunStore,
     StepStore,
     TaskStore,
     ToolCallStore,
     ToolResultStore,
     UnitOfWork,
+    ValidationAttemptStore,
+    ValidationCommandResultStore,
 )
 from crucible.application.ports import IdempotencyStore as IdempotencyStorePort
 from crucible.storage.database import Database
 from crucible.storage.repositories import (
     ApprovalRepository,
     ArtifactRepository,
+    BrowserSessionRepository,
+    CompactionRepository,
+    CompletionProposalRepository,
     ContextManifestRepository,
     EventRepository,
     ExternalResourceRepository,
     IdempotencyRepository,
+    IntegrationRepository,
     MessageRepository,
     RepositoryRepository,
+    ResultRevisionRepository,
     RunRepository,
     StepRepository,
     TaskRepository,
     ToolCallRepository,
     ToolResultRepository,
+    ValidationAttemptRepository,
+    ValidationCommandResultRepository,
 )
 
 __all__ = ["SqlAlchemyUnitOfWork", "UnitOfWork"]
@@ -53,6 +67,13 @@ class SqlAlchemyUnitOfWork:
     runs: RunStore
     events: EventStore
     idempotency: IdempotencyStorePort
+    compactions: CompactionStore
+    completion_proposals: CompletionProposalStore
+    validation_attempts: ValidationAttemptStore
+    validation_command_results: ValidationCommandResultStore
+    result_revisions: ResultRevisionStore
+    integrations: IntegrationStore
+    browser_sessions: BrowserSessionStore
 
     def __init__(self, database: Database) -> None:
         self._session_factory = async_sessionmaker(
@@ -74,6 +95,15 @@ class SqlAlchemyUnitOfWork:
         self.runs = RunRepository(self.session)
         self.events = EventRepository(self.session)
         self.idempotency = IdempotencyRepository(self.session)
+        self.compactions = CompactionRepository(self.session)
+        self.completion_proposals = CompletionProposalRepository(self.session)
+        self.validation_attempts = ValidationAttemptRepository(self.session)
+        self.validation_command_results = ValidationCommandResultRepository(
+            self.session
+        )
+        self.result_revisions = ResultRevisionRepository(self.session)
+        self.integrations = IntegrationRepository(self.session)
+        self.browser_sessions = BrowserSessionRepository(self.session)
         return self
 
     async def __aexit__(

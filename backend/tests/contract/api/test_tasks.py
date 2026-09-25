@@ -75,6 +75,35 @@ async def test_task_create_and_get_contract(database: Database, tmp_path: Path) 
     assert fetched.json() == created.json()
 
 
+async def test_task_review_is_a_canonical_refreshable_snapshot(
+    database: Database, tmp_path: Path
+) -> None:
+    root = tmp_path / "review-repository"
+    create_repository(root)
+    repositories, tasks = services(database, tmp_path / "review-data")
+    registered = await repositories.register(root)
+    app = create_app(repositories, tasks)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        created = await client.post(
+            f"/api/repositories/{registered.repository.id}/tasks",
+            json={"sourceRef": "HEAD"},
+            headers={"Idempotency-Key": "create-review-task"},
+        )
+        review = await client.get(f"/api/tasks/{created.json()['id']}/review")
+
+    assert review.status_code == 200
+    assert review.json() == {
+        "latestRunStatus": None,
+        "completionSummary": None,
+        "claimedFiles": [],
+        "validationAttempts": [],
+        "resultRevisions": [],
+        "integrations": [],
+    }
+
+
 async def test_task_errors_and_unresolved_ref_evidence(
     database: Database, tmp_path: Path
 ) -> None:
