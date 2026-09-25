@@ -85,3 +85,19 @@ def test_boundary_uses_largest_complete_prefix_and_retains_recent_units() -> Non
 def test_no_boundary_orphans_an_unfinished_exchange() -> None:
     units = group_conversation_units((message(1, MessageRole.USER),), {})
     assert select_compaction_boundary(units, retain_complete_units=0) is None
+
+
+def test_steering_users_share_the_unit_closed_by_the_next_assistant() -> None:
+    units = group_conversation_units(
+        (
+            message(1, MessageRole.USER),
+            message(2, MessageRole.USER),
+            message(3, MessageRole.ASSISTANT),
+        ),
+        {},
+    )
+
+    assert len(units) == 1
+    assert units[0].complete
+    assert units[0].start_sequence == 1
+    assert units[0].end_sequence == 3

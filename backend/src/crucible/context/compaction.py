@@ -268,7 +268,10 @@ def group_conversation_units(
 ) -> tuple[ConversationUnit, ...]:
     grouped: list[list[Message]] = []
     for message in sorted(messages, key=lambda item: item.conversation_sequence):
-        if message.role is MessageRole.USER or not grouped:
+        current_has_assistant = bool(grouped) and any(
+            item.role is MessageRole.ASSISTANT for item in grouped[-1]
+        )
+        if not grouped or (message.role is MessageRole.USER and current_has_assistant):
             grouped.append([])
         grouped[-1].append(message)
     return tuple(

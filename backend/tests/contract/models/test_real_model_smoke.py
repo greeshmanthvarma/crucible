@@ -20,6 +20,7 @@ REAL_MODEL = os.environ.get("CRUCIBLE_REAL_MODEL")
     REAL_MODEL is None,
     reason="set CRUCIBLE_REAL_MODEL and its provider credential to opt in",
 )
+@pytest.mark.real_model
 async def test_configured_real_model_stream_smoke() -> None:
     request = PreparedModelRequest(
         new_id(),

@@ -134,6 +134,46 @@ Set `CRUCIBLE_ORIGIN` to the exact API origin when changing the port. HTTPS
 deployments must set `CRUCIBLE_SECURE_COOKIE=true`. All unsafe API requests
 require that exact Origin plus the in-memory CSRF token issued at bootstrap.
 
+## Milestone-one workflow
+
+Repository registration is an explicit authenticated action and stores the
+canonical Git root. Repository settings snapshot ordered Validation commands,
+the pinned sandbox image/network policy, bounded Validation repairs, and the
+Compaction threshold/model/prompt/attempt limits into each Run. Commands execute
+only through the Approval-gated sandbox and keep bounded private evidence.
+
+A Task owns one retained Conversation across Runs. Steering joins the active
+Run at its next model boundary; a message after a terminal Run starts another
+Run. Proactive Compaction summarizes only complete semantic units and preserves
+the original Messages, traces, and Artifacts. Validation is harness-authored:
+model completion claims never substitute for configured command outcomes, and
+repair remains bounded inside the same Run.
+
+Acceptance and Integration are separate explicit decisions. Acceptance creates
+an immutable Result Revision in the isolated Task Workspace and leaves the
+registered checkout unchanged. Integration requires a selected Result Revision,
+the expected target ref/revision, and a clean tracked and untracked target. A
+conflict is aborted and reported only when exact restoration is proven;
+otherwise the durable state is `recovery_required`. Integrated Tasks retain the
+Conversation, Validation evidence, Result Revisions, Artifacts, and Integration
+history and can be reopened for review.
+
+Run the deterministic milestone proof with:
+
+```sh
+make milestone
+```
+
+`make check` runs the complete offline quality gate, migration round-trip,
+generated OpenAPI drift check, and production frontend build. `make smoke-docker`
+is optional and requires a reachable Docker daemon and configured image. Real
+model smoke tests are explicit opt-in (`make smoke-real-model`) and require model
+credentials. Supported local operation requires Git, Python 3.13, Node.js 24,
+pnpm, and Docker only for real sandbox execution.
+
+Milestone one stops here. Slice 5—the Eval Runner, behavioral suites,
+self-improvement campaigns, promotion, and rollback—is intentionally deferred.
+
 ## Frontend
 
 The frontend requires Node.js 24 and pnpm. Run these commands from `frontend/`.
