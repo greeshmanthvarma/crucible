@@ -10,6 +10,7 @@ export async function bootstrapSession(secret: string): Promise<void> {
   if (!response.ok) throw new Error("Bootstrap authentication failed");
   const body = (await response.json()) as { csrfToken: string };
   csrfToken = body.csrfToken;
+  sessionStorage.setItem("crucible.csrf", csrfToken);
 }
 
 export async function bootstrapFromLocation(): Promise<void> {
@@ -20,10 +21,20 @@ export async function bootstrapFromLocation(): Promise<void> {
     history.replaceState(null, "", `${location.pathname}${location.search}`);
     return;
   }
-  const response = await fetch("/api/auth/session", { credentials: "include" });
-  if (!response.ok) return;
+  const retainedToken = sessionStorage.getItem("crucible.csrf");
+  if (!retainedToken) return;
+  const response = await fetch("/api/auth/session", {
+    method: "POST",
+    credentials: "include",
+    headers: { "X-CSRF-Token": retainedToken },
+  });
+  if (!response.ok) {
+    sessionStorage.removeItem("crucible.csrf");
+    return;
+  }
   const body = (await response.json()) as { csrfToken: string };
   csrfToken = body.csrfToken;
+  sessionStorage.setItem("crucible.csrf", csrfToken);
 }
 
 export function sessionFetch(

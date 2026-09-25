@@ -72,8 +72,9 @@ cd backend
 uv run pytest -m docker tests/integration/sandbox/test_docker_lifecycle.py -q
 ```
 
-This slice does not implement completion proposals, Validation/repair loops,
-Acceptance, Result Revisions, Integration, steering, or compaction.
+The interactive milestone now includes durable conversations and steering,
+proactive context compaction, completion proposals, authoritative Validation and
+bounded repair, immutable Result Revisions, Acceptance, and guarded Integration.
 
 Crucible is an eval-driven, self-improving coding-agent harness for observable,
 isolated repository-level software-engineering work.

@@ -13,8 +13,65 @@ from crucible.domain.results import Integration, IntegrationStatus
 from crucible.storage.database import Database
 from crucible.workspaces.git import SubprocessGitClient
 from crucible.workspaces.manager import WorkspaceManager
+from tests.contract.api.test_approvals import pending_approval as _pending_approval
+from tests.integration.application import test_acceptance as acceptance_tests
+from tests.integration.application import test_event_replay as event_replay_tests
 from tests.integration.application.test_integration import accepted_result
-from tests.integration.engine.conftest import FixedClock
+from tests.integration.context.test_compaction_lifecycle import (
+    test_successful_compaction_persists_private_artifact_and_lineage,
+)
+from tests.integration.engine.conftest import FixedClock, uow_factory
+from tests.integration.engine.test_steering import (
+    test_steering_enters_only_the_next_prepared_model_boundary as _steering_recovery,
+)
+from tests.integration.engine.test_supervisor import (
+    test_reconcile_terminalizes_orphaned_tool_calls as _validation_recovery,
+)
+
+_acceptance_recovery = getattr(
+    acceptance_tests,
+    "test_acceptance_recovers_owned_commit_created_before_database_record",
+)
+_event_replay = getattr(
+    event_replay_tests,
+    "test_event_replay_is_ordered_and_validates_cursor_ownership",
+)
+
+
+# Keep the restart matrix explicit in one place. These scenarios are also collected
+# in their feature-focused modules; invoking them here proves that the complete
+# recovery contract stays green as a unit.
+@pytest.mark.parametrize(
+    "checkpoint",
+    [
+        "steering_before_step",
+        "compaction_completed",
+        "validation_approval_pending",
+        "validation_command_active",
+        "acceptance_commit_before_sqlite",
+        "sse_replay",
+    ],
+)
+async def test_non_integration_recovery_matrix(
+    database: Database, tmp_path: Path, checkpoint: str
+) -> None:
+    if checkpoint == "steering_before_step":
+        await _steering_recovery(database, tmp_path)
+    elif checkpoint == "compaction_completed":
+        await test_successful_compaction_persists_private_artifact_and_lineage(
+            database, tmp_path
+        )
+    elif checkpoint == "validation_approval_pending":
+        approval = await _pending_approval(database)
+        async with uow_factory(database)() as uow:
+            retained = await uow.approvals.list_for_task(approval.task_id)
+        assert retained == (approval,)
+    elif checkpoint == "validation_command_active":
+        await _validation_recovery(database)
+    elif checkpoint == "acceptance_commit_before_sqlite":
+        await _acceptance_recovery(database, tmp_path)
+    else:
+        await _event_replay(database, tmp_path)
 
 
 def git(root: Path, *arguments: str) -> str:

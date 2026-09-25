@@ -79,10 +79,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Resume Session */
-        get: operations["resume_session_api_auth_session_get"];
+        get?: never;
         put?: never;
-        post?: never;
+        /** Resume Session */
+        post: operations["resume_session_api_auth_session_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1120,7 +1120,7 @@ export interface operations {
             };
         };
     };
-    resume_session_api_auth_session_get: {
+    resume_session_api_auth_session_post: {
         parameters: {
             query?: never;
             header?: never;

@@ -16,10 +16,8 @@ from crucible.application.validation_service import ValidationService
 from crucible.artifacts.store import LocalArtifactStore
 from crucible.context.compaction import CompactionLifecycle, ScriptedCompactionGateway
 from crucible.context.manager import ContextManager, SimpleTokenEstimator
-from crucible.domain.ids import new_id
 from crucible.domain.repository import RepositorySettings
 from crucible.domain.results import IntegrationStatus
-from crucible.domain.steps import Step
 from crucible.domain.tools import ToolResultStatus
 from crucible.engine.run_engine import RunEngine
 from crucible.storage.database import Database
@@ -77,6 +75,27 @@ async def test_complete_milestone_one_workflow_is_deterministic_and_retained(
         factory, clock, RepairGateway(("first completion",))
     ).execute(first.run_id)
 
+    artifacts = ArtifactService(
+        LocalArtifactStore(tmp_path / "data" / "artifacts", clock), factory
+    )
+    context_manager = ContextManager(
+        factory,
+        clock,
+        SimpleTokenEstimator(),
+        harness_policy="policy",
+        tool_contract="tools",
+        model="fixture",
+        input_limit=450,
+        output_reserve=10,
+        threshold=0.8,
+        recent_complete_units=0,
+        compaction_lifecycle=CompactionLifecycle(
+            factory,
+            artifacts,
+            ScriptedCompactionGateway((summary("milestone objective retained"),)),
+            clock,
+        ),
+    )
     second = await messages.submit(task.id, "Validate and finish", "second-run")
     assert second.kind is MessageSubmissionKind.NEW_RUN
     async with factory() as uow:
@@ -102,42 +121,16 @@ async def test_complete_milestone_one_workflow_is_deterministic_and_retained(
         RepairGateway(("needs repair", "repaired completion")),
         dispatcher=dispatcher,
         validation_service=ValidationService(factory, clock, dispatcher),
+        context_manager=context_manager,
     ).execute(second.run_id)
 
     async with factory() as uow:
         run = await uow.runs.get(second.run_id)
         assert run is not None
         attempts = await uow.validation_attempts.list_for_run(run.id)
-        steps = await uow.steps.list_for_run(run.id)
-        compaction_step = Step.preparing(
-            new_id(), run.task_id, run.id, steps[-1].step_sequence + 1, clock.now()
-        )
-        await uow.steps.add(compaction_step)
-        await uow.commit()
+        compaction = await uow.compactions.latest_for_task(task.id)
     assert [attempt.status.value for attempt in attempts] == ["failed", "passed"]
-    artifacts = ArtifactService(
-        LocalArtifactStore(tmp_path / "data" / "artifacts", clock), factory
-    )
-    manager = ContextManager(
-        factory,
-        clock,
-        SimpleTokenEstimator(),
-        harness_policy="policy",
-        tool_contract="tools",
-        model="fixture",
-        input_limit=450,
-        output_reserve=10,
-        threshold=0.8,
-        recent_complete_units=0,
-        compaction_lifecycle=CompactionLifecycle(
-            factory,
-            artifacts,
-            ScriptedCompactionGateway((summary("milestone objective retained"),)),
-            clock,
-        ),
-    )
-    prepared = await manager.prepare(run, compaction_step)
-    assert prepared.manifest.compaction_id is not None
+    assert compaction is not None
 
     (task.workspace_path / "README.md").write_text("# Completed milestone\n")
     assert git(root, "rev-parse", "HEAD") == original_head
@@ -163,9 +156,27 @@ async def test_complete_milestone_one_workflow_is_deterministic_and_retained(
     assert git(root, "rev-parse", "HEAD") == original_head
     dirty.unlink()
 
+    (root / "README.md").write_text("conflicting target\n")
+    git(root, "add", "README.md")
+    git(root, "commit", "-m", "conflicting target")
+    conflict_head = git(root, "rev-parse", "HEAD")
+    conflicted = await integration_service.integrate(
+        result.id,
+        IntegrationTarget(registered.repository.id, target_ref, conflict_head),
+        "conflicting-integration",
+    )
+    assert conflicted.status is IntegrationStatus.CONFLICT
+    assert conflicted.failure_code == "integration_conflict"
+    assert git(root, "rev-parse", "HEAD") == conflict_head
+    assert git(root, "status", "--porcelain=v2") == ""
+    assert (root / "README.md").read_text() == "conflicting target\n"
+
+    git(root, "revert", "--no-edit", "HEAD")
+    clean_head = git(root, "rev-parse", "HEAD")
+
     integrated = await integration_service.integrate(
         result.id,
-        IntegrationTarget(registered.repository.id, target_ref, original_head),
+        IntegrationTarget(registered.repository.id, target_ref, clean_head),
         "clean-integration",
     )
     assert integrated.status is IntegrationStatus.COMPLETED

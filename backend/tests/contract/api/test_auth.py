@@ -41,7 +41,14 @@ async def test_bootstrap_is_one_time_and_session_is_revocable(
         replay = await client.post(
             "/api/auth/bootstrap", json={"secret": "bootstrap-secret"}
         )
-        resumed = await client.get("/api/auth/session")
+        issued_csrf = exchanged.json()["csrfToken"]
+        resumed = await client.post(
+            "/api/auth/session",
+            headers={
+                "Origin": "http://127.0.0.1:8000",
+                "X-CSRF-Token": issued_csrf,
+            },
+        )
         csrf = resumed.json()["csrfToken"]
         authenticated = await client.get("/api/repositories")
         revoked = await client.post(
@@ -66,6 +73,32 @@ async def test_bootstrap_is_one_time_and_session_is_revocable(
     assert "SameSite=strict" in cookie
     assert "Path=/" in cookie
     assert "Domain=" not in cookie
+
+
+async def test_session_refresh_rejects_unprotected_requests(
+    database: Database,
+) -> None:
+    auth = AuthService(uow_factory(database), AuthClock(), "bootstrap")
+    app = create_app(
+        repository_service=EmptyRepositories(),  # type: ignore[arg-type]
+        auth_service=auth,
+        allowed_origins=("http://127.0.0.1:8000",),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+    ) as client:
+        issued = await client.post("/api/auth/bootstrap", json={"secret": "bootstrap"})
+        rejected_get = await client.get("/api/auth/session")
+        rejected_post = await client.post(
+            "/api/auth/session",
+            headers={"Origin": "http://127.0.0.1:8000"},
+        )
+        still_authenticated = await client.get("/api/repositories")
+
+    assert issued.status_code == 201
+    assert rejected_get.status_code == 405
+    assert rejected_post.status_code == 403
+    assert still_authenticated.status_code != 401
 
 
 async def test_session_secrets_are_hashed_expire_and_secure_cookie_is_configurable(

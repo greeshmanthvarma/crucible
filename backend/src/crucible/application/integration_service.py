@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,19 @@ class IntegrationTarget:
     expected_revision: str
 
 
+class IntegrationTargetLocks:
+    """Process-local serialization for mutations of a repository checkout/ref."""
+
+    def __init__(self) -> None:
+        self._locks: dict[tuple[UUID, str], asyncio.Lock] = {}
+
+    def for_target(self, repository_id: UUID, target_ref: str) -> asyncio.Lock:
+        return self._locks.setdefault((repository_id, target_ref), asyncio.Lock())
+
+
+_TARGET_LOCKS = IntegrationTargetLocks()
+
+
 class IntegrationService:
     def __init__(
         self,
@@ -32,14 +46,29 @@ class IntegrationService:
         unit_of_work: Callable[[], UnitOfWork],
         clock: Clock,
         notifier: EventNotifier | None = None,
+        target_locks: IntegrationTargetLocks = _TARGET_LOCKS,
     ) -> None:
         self._git = git
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._notifier = notifier
+        self._target_locks = target_locks
         self._events = EventFactory()
 
     async def integrate(
+        self,
+        result_revision_id: UUID,
+        target: IntegrationTarget,
+        idempotency_key: str,
+    ) -> Integration:
+        async with self._target_locks.for_target(
+            target.repository_id, target.target_ref
+        ):
+            return await self._integrate_locked(
+                result_revision_id, target, idempotency_key
+            )
+
+    async def _integrate_locked(
         self,
         result_revision_id: UUID,
         target: IntegrationTarget,

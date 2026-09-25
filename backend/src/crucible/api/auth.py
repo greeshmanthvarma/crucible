@@ -27,7 +27,7 @@ async def bootstrap(
     return BootstrapResponse(csrf_token=issued.csrf_token)
 
 
-@router.get("/api/auth/session", response_model=BootstrapResponse)
+@router.post("/api/auth/session", response_model=BootstrapResponse)
 async def resume_session(
     request: Request,
     session_token: Annotated[str | None, Cookie(alias="crucible_session")] = None,

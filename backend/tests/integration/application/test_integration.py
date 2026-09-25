@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 from pathlib import Path
 
@@ -30,6 +31,26 @@ def git(root: Path, *arguments: str) -> str:
 class UnrestorableGit(SubprocessGitClient):
     async def abort_cherry_pick(self, root: Path) -> GitResult:
         return GitResult(1, "", "simulated abort failure")
+
+
+class BlockingGit(SubprocessGitClient):
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.active_mutations = 0
+        self.maximum_active_mutations = 0
+
+    async def cherry_pick(self, root: Path, commit_sha: str) -> GitResult:
+        self.active_mutations += 1
+        self.maximum_active_mutations = max(
+            self.maximum_active_mutations, self.active_mutations
+        )
+        self.entered.set()
+        await self.release.wait()
+        try:
+            return await super().cherry_pick(root, commit_sha)
+        finally:
+            self.active_mutations -= 1
 
 
 async def accepted_result(database: Database, tmp_path: Path, name: str):
@@ -252,6 +273,35 @@ async def test_pending_integration_recovers_an_already_applied_cherry_pick(
     async with factory() as uow:
         stored_task = await uow.tasks.get(task.id)
     assert stored_task is not None and stored_task.status.value == "integrated"
+
+
+async def test_target_mutations_are_serialized_across_distinct_requests(
+    database: Database, tmp_path: Path
+) -> None:
+    factory, _task, repository, result = await accepted_result(
+        database, tmp_path, "integration-serialized"
+    )
+    expected = git(repository.root_path, "rev-parse", "HEAD")
+    target_ref = git(repository.root_path, "symbolic-ref", "--short", "HEAD")
+    target = IntegrationTarget(repository.id, target_ref, expected)
+    blocking_git = BlockingGit()
+    service = IntegrationService(blocking_git, factory, FixedClock())
+
+    first = asyncio.create_task(service.integrate(result.id, target, "concurrent-a"))
+    await blocking_git.entered.wait()
+    second = asyncio.create_task(service.integrate(result.id, target, "concurrent-b"))
+    await asyncio.sleep(0)
+
+    assert not second.done()
+    assert blocking_git.maximum_active_mutations == 1
+    blocking_git.release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert first_result.status is IntegrationStatus.COMPLETED
+    assert second_result.status is IntegrationStatus.FAILED
+    assert second_result.failure_code == "already_integrated"
+    assert blocking_git.maximum_active_mutations == 1
+    assert git(repository.root_path, "rev-list", "--count", "HEAD") == "2"
 
 
 async def test_unprovable_conflict_restoration_requires_recovery(
