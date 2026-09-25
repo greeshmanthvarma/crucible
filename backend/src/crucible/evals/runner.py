@@ -49,11 +49,14 @@ class ApprovalChoice:
 ApprovalPrompter = Callable[[Approval], Awaitable[ApprovalChoice]]
 
 
-def configuration_snapshot(case: EvalCaseDefinition) -> dict[str, object]:
+def configuration_snapshot(
+    case: EvalCaseDefinition, gateway_version: str = "default"
+) -> dict[str, object]:
     settings = case.repository_settings
     return {
         "schema_version": 1,
         "model": case.model,
+        "gateway_version": gateway_version,
         "settings": {
             "validation_commands": [
                 item.as_dict() for item in settings.validation_commands
@@ -72,8 +75,10 @@ def configuration_snapshot(case: EvalCaseDefinition) -> dict[str, object]:
     }
 
 
-def configuration_digest(case: EvalCaseDefinition) -> str:
-    value = configuration_snapshot(case)
+def configuration_digest(
+    case: EvalCaseDefinition, gateway_version: str = "default"
+) -> str:
+    value = configuration_snapshot(case, gateway_version)
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -88,6 +93,7 @@ class EvalRunner:
         evaluators: EvaluatorRegistry,
         approval_prompter: ApprovalPrompter | None = None,
         reporter: EvalReporter | None = None,
+        gateway_version: str = "default",
     ) -> None:
         self._container = container
         self._suite = suite
@@ -97,6 +103,7 @@ class EvalRunner:
         self._reporter = reporter or EvalReporter(
             container.unit_of_work, container.artifact_service
         )
+        self._gateway_version = gateway_version
         models = {case.model for case in suite.cases}
         if len(models) != 1 or models != {container.model_id}:
             raise ValueError("selected Suite requires one matching effective model")
@@ -113,7 +120,9 @@ class EvalRunner:
         )
         if case is None:
             raise ValueError(f"Case is not in Suite: {request.case_id}")
-        if request.configuration_digest != configuration_digest(case):
+        if request.configuration_digest != configuration_digest(
+            case, self._gateway_version
+        ):
             raise ValueError("Trial configuration digest does not match effective Case")
         suite_id, case_id = await self._ensure_definitions(case)
         now = datetime.now(UTC)

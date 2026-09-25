@@ -503,8 +503,24 @@ class SqlAlchemyEvalStore:
                     text=True,
                     check=False,
                 )
-                if diff.returncode == 0:
-                    changed_files = len(set(diff.stdout.splitlines()))
+                untracked = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        task["workspace_path"],
+                        "ls-files",
+                        "--others",
+                        "--exclude-standard",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if diff.returncode == 0 and untracked.returncode == 0:
+                    changed_files = len(
+                        set(diff.stdout.splitlines())
+                        | set(untracked.stdout.splitlines())
+                    )
             except OSError:
                 pass
         projection: dict[str, object] = {

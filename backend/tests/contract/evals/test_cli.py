@@ -30,7 +30,7 @@ async def test_cli_repeat_and_show_retain_independent_trials(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     status = await run_cli(
-        ["eval", "run", "smoke", "--trials", "2", "--data-dir", str(tmp_path)],
+        ["eval", "run", "tiny", "--trials", "2", "--data-dir", str(tmp_path)],
         docker_client=FakeDockerClient(),
     )
     assert status == 1  # The stock fake model does not create answer.txt.
@@ -58,7 +58,7 @@ async def test_prompt_eof_cancels_run_and_never_passes(
 
     monkeypatch.setattr("builtins.input", no_input)
     status = await run_cli(
-        ["eval", "run", "smoke", "--data-dir", str(tmp_path)],
+        ["eval", "run", "tiny", "--data-dir", str(tmp_path)],
         gateway_factory=CommandRequestGateway,
         docker_client=FakeDockerClient(),
     )

@@ -82,8 +82,13 @@ class EvaluatorRegistry:
             async def chunks() -> AsyncIterator[bytes]:
                 yield payload
 
+            media_type = (
+                "text/plain"
+                if definition.kind == "hidden_command"
+                else "application/json"
+            )
             artifact = await self._artifacts.put(
-                context.task_id, "application/json", "private", chunks()
+                context.task_id, media_type, "private", chunks()
             )
             evidence = artifact.id
         return EvaluatorOutcome(verdict, code, evidence, detail[:1000])

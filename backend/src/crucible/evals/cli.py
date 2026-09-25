@@ -22,6 +22,7 @@ from crucible.domain.evals import EvalResult, ResultVerdict
 from crucible.domain.ids import new_id
 from crucible.engine.gateway import ModelGateway
 from crucible.evals.evaluators import EvaluatorRegistry
+from crucible.evals.fake_gateway import DeterministicEvalGateway
 from crucible.evals.fixtures import FixturePreparer
 from crucible.evals.manifests import (
     EvalPartition,
@@ -66,6 +67,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--development-root", type=Path)
     run.add_argument("--price-table", type=Path)
     run.add_argument("--data-dir", type=Path)
+    run.add_argument("--deterministic", action="store_true")
     show = eval_commands.add_parser("show")
     show.add_argument("invocation_id", type=UUID)
     show.add_argument("--data-dir", type=Path)
@@ -214,6 +216,8 @@ async def run_cli(
         finally:
             await container.close()
     partition = EvalPartition(args.partition)
+    if args.deterministic and partition is not EvalPartition.DEVELOPMENT:
+        parser.error("--deterministic is only available for development evaluations")
     if partition is EvalPartition.HELD_OUT and args.held_out_root is None:
         parser.error("held-out execution requires --held-out-root")
     if partition is EvalPartition.DEVELOPMENT and args.held_out_root is not None:
@@ -240,12 +244,22 @@ async def run_cli(
     if len(models) != 1:
         print("Mixed-model Suite is not supported", file=sys.stderr)
         return 2
+    if args.deterministic and models != {"fake"}:
+        parser.error("--deterministic requires Cases using the fake model")
+    gateway_version = "deterministic-eval-v1" if args.deterministic else "default"
+    effective_gateway_factory = (
+        gateway_factory
+        if gateway_factory is not None
+        else DeterministicEvalGateway
+        if args.deterministic
+        else None
+    )
     price_table = load_price_table(args.price_table) if args.price_table else None
     container = await _open(
         database_url,
         data_dir,
         model_id=next(iter(models)),
-        gateway_factory=gateway_factory,
+        gateway_factory=effective_gateway_factory,
         docker_client=docker_client,
     )
     invocation_id = new_id()
@@ -272,6 +286,7 @@ async def run_cli(
             EvalReporter(
                 container.unit_of_work, container.artifact_service, price_table
             ),
+            gateway_version,
         )
         trial_ids: list[UUID] = []
         failed = False
@@ -283,7 +298,7 @@ async def run_cli(
                         case.case_id,
                         repeat_index,
                         partition,
-                        configuration_digest(case),
+                        configuration_digest(case, gateway_version),
                         invocation_id,
                     )
                 )
