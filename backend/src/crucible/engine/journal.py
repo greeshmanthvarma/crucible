@@ -136,6 +136,8 @@ def terminal_run_mutation(
         terminal = run.fail(code, detail, now=now)
     elif type is EventType.RUN_INTERRUPTED:
         terminal = run.interrupt(code, detail, now=now)
+    elif type is EventType.RUN_CANCELLED:
+        terminal = run.cancel(code, detail, now=now)
     else:
         raise ValueError(f"Unsupported terminal Run Event: {type}")
 
@@ -229,5 +231,68 @@ def recovery_mutation(
                 else ()
             ),
             EventSpec(EventType.RUN_INTERRUPTED, {"outcome_code": "process_restarted"}),
+        ),
+    )
+
+
+def cancellation_mutation(
+    run: Run,
+    *,
+    now: datetime,
+    outstanding_calls: tuple[ToolCall, ...] = (),
+    active_step: Step | None = None,
+) -> JournalMutation:
+    terminal = run.cancel("cancelled", "Run cancelled by user", now=now)
+
+    async def apply(uow: UnitOfWork) -> None:
+        completion_by_step: dict[object, int] = {}
+        for call in outstanding_calls:
+            if call.step_id not in completion_by_step:
+                existing = await uow.tool_results.list_for_step(call.step_id)
+                completion_by_step[call.step_id] = max(
+                    (result.completion_sequence for result in existing), default=0
+                )
+            completion_by_step[call.step_id] += 1
+            await uow.tool_results.add(
+                ToolResult(
+                    new_id(),
+                    call.task_id,
+                    call.run_id,
+                    call.step_id,
+                    call.id,
+                    ToolResultStatus.CANCELLED,
+                    {"truncated": False},
+                    1,
+                    "Cancelled",
+                    "cancelled",
+                    completion_by_step[call.step_id],
+                    now,
+                    now,
+                )
+            )
+            if call.status is not ToolCallStatus.REJECTED:
+                await uow.tool_calls.update(
+                    replace(call, status=ToolCallStatus.COMPLETED)
+                )
+        if active_step is not None:
+            await uow.steps.update(active_step.interrupt(now))
+        await uow.runs.update(terminal)
+
+    return JournalMutation(
+        run.task_id,
+        run.id,
+        apply,
+        (
+            *(
+                (
+                    EventSpec(
+                        EventType.STEP_INTERRUPTED,
+                        {"step_id": str(active_step.id)},
+                    ),
+                )
+                if active_step is not None
+                else ()
+            ),
+            EventSpec(EventType.RUN_CANCELLED, {"outcome_code": "cancelled"}),
         ),
     )

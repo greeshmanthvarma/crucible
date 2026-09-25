@@ -32,13 +32,48 @@ estimated input size, root instruction digest, and Tool schema digest. If the in
 budget cannot fit the required evidence, the Run fails with `context_limit`; if the
 Step budget is exhausted, it fails with `budget_exhausted`.
 
-The Slice 2 repository tools are `list_files`, `search_files`, `read_file`,
+The repository tools are `list_files`, `search_files`, `read_file`,
 `write_file`, `apply_patch`, `workspace_status`, and `workspace_diff`. Paths are confined to the Task's
 isolated worktree, reads and outputs are bounded, writes are atomic, and a complete
-batch is validated before any call begins. Only the worktree-root `AGENTS.md` is
-loaded as repository instruction evidence in this slice. Nested instruction files,
-shell commands, Docker, approval flows, and executable tools are intentionally out
-of scope until later slices.
+batch is validated before any call begins. `execute_command` adds an explicitly
+approved Docker-only command boundary; no command process runs on the host.
+
+## Approved Docker commands
+
+Docker with a reachable daemon is required to provision Tasks and execute commands.
+Each Task owns one labeled dependency volume mounted at
+`/workspace/node_modules`. Every command is a structured executable plus argument
+array—never a shell string—and receives its own durable Approval bound to the Tool
+Call and the SHA-256 digest displayed in the UI. Denial terminalizes that call but
+does not cancel the Run.
+
+Approved containers run as `65532:65532` with a read-only root filesystem, all
+capabilities dropped, `no-new-privileges`, bounded CPU/memory/PIDs/time/output, and
+network `none` unless the displayed command explicitly requests outbound access.
+Only the Task worktree and its verified dependency volume are mounted. Provider
+credentials remain in the host model gateway and are never inherited by a command;
+only explicit non-secret environment entries in the digest-bound spec are supplied,
+and the browser reveals their names without exposing values.
+
+Command stdout/stderr is independently bounded for live Events, model-facing text,
+and retained evidence. Private content-addressed Artifacts live under
+`CRUCIBLE_DATA_DIR/artifacts` (default `backend/data/artifacts`) with mode-0600
+files and are retrieved through opaque Artifact IDs. Cancellation and restart
+reconciliation stop/remove exact label-verified containers and never replay an
+uncertain command. Orphaned or ownership-mismatched Docker resources are reported,
+not automatically deleted.
+
+To run the real lifecycle smoke, provide a locally available, non-root-compatible
+image pinned by digest:
+
+```sh
+export CRUCIBLE_DOCKER_TEST_IMAGE='example/runner@sha256:...'
+cd backend
+uv run pytest -m docker tests/integration/sandbox/test_docker_lifecycle.py -q
+```
+
+This slice does not implement completion proposals, Validation/repair loops,
+Acceptance, Result Revisions, Integration, steering, or compaction.
 
 Crucible is an eval-driven, self-improving coding-agent harness for observable,
 isolated repository-level software-engineering work.

@@ -24,10 +24,18 @@ class EventType(StrEnum):
     TOOL_CALL_ADMITTED = "tool_call.admitted"
     TOOL_CALL_STARTED = "tool_call.started"
     TOOL_CALL_COMPLETED = "tool_call.completed"
+    APPROVAL_REQUESTED = "approval.requested"
+    APPROVAL_APPROVED = "approval.approved"
+    APPROVAL_DENIED = "approval.denied"
+    APPROVAL_CANCELLED = "approval.cancelled"
+    APPROVAL_INVALIDATED = "approval.invalidated"
+    COMMAND_OUTPUT = "command.output"
     MESSAGE_COMPLETED = "message.completed"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
     RUN_INTERRUPTED = "run.interrupted"
+    RUN_CANCEL_REQUESTED = "run.cancel_requested"
+    RUN_CANCELLED = "run.cancelled"
 
 
 @dataclass(frozen=True)

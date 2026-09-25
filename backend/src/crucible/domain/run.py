@@ -14,6 +14,7 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,8 @@ class Run:
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    cancel_requested_at: datetime | None = None
+    cancel_code: str | None = None
 
     def __post_init__(self) -> None:
         require_utc(
@@ -38,6 +41,7 @@ class Run:
             self.created_at,
             self.started_at,
             self.completed_at,
+            self.cancel_requested_at,
         )
 
     @classmethod
@@ -109,6 +113,27 @@ class Run:
             lease_expires_at=None,
             outcome_code=code,
             outcome_detail=detail,
+            completed_at=now,
+        )
+
+    def request_cancel(self, code: str, now: datetime) -> Self:
+        if self.status not in (RunStatus.QUEUED, RunStatus.RUNNING):
+            return self
+        if self.cancel_requested_at is not None:
+            return self
+        return replace(self, cancel_requested_at=now, cancel_code=code)
+
+    def cancel(self, code: str, detail: str, *, now: datetime) -> Self:
+        if self.status not in (RunStatus.QUEUED, RunStatus.RUNNING):
+            return self
+        return replace(
+            self,
+            status=RunStatus.CANCELLED,
+            lease_expires_at=None,
+            outcome_code=code,
+            outcome_detail=detail,
+            cancel_requested_at=self.cancel_requested_at or now,
+            cancel_code=self.cancel_code or code,
             completed_at=now,
         )
 

@@ -11,6 +11,9 @@ type ToolResultId = UUID
 type ContextManifestId = UUID
 type EventId = UUID
 type ExecutionId = UUID
+type ApprovalId = UUID
+type ArtifactId = UUID
+type ExternalResourceId = UUID
 
 
 def new_id() -> UUID:

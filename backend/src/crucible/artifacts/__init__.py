@@ -1,0 +1,1 @@
+"""Private Artifact byte storage."""

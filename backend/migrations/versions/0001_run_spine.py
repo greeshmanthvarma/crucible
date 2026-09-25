@@ -62,9 +62,12 @@ def upgrade() -> None:
         sa.Column("started_at", sa.DateTime()),
         sa.Column("completed_at", sa.DateTime()),
         sa.CheckConstraint(
-            "status IN ('queued','running','completed','failed','interrupted')"
+            "status IN ('queued','running','completed','failed','interrupted')",
+            name="ck_runs_status",
         ),
-        sa.CheckConstraint("next_run_sequence > 0"),
+        sa.CheckConstraint(
+            "next_run_sequence > 0", name="ck_runs_next_run_sequence_positive"
+        ),
     )
     op.create_table(
         "messages",

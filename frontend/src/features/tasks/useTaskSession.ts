@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type {
   CrucibleClient,
+  ApprovalResponse,
   MessageResponse,
   StepTraceResponse,
   TaskResponse,
@@ -23,6 +24,7 @@ export function useTaskSession(
   const [messages, setMessages] = useState<MessageResponse[]>([]);
   const [trace, setTrace] = useState<StepTraceResponse[]>([]);
   const [workspace, setWorkspace] = useState<WorkspaceStateResponse>();
+  const [approvals, setApprovals] = useState<ApprovalResponse[]>([]);
   const [pending, setPending] = useState<{ text: string; key: string }>();
   const [error, setError] = useState("");
   const [events, setEvents] = useState<TaskEventState>({
@@ -32,14 +34,17 @@ export function useTaskSession(
   const eventState = useRef<TaskEventState>({ events: [], needsReplay: false });
 
   const refresh = useCallback(async () => {
-    const [loadedMessages, loadedTrace, loadedWorkspace] = await Promise.all([
-      client.getMessages(taskId),
-      client.getTaskTrace(taskId),
-      client.getWorkspaceState(taskId),
-    ]);
+    const [loadedMessages, loadedTrace, loadedWorkspace, loadedApprovals] =
+      await Promise.all([
+        client.getMessages(taskId),
+        client.getTaskTrace(taskId),
+        client.getWorkspaceState(taskId),
+        client.getApprovals(taskId),
+      ]);
     setMessages(loadedMessages);
     setTrace(loadedTrace);
     setWorkspace(loadedWorkspace);
+    setApprovals(loadedApprovals);
   }, [client, taskId]);
 
   useEffect(() => {
@@ -50,36 +55,48 @@ export function useTaskSession(
       client.getMessages(taskId),
       client.getTaskTrace(taskId),
       client.getWorkspaceState(taskId),
-    ]).then(([loadedTask, loadedMessages, loadedTrace, loadedWorkspace]) => {
-      if (disposed) return;
-      setTask(loadedTask);
-      setMessages(loadedMessages);
-      setTrace(loadedTrace);
-      setWorkspace(loadedWorkspace);
-      let opened = false;
-      stream = streamFactory(
-        taskId,
-        (event) => {
-          const next = reduceTaskEvents(eventState.current, event);
-          if (next === eventState.current) return;
-          eventState.current = next;
-          setEvents(next);
-          if (
-            event.type === "message.completed" ||
-            event.type.startsWith("run.") ||
-            event.type.startsWith("step.") ||
-            event.type.startsWith("tool_call.") ||
-            event.type === "context.prepared"
-          ) {
-            void refresh();
-          }
-        },
-        () => {
-          if (opened) void refresh();
-          opened = true;
-        },
-      );
-    });
+      client.getApprovals(taskId),
+    ]).then(
+      ([
+        loadedTask,
+        loadedMessages,
+        loadedTrace,
+        loadedWorkspace,
+        loadedApprovals,
+      ]) => {
+        if (disposed) return;
+        setTask(loadedTask);
+        setMessages(loadedMessages);
+        setTrace(loadedTrace);
+        setWorkspace(loadedWorkspace);
+        setApprovals(loadedApprovals);
+        let opened = false;
+        stream = streamFactory(
+          taskId,
+          (event) => {
+            const next = reduceTaskEvents(eventState.current, event);
+            if (next === eventState.current) return;
+            eventState.current = next;
+            setEvents(next);
+            if (
+              event.type === "message.completed" ||
+              event.type.startsWith("run.") ||
+              event.type.startsWith("step.") ||
+              event.type.startsWith("tool_call.") ||
+              event.type.startsWith("approval.") ||
+              event.type.startsWith("command.") ||
+              event.type === "context.prepared"
+            ) {
+              void refresh();
+            }
+          },
+          () => {
+            if (opened) void refresh();
+            opened = true;
+          },
+        );
+      },
+    );
     return () => {
       disposed = true;
       stream?.close();
@@ -99,5 +116,26 @@ export function useTaskSession(
     }
   }
 
-  return { task, messages, trace, workspace, pending, error, events, send };
+  async function decideApproval(
+    approvalId: string,
+    decision: "approved" | "denied",
+    specDigest: string,
+    key: string,
+  ) {
+    await client.decideApproval(approvalId, decision, specDigest, key);
+    await refresh();
+  }
+
+  return {
+    task,
+    messages,
+    trace,
+    workspace,
+    approvals,
+    pending,
+    error,
+    events,
+    send,
+    decideApproval,
+  };
 }

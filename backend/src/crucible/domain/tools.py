@@ -6,6 +6,7 @@ from typing import Mapping
 
 from crucible.domain.clock import require_utc
 from crucible.domain.ids import (
+    ArtifactId,
     MessageId,
     RunId,
     StepId,
@@ -33,6 +34,8 @@ class ToolResultStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     INTERRUPTED = "interrupted"
+    DENIED = "denied"
+    TIMED_OUT = "timed_out"
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,7 @@ class ToolResult:
     completion_sequence: int
     created_at: datetime
     completed_at: datetime
+    artifact_id: ArtifactId | None = None
 
     def __post_init__(self) -> None:
         require_utc(self.created_at, self.completed_at)

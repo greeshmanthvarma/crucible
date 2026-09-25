@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from crucible.application.errors import (
@@ -23,6 +24,9 @@ from crucible.domain.steps import Step
 from crucible.domain.task import Task
 from crucible.domain.tools import ToolCall, ToolResult
 from crucible.workspaces.manager import WorkspaceManager
+
+if TYPE_CHECKING:
+    from crucible.sandbox.resources import TaskResourceManager
 
 
 @dataclass(frozen=True)
@@ -48,11 +52,13 @@ class TaskService:
         unit_of_work: Callable[[], UnitOfWork],
         clock: Clock,
         notifier: EventNotifier | None = None,
+        resource_manager: "TaskResourceManager | None" = None,
     ) -> None:
         self._workspaces = workspaces
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._notifier = notifier
+        self._resource_manager = resource_manager
         self._events = EventFactory()
 
     async def create(
@@ -141,6 +147,8 @@ class TaskService:
 
         try:
             await self._workspaces.create(plan)
+            if self._resource_manager is not None:
+                await self._resource_manager.ensure_dependency_volume(task.id)
         except Exception as error:
             await self._record_provisioning_failure(task, error)
             if isinstance(error, ApplicationError):

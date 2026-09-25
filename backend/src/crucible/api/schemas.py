@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -123,6 +124,7 @@ class ToolResultResponse(ApiModel):
     display_text: str
     error_code: str | None
     completion_sequence: int
+    artifact_id: UUID | None
 
 
 class StepTraceResponse(ApiModel):
@@ -140,3 +142,50 @@ class WorkspaceStateResponse(ApiModel):
     diff: str
     status_truncated: bool
     diff_truncated: bool
+
+
+class ApprovalDecisionRequest(ApiModel):
+    decision: Literal["approved", "denied"]
+    spec_digest: str
+    reason: str | None = None
+
+
+class CommandLimitsResponse(ApiModel):
+    cpus: float
+    memory_bytes: int
+    pids: int
+    output_bytes: int
+
+
+class ApprovalCommandSpecResponse(ApiModel):
+    executable: str
+    arguments: list[str]
+    cwd: str
+    timeout_seconds: int
+    network: str
+    environment_names: list[str]
+    image: str
+    reason: str
+    limits: CommandLimitsResponse
+
+
+class ApprovalResponse(ApiModel):
+    id: UUID
+    task_id: UUID
+    run_id: UUID
+    step_id: UUID
+    tool_call_id: UUID
+    spec: ApprovalCommandSpecResponse
+    spec_digest: str
+    status: str
+    decision_reason: str | None
+    decided_by: str | None
+    created_at: datetime
+    decided_at: datetime | None
+
+
+class CancelledRunResponse(ApiModel):
+    run_id: UUID
+    status: str
+    outcome_code: str | None
+    cancel_requested_at: datetime | None

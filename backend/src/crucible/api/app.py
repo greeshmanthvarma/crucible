@@ -5,16 +5,22 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from crucible.api.approvals import router as approvals_router
+from crucible.api.artifacts import router as artifacts_router
 from crucible.api.errors import application_error_handler
 from crucible.api.events import router as events_router
 from crucible.api.repositories import router as repositories_router
+from crucible.api.runs import router as runs_router
 from crucible.api.tasks import messages_router
 from crucible.api.tasks import router as tasks_router
+from crucible.application.approval_service import ApprovalService
+from crucible.application.artifact_service import ArtifactService
 from crucible.application.container import ApplicationContainer
 from crucible.application.errors import ApplicationError
 from crucible.application.event_service import TaskEventSource
 from crucible.application.message_service import MessageService
 from crucible.application.repository_service import RepositoryService
+from crucible.application.run_service import RunService
 from crucible.application.task_service import TaskService
 
 
@@ -23,6 +29,9 @@ def create_app(
     task_service: TaskService | None = None,
     message_service: MessageService | None = None,
     event_source: TaskEventSource | None = None,
+    approval_service: ApprovalService | None = None,
+    artifact_service: ArtifactService | None = None,
+    run_service: RunService | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -33,12 +42,18 @@ def create_app(
                 task_service,
                 message_service,
                 event_source,
+                approval_service,
+                artifact_service,
+                run_service,
             )
         ):
             app.state.repository_service = repository_service
             app.state.task_service = task_service
             app.state.message_service = message_service
             app.state.event_source = event_source
+            app.state.approval_service = approval_service
+            app.state.artifact_service = artifact_service
+            app.state.run_service = run_service
             yield
             return
         container = await ApplicationContainer.create(
@@ -49,6 +64,9 @@ def create_app(
         app.state.task_service = container.task_service
         app.state.message_service = container.message_service
         app.state.event_source = container.event_source
+        app.state.approval_service = container.approval_service
+        app.state.artifact_service = container.artifact_service
+        app.state.run_service = container.run_service
         await container.start()
         try:
             yield
@@ -63,12 +81,18 @@ def create_app(
             task_service,
             message_service,
             event_source,
+            approval_service,
+            artifact_service,
+            run_service,
         )
     ):
         app.state.repository_service = repository_service
         app.state.task_service = task_service
         app.state.message_service = message_service
         app.state.event_source = event_source
+        app.state.approval_service = approval_service
+        app.state.artifact_service = artifact_service
+        app.state.run_service = run_service
     app.add_exception_handler(ApplicationError, application_error_handler)  # type: ignore[arg-type]
     app.include_router(repositories_router)
     if event_source is not None or repository_service is None:
@@ -77,6 +101,12 @@ def create_app(
         app.include_router(tasks_router)
     if message_service is not None or repository_service is None:
         app.include_router(messages_router)
+    if approval_service is not None or repository_service is None:
+        app.include_router(approvals_router)
+    if artifact_service is not None or repository_service is None:
+        app.include_router(artifacts_router)
+    if run_service is not None or repository_service is None:
+        app.include_router(runs_router)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:

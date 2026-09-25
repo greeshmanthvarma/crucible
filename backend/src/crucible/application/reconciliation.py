@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from crucible.application.errors import ApplicationError, WorkspaceProvisioningFailed
 from crucible.application.ports import EventNotifier, UnitOfWork
@@ -6,6 +7,9 @@ from crucible.domain.clock import Clock
 from crucible.domain.events import EventFactory, EventType
 from crucible.domain.task import Task, TaskStatus
 from crucible.workspaces.manager import WorkspaceManager, WorkspacePlan
+
+if TYPE_CHECKING:
+    from crucible.sandbox.resources import TaskResourceManager
 
 
 class StartupReconciler:
@@ -15,14 +19,18 @@ class StartupReconciler:
         unit_of_work: Callable[[], UnitOfWork],
         clock: Clock,
         notifier: EventNotifier | None = None,
+        resource_manager: "TaskResourceManager | None" = None,
     ) -> None:
         self._workspaces = workspaces
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._notifier = notifier
         self._events = EventFactory()
+        self._resource_manager = resource_manager
 
     async def reconcile(self) -> None:
+        if self._resource_manager is not None:
+            await self._resource_manager.reconcile()
         async with self._unit_of_work() as uow:
             tasks = await uow.tasks.list_provisioning()
         for task in tasks:
@@ -42,6 +50,8 @@ class StartupReconciler:
         )
         try:
             provisioned = await self._workspaces.recover(plan)
+            if self._resource_manager is not None:
+                await self._resource_manager.ensure_dependency_volume(task.id)
         except Exception as error:
             code = (
                 error.code

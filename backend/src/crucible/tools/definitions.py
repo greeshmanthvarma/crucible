@@ -4,11 +4,14 @@ from typing import Mapping, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from crucible.domain.ids import ArtifactId, RunId, StepId, TaskId, ToolCallId
+from crucible.domain.tools import ToolResultStatus
+from crucible.engine.active_time import ActiveTimeBudget
 from crucible.engine.gateway import ModelToolDefinition
 
 
 class ToolArguments(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
 class ListFilesArguments(ToolArguments):
@@ -46,6 +49,11 @@ class WorkspaceDiffArguments(ToolArguments):
 @dataclass(frozen=True)
 class ToolContext:
     workspace: Path
+    task_id: TaskId | None = None
+    run_id: RunId | None = None
+    step_id: StepId | None = None
+    tool_call_id: ToolCallId | None = None
+    active_time: ActiveTimeBudget | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +62,8 @@ class ToolOutcome:
     display_text: str
     truncated: bool = False
     error_code: str | None = None
+    status: ToolResultStatus | None = None
+    artifact_id: ArtifactId | None = None
 
 
 class Tool(Protocol):

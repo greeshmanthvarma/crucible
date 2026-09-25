@@ -45,6 +45,11 @@ class TaskNotFound(ApplicationError):
     status_code = 404
 
 
+class RunNotFound(ApplicationError):
+    code = "run_not_found"
+    status_code = 404
+
+
 class WorkspaceProvisioningFailed(ApplicationError):
     code = "workspace_provisioning_failed"
 
@@ -57,6 +62,21 @@ class IdempotencyConflict(ApplicationError):
 class IdempotencyKeyRequired(ApplicationError):
     code = "idempotency_key_required"
     status_code = 400
+
+
+class ApprovalNotFound(ApplicationError):
+    code = "approval_not_found"
+    status_code = 404
+
+
+class ApprovalConflict(ApplicationError):
+    code = "approval_conflict"
+    status_code = 409
+
+
+class ArtifactNotFound(ApplicationError):
+    code = "artifact_not_found"
+    status_code = 404
 
 
 class TaskNotActive(ApplicationError):
