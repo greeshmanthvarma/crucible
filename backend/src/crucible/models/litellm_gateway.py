@@ -133,7 +133,7 @@ def _messages(message: ModelMessage) -> list[dict[str, object]]:
         if calls:
             payload["tool_calls"] = [
                 {
-                    "id": str(part.tool_call_id),
+                    "id": part.provider_correlation_id or str(part.tool_call_id),
                     "type": "function",
                     "function": {
                         "name": part.tool_name,
@@ -149,7 +149,7 @@ def _messages(message: ModelMessage) -> list[dict[str, object]]:
         return [
             {
                 "role": "tool",
-                "tool_call_id": str(part.tool_call_id),
+                "tool_call_id": part.provider_correlation_id or str(part.tool_call_id),
                 "content": part.text_content or "",
             }
             for part in message.parts

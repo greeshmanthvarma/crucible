@@ -327,6 +327,8 @@ def _model_part(
     result = (
         results.get(part.tool_result_id) if part.tool_result_id is not None else None
     )
+    if call is None and result is not None:
+        call = calls.get(result.tool_call_id)
     return ModelPart(
         part.kind.value,
         part.text_content or part.reasoning_content,
@@ -335,6 +337,9 @@ def _model_part(
         ),
         tool_name=call.name if call is not None else None,
         arguments=call.arguments if call is not None else None,
+        provider_correlation_id=(
+            call.provider_correlation_id if call is not None else None
+        ),
     )
 
 

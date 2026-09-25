@@ -2,8 +2,10 @@
 
 ## Model configuration
 
-Crucible embeds LiteLLM `1.102.0` behind its provider-neutral model gateway. Set the
-credential environment variable required by the selected LiteLLM provider (for
+Crucible embeds LiteLLM `1.102.0` behind its provider-neutral model gateway. OpenAI
+models use the Responses API; other supported providers continue through Chat
+Completions. Set the credential environment variable required by the selected
+LiteLLM provider (for
 example `OPENAI_API_KEY`); secret values are read by the provider SDK and are never
 written to Events, Context Manifests, or Task worktrees. Real-provider smoke tests
 are opt-in; the default quality gate uses captured chunks and deterministic scripted
@@ -17,7 +19,7 @@ records support only for the exact configured pair; it performs no repository wr
 Select a model and its context budget before starting the backend:
 
 ```sh
-export CRUCIBLE_MODEL=openai/gpt-5-mini
+export CRUCIBLE_MODEL=openai/gpt-6-luna
 export CRUCIBLE_MODEL_INPUT_LIMIT=100000
 export CRUCIBLE_MODEL_OUTPUT_RESERVE=4096
 export CRUCIBLE_MAX_STEPS=20
@@ -31,6 +33,12 @@ batch. Each model request records a Context Manifest with the selected model,
 estimated input size, root instruction digest, and Tool schema digest. If the input
 budget cannot fit the required evidence, the Run fails with `context_limit`; if the
 Step budget is exhausted, it fails with `budget_exhausted`.
+
+The OpenAI Responses adapter uses stateless requests (`store=false`) and replays
+Crucible's durable normalized conversation, including provider Tool Call IDs needed
+to match results. Encrypted reasoning-state replay is not yet persisted; reasoning
+continuity across Steps therefore remains a follow-up, even though tool-call
+round trips work.
 
 The repository tools are `list_files`, `search_files`, `read_file`,
 `write_file`, `apply_patch`, `workspace_status`, and `workspace_diff`. Paths are confined to the Task's
