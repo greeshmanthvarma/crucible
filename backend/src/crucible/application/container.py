@@ -28,13 +28,14 @@ from crucible.domain.clock import SystemClock
 from crucible.engine.approval_broker import InMemoryApprovalBroker
 from crucible.engine.compaction_gateway import ModelCompactionGateway
 from crucible.engine.fake_gateway import FakeCompactionGateway, FakeModelGateway
+from crucible.engine.gateway import ModelGateway
 from crucible.engine.journal import RunJournal
 from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
 from crucible.engine.supervisor import LocalRunSupervisor
 from crucible.models.litellm_gateway import LiteLLMModelGateway
 from crucible.sandbox.docker import DockerSandboxBackend
-from crucible.sandbox.docker_client import SubprocessDockerClient
+from crucible.sandbox.docker_client import DockerClient, SubprocessDockerClient
 from crucible.sandbox.resources import TaskResourceManager
 from crucible.storage.database import Database
 from crucible.storage.unit_of_work import SqlAlchemyUnitOfWork
@@ -48,6 +49,7 @@ from crucible.workspaces.manager import WorkspaceManager
 
 @dataclass(frozen=True)
 class ApplicationContainer:
+    model_id: str
     database: Database
     repository_service: RepositoryService
     task_service: TaskService
@@ -62,9 +64,18 @@ class ApplicationContainer:
     sandbox_reconciler: SandboxReconciler
     reconciler: StartupReconciler
     unit_of_work: Callable[[], UnitOfWork]
+    eval_sandbox: DockerSandboxBackend
 
     @classmethod
-    async def create(cls, database_url: str, data_dir: Path) -> "ApplicationContainer":
+    async def create(
+        cls,
+        database_url: str,
+        data_dir: Path,
+        *,
+        gateway_factory: Callable[[], ModelGateway] | None = None,
+        model_id: str | None = None,
+        docker_client: DockerClient | None = None,
+    ) -> "ApplicationContainer":
         database = await Database.create(database_url)
         await _verify_current_revision(database)
 
@@ -77,7 +88,7 @@ class ApplicationContainer:
         approval_broker = InMemoryApprovalBroker()
         journal = RunJournal(unit_of_work, clock, notifier)
         workspaces = WorkspaceManager(git, data_dir)
-        docker = SubprocessDockerClient()
+        docker = docker_client or SubprocessDockerClient()
         resource_manager = TaskResourceManager(docker, unit_of_work, clock)
         approval_service = ApprovalService(
             unit_of_work, clock, approval_broker, notifier
@@ -93,8 +104,14 @@ class ApplicationContainer:
             artifact_service,
             journal=journal,
         )
-        model = os.environ.get("CRUCIBLE_MODEL", "fake")
-        gateway = LiteLLMModelGateway() if model != "fake" else FakeModelGateway()
+        model = model_id or os.environ.get("CRUCIBLE_MODEL", "fake")
+        gateway: ModelGateway = (
+            gateway_factory()
+            if gateway_factory is not None
+            else LiteLLMModelGateway()
+            if model != "fake"
+            else FakeModelGateway()
+        )
         compaction_gateway = (
             FakeCompactionGateway()
             if model == "fake"
@@ -156,6 +173,7 @@ class ApplicationContainer:
             approval_broker,
         )
         return cls(
+            model_id=model,
             database=database,
             repository_service=RepositoryService(git, unit_of_work, clock),
             task_service=TaskService(
@@ -174,6 +192,7 @@ class ApplicationContainer:
                 workspaces, unit_of_work, clock, notifier, resource_manager
             ),
             unit_of_work=unit_of_work,
+            eval_sandbox=sandbox_backend,
         )
 
     async def start(self) -> None:

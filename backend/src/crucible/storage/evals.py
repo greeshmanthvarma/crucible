@@ -40,6 +40,33 @@ class SqlAlchemyEvalStore:
             )
         )
 
+    async def get_suite(
+        self, partition: str, name: str, digest: str
+    ) -> EvalSuite | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.eval_suites).where(
+                        models.eval_suites.c.partition == partition,
+                        models.eval_suites.c.name == name,
+                        models.eval_suites.c.definition_digest == digest,
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            return None
+        return EvalSuite(
+            UUID(row["id"]),
+            row["partition"],
+            row["name"],
+            row["definition_digest"],
+            row["definition_json"],
+            row["created_at"],
+        )
+
     async def add_case(self, value: EvalCase) -> None:
         await self._session.execute(
             insert(models.eval_cases).values(
@@ -50,6 +77,31 @@ class SqlAlchemyEvalStore:
                 definition_json=value.definition,
                 created_at=value.created_at,
             )
+        )
+
+    async def get_case(self, suite_id: UUID, name: str, digest: str) -> EvalCase | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(models.eval_cases).where(
+                        models.eval_cases.c.suite_id == str(suite_id),
+                        models.eval_cases.c.name == name,
+                        models.eval_cases.c.definition_digest == digest,
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            return None
+        return EvalCase(
+            UUID(row["id"]),
+            UUID(row["suite_id"]),
+            row["name"],
+            row["definition_digest"],
+            row["definition_json"],
+            row["created_at"],
         )
 
     async def add_trial(self, value: EvalTrial) -> None:

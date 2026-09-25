@@ -49,6 +49,7 @@ class EvalCaseDefinition:
     evaluators: tuple[EvaluatorDefinition, ...]
     case_digest: str
     partition: EvalPartition
+    fixture_ref: str
 
 
 @dataclass(frozen=True)
@@ -215,6 +216,7 @@ def load_case(
         tuple(evaluators),
         _digest(snapshot),
         partition,
+        fixture_rel,
     )
 
 
