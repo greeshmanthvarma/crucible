@@ -1,5 +1,7 @@
 docs/
 
+.env
+
 # Python
 .venv/
 __pycache__/
