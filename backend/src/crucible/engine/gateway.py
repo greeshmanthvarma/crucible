@@ -20,6 +20,7 @@ class ModelPart:
     tool_call_id: ToolCallId | None = None
     tool_name: str | None = None
     arguments: Mapping[str, object] | None = None
+    provider_correlation_id: str | None = None
 
 
 @dataclass(frozen=True)
