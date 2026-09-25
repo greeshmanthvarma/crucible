@@ -26,4 +26,5 @@ async def test_read_tools_are_bounded_stable_and_workspace_relative(
     assert listed.truncated is True
     assert read.data["content"] == "needle\nt"
     assert read.truncated is True
+    assert searched.error_code is None, searched.display_text
     assert all(not str(path).startswith("/") for path in searched.data["matches"])
