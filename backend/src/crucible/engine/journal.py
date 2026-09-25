@@ -64,6 +64,17 @@ class RunJournal:
                     for spec in mutation.events
                 ]
             )
+            if any(
+                spec.type
+                in (
+                    EventType.RUN_COMPLETED,
+                    EventType.RUN_FAILED,
+                    EventType.RUN_INTERRUPTED,
+                    EventType.RUN_CANCELLED,
+                )
+                for spec in mutation.events
+            ):
+                await uow.evals.rebuild_summary(mutation.run_id, created_at)
             await uow.commit()
         if self._notifier is not None:
             await self._notifier.notify(mutation.task_id)

@@ -51,6 +51,28 @@ async def test_engine_claims_and_completes_a_run_once(
             .mappings()
             .all()
         )
+        usage = (
+            (
+                await connection.execute(
+                    select(models.step_usage).where(
+                        models.step_usage.c.run_id == str(submitted.run_id)
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+        summary = (
+            (
+                await connection.execute(
+                    select(models.run_summaries).where(
+                        models.run_summaries.c.run_id == str(submitted.run_id)
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
 
     assert run["status"] == "completed", run["outcome_detail"]
     assert run["execution_id"] is not None
@@ -70,6 +92,10 @@ async def test_engine_claims_and_completes_a_run_once(
         message for message in gateway.requests[0].messages if message.role == "user"
     )
     assert user_message.parts[0].text_content == "Explain the change"
+    assert len(usage) == 1
+    assert usage[0]["source"] == "estimated"
+    assert summary["projection_json"]["tokens"]["sources"] == ["estimated"]
+    assert summary["projection_json"]["estimated_cost"] is None
 
 
 async def test_gateway_failure_persists_stable_outcome(
@@ -119,3 +145,16 @@ async def test_gateway_failure_persists_stable_outcome(
     assert run["outcome_code"] == "model_gateway_error"
     assert len(messages) == 1
     assert event_types[-1] == "run.failed"
+    async with database.engine.connect() as connection:
+        summary = (
+            (
+                await connection.execute(
+                    select(models.run_summaries).where(
+                        models.run_summaries.c.run_id == str(submitted.run_id)
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert summary["projection_json"]["outcome"] == "failed"
