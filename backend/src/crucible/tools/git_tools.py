@@ -68,12 +68,22 @@ class ApplyPatchTool:
         self._git = git or SubprocessGitClient()
         self.definition = ModelToolDefinition(
             "apply_patch",
-            "Apply a validated unified patch inside the workspace.",
+            "Apply a standard unified diff inside the workspace. Include --- a/path, "
+            "+++ b/path, and numbered @@ -old +new @@ hunk headers. "
+            "The *** Begin Patch / *** Update File format is not supported.",
             ApplyPatchArguments.model_json_schema(),
         )
 
     async def invoke(self, context: ToolContext, arguments: object) -> ToolOutcome:
         args = ApplyPatchArguments.model_validate(arguments)
+        if args.patch.startswith("*** Begin Patch"):
+            return ToolOutcome(
+                {},
+                "This tool requires a standard unified diff with headers such as "
+                "--- a/file.txt and +++ b/file.txt and numbered @@ hunks; "
+                "*** Begin Patch format is unsupported.",
+                error_code="patch_format_unsupported",
+            )
         resolver = WorkspacePathResolver(context.workspace)
         paths = _patch_paths(args.patch)
         for path in paths:

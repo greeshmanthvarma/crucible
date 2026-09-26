@@ -1,5 +1,5 @@
 import { FormEvent, useState } from "react";
-import { ArrowUp, FolderGit2 } from "lucide-react";
+import { ArrowUp, ChevronDown, ChevronUp, FolderGit2 } from "lucide-react";
 
 import type { CrucibleClient, RepositoryResponse } from "../../api/client";
 import { Button } from "../../components/ui/button";
@@ -111,7 +111,8 @@ export function TaskView({
             <p>Status: {session.task.status}</p>
             <p>Source: {session.task.sourceRef}</p>
             <p className="truncate">
-              Workspace base: {session.task.workspaceBaseRevision ?? session.task.baseRevision}
+              Workspace base:{" "}
+              {session.task.workspaceBaseRevision ?? session.task.baseRevision}
             </p>
           </header>
         )}
@@ -217,9 +218,19 @@ export function TaskView({
           <MessageScrollerButton />
         </MessageScroller>
       </MessageScrollerProvider>
-      <details className="max-h-[42vh] shrink-0 overflow-y-auto border-t border-border/70 py-3 text-sm">
-        <summary className="flex cursor-pointer items-center justify-between gap-3 font-medium">
-          <span>Review & integrate</span>
+      <details className="group/review max-h-[42vh] shrink-0 overflow-y-auto border-t border-border/70 text-sm">
+        <summary className="sticky top-0 z-10 flex cursor-pointer list-none items-center justify-between gap-3 bg-background py-3 font-medium [&::-webkit-details-marker]:hidden">
+          <span className="flex items-center gap-2">
+            <ChevronDown
+              aria-hidden="true"
+              className="size-4 group-open/review:hidden"
+            />
+            <ChevronUp
+              aria-hidden="true"
+              className="hidden size-4 group-open/review:block"
+            />
+            <span>Review & integrate</span>
+          </span>
           <Badge variant="outline">
             {session.task?.status === "integrated"
               ? "Integrated"
@@ -230,7 +241,7 @@ export function TaskView({
                   : "Not ready"}
           </Badge>
         </summary>
-        <div className="space-y-5 pt-4">
+        <div className="space-y-5 pb-3 pt-4">
           <section aria-label="Completion review">
             <h3 className="font-medium">Completion</h3>
             <p className="mt-1 text-sm text-muted-foreground">
@@ -303,7 +314,12 @@ export function TaskView({
                 : "Message Crucible…"
             }
             value={text}
-            disabled={Boolean(session.task && !["active", "accepted", "integrated", "continuing"].includes(session.task.status))}
+            disabled={Boolean(
+              session.task &&
+              !["active", "accepted", "integrated", "continuing"].includes(
+                session.task.status,
+              ),
+            )}
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {
@@ -319,7 +335,12 @@ export function TaskView({
               size="icon"
               disabled={
                 Boolean(session.pending) ||
-                Boolean(session.task && !["active", "accepted", "integrated", "continuing"].includes(session.task.status)) ||
+                Boolean(
+                  session.task &&
+                  !["active", "accepted", "integrated", "continuing"].includes(
+                    session.task.status,
+                  ),
+                ) ||
                 !text.trim()
               }
             >

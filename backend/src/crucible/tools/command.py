@@ -3,7 +3,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 
 from crucible.application.artifact_service import ArtifactService
 from crucible.application.command_authority import CommandAuthority
@@ -38,11 +38,11 @@ class CommandLimitArguments(ToolArguments):
 class ExecuteCommandArguments(ToolArguments):
     executable: str = Field(min_length=1, max_length=1000)
     arguments: list[str] = Field(default_factory=list, max_length=1000)
-    cwd: str = "."
+    cwd: str = Field(default=".", validation_alias=AliasChoices("cwd", "workdir"))
     timeout_seconds: int = Field(default=300, ge=1, le=3600, alias="timeoutSeconds")
     network: Literal["none", "outbound"] = "none"
     environment: dict[str, str] = Field(default_factory=dict)
-    image: str = Field(min_length=1, max_length=1000)
+    image: str | None = Field(default=None, min_length=1, max_length=1000)
     reason: str = Field(min_length=1, max_length=2000)
     limits: CommandLimitArguments = Field(default_factory=CommandLimitArguments)
 
@@ -69,10 +69,17 @@ class ExecuteCommandTool:
         self._live_limit = live_limit
         self._model_limit = model_limit
         self._journal = journal
+        model_schema = ExecuteCommandArguments.model_json_schema()
+        model_schema["properties"].pop("image", None)
+        model_schema["required"] = [
+            name for name in model_schema["required"] if name != "image"
+        ]
         self.definition = ModelToolDefinition(
             "execute_command",
-            "Request approval, then execute one structured command in Docker.",
-            ExecuteCommandArguments.model_json_schema(),
+            "Request approval, then execute one structured command in Docker. "
+            "The harness selects the pinned sandbox image. Use cwd (or workdir) "
+            "for a path relative to the workspace.",
+            model_schema,
         )
 
     async def invoke(self, context: ToolContext, arguments: object) -> ToolOutcome:
@@ -91,6 +98,16 @@ class ExecuteCommandTool:
         assert context.step_id is not None
         assert context.tool_call_id is not None
         args = ExecuteCommandArguments.model_validate(arguments)
+        image = (
+            context.sandbox_image if context.sandbox_image is not None else args.image
+        )
+        if not image:
+            return ToolOutcome(
+                {},
+                "No sandbox image is configured for this run. Set the repository "
+                "sandbox_image to an image pinned by sha256 digest.",
+                error_code="sandbox_image_not_configured",
+            )
         cwd = WorkspacePathResolver(context.workspace).resolve(args.cwd)
         if not cwd.is_dir():
             raise ValueError("Command cwd must be a Workspace directory")
@@ -101,7 +118,7 @@ class ExecuteCommandTool:
             args.timeout_seconds,
             CommandNetwork(args.network),
             args.environment,
-            args.image,
+            image,
             args.reason,
             CommandLimits(
                 args.limits.cpus,

@@ -352,6 +352,7 @@ class RunEngine:
                 assistant.id,
                 task.workspace_path,
                 active_time,
+                run.settings_snapshot.sandbox_image,
             ),
             tuple(calls),
             call_budget=call_budget,

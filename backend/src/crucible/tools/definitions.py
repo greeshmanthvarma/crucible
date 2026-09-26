@@ -54,6 +54,7 @@ class ToolContext:
     step_id: StepId | None = None
     tool_call_id: ToolCallId | None = None
     active_time: ActiveTimeBudget | None = None
+    sandbox_image: str | None = None
 
 
 @dataclass(frozen=True)

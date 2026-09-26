@@ -13,3 +13,6 @@ contains = "ready"
 [[evaluators]]
 kind = "allowed_files"
 paths = ["answer.txt"]
+
+[settings]
+sandbox_image = "python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9"

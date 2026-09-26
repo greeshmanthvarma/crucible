@@ -70,6 +70,20 @@ async def test_malformed_patch_does_not_partially_mutate(tmp_path: Path) -> None
     assert (workspace / "file.txt").read_text() == "old\n"
 
 
+async def test_codex_style_patch_explains_required_format(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    repository(workspace)
+    patch = (
+        "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch\n"
+    )
+
+    outcome = await ApplyPatchTool().invoke(ToolContext(workspace), {"patch": patch})
+
+    assert outcome.error_code == "patch_format_unsupported"
+    assert "--- a/file.txt" in outcome.display_text
+    assert (workspace / "file.txt").read_text() == "old\n"
+
+
 async def test_write_file_rejects_symlink_target(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     repository(workspace)

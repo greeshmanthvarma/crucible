@@ -78,7 +78,14 @@ async def test_command_waits_for_exact_approval_then_returns_bounded_evidence(
     workspace.mkdir()
     execution = asyncio.create_task(
         dispatcher.execute_batch(
-            DispatchContext(task.id, run.id, step.id, message.id, workspace),
+            DispatchContext(
+                task.id,
+                run.id,
+                step.id,
+                message.id,
+                workspace,
+                sandbox_image="runner@sha256:" + "a" * 64,
+            ),
             (
                 CompleteToolCall(
                     call_id,
@@ -86,11 +93,11 @@ async def test_command_waits_for_exact_approval_then_returns_bounded_evidence(
                     {
                         "executable": "python",
                         "arguments": ["-V"],
-                        "cwd": ".",
+                        "workdir": ".",
                         "timeoutSeconds": 30,
                         "network": "none",
                         "environment": {"CI": "1"},
-                        "image": "runner@sha256:" + "a" * 64,
+                        "image": "python:3.12-slim",
                         "reason": "Check Python",
                         "limits": {
                             "cpus": 1,
@@ -104,6 +111,7 @@ async def test_command_waits_for_exact_approval_then_returns_bounded_evidence(
         )
     )
     pending = await wait_for_pending(database, run.id)
+    assert pending.spec.image == "runner@sha256:" + "a" * 64
     assert sandbox.requests == []
 
     await approvals.decide(

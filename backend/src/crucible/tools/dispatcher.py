@@ -32,6 +32,7 @@ class DispatchContext:
     assistant_message_id: MessageId
     workspace: Path
     active_time: ActiveTimeBudget | None = None
+    sandbox_image: str | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,7 @@ class ToolDispatcher:
                             context.step_id,
                             item.record.id,
                             context.active_time,
+                            context.sandbox_image,
                         ),
                         item.arguments,
                     )
