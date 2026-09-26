@@ -198,3 +198,42 @@ it("reconstructs a pending approval and submits the displayed digest", async () 
     ),
   );
 });
+
+it("places a tool result and its command approval in the conversation", async () => {
+  const approval = {
+    id: "approval-inline", taskId: "task", runId: "run", stepId: "step", toolCallId: "call-inline",
+    spec: { executable: "python", arguments: ["-m", "unittest"], cwd: ".", timeoutSeconds: 30,
+      network: "none", environmentNames: [], image: "python@sha256:digest", reason: "Run tests",
+      limits: { cpus: 1, memoryBytes: 1024, pids: 16, outputBytes: 100 } },
+    specDigest: "digest-inline", status: "pending", decisionReason: null, decidedBy: null,
+    createdAt: task.createdAt, decidedAt: null,
+  };
+  const client = {
+    getTask: vi.fn().mockResolvedValue(task),
+    getMessages: vi.fn().mockResolvedValue([
+      { id: "assistant", role: "assistant", parts: [
+        { id: "call-part", kind: "tool_call", toolCallId: "call-inline", textContent: null },
+        { id: "diff-part", kind: "tool_call", toolCallId: "diff-call", textContent: null },
+      ] },
+      { id: "tool", role: "tool", parts: [{ id: "result-part", kind: "tool_result", textContent: "raw tool reply" }] },
+    ]),
+    getTaskTrace: vi.fn().mockResolvedValue([{ id: "step", calls: [
+      { id: "call-inline", name: "execute_command", arguments: { executable: "python", arguments: ["-m", "unittest"] }, status: "pending" },
+      { id: "diff-call", name: "workspace_diff", arguments: {}, status: "completed" },
+    ], results: [{ id: "diff-result", toolCallId: "diff-call", status: "succeeded", displayText: "diff --git a/file.py b/file.py\n@@ -1 +1 @@\n-old\n+new", artifactId: null }] }]),
+    getWorkspaceState: vi.fn().mockResolvedValue({ status: "", diff: "", statusTruncated: false, diffTruncated: false }),
+    getApprovals: vi.fn().mockResolvedValue([approval]),
+    decideApproval: vi.fn().mockResolvedValue({ ...approval, status: "approved" }),
+  } as unknown as CrucibleClient;
+  const rendered = render(<TaskView taskId="task" client={client} streamFactory={() => ({ close: vi.fn() })} />);
+  const view = within(rendered.container);
+
+  const command = await view.findByRole("region", { name: "Tool call: execute_command" });
+  expect(within(command).getByText("python -m unittest")).toBeVisible();
+  expect(view.getByRole("region", { name: "Command approval" })).toBeVisible();
+  expect(view.getAllByText("-old")).toHaveLength(1);
+  expect(view.getAllByText("+new")).toHaveLength(1);
+  expect(view.queryByText("raw tool reply")).not.toBeInTheDocument();
+  fireEvent.click(view.getByRole("button", { name: "Approve" }));
+  await waitFor(() => expect(client.decideApproval).toHaveBeenCalledWith("approval-inline", "approved", "digest-inline", expect.any(String)));
+});

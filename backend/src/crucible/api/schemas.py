@@ -74,6 +74,12 @@ class RepositoryResponse(ApiModel):
     settings: RepositorySettingsResponse
 
 
+class RepositoryTargetResponse(ApiModel):
+    current_ref: str | None
+    head_revision: str
+    clean: bool
+
+
 class ErrorResponse(ApiModel):
     code: str
     detail: str
@@ -89,6 +95,8 @@ class TaskResponse(ApiModel):
     source_ref: str
     base_revision: str | None
     workspace_path: str
+    workspace_generation: int
+    workspace_base_revision: str | None
     status: str
     failure_code: str | None
     failure_detail: str | None

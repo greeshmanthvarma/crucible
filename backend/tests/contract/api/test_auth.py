@@ -75,7 +75,7 @@ async def test_bootstrap_is_one_time_and_session_is_revocable(
     assert "Domain=" not in cookie
 
 
-async def test_session_refresh_rejects_unprotected_requests(
+async def test_session_refresh_requires_post_cookie_and_exact_origin(
     database: Database,
 ) -> None:
     auth = AuthService(uow_factory(database), AuthClock(), "bootstrap")
@@ -89,15 +89,17 @@ async def test_session_refresh_rejects_unprotected_requests(
     ) as client:
         issued = await client.post("/api/auth/bootstrap", json={"secret": "bootstrap"})
         rejected_get = await client.get("/api/auth/session")
-        rejected_post = await client.post(
-            "/api/auth/session",
-            headers={"Origin": "http://127.0.0.1:8000"},
+        rejected_post = await client.post("/api/auth/session")
+        recovered = await client.post(
+            "/api/auth/session", headers={"Origin": "http://127.0.0.1:8000"}
         )
         still_authenticated = await client.get("/api/repositories")
 
     assert issued.status_code == 201
     assert rejected_get.status_code == 405
     assert rejected_post.status_code == 403
+    assert rejected_post.json()["code"] == "origin_rejected"
+    assert recovered.status_code == 200
     assert still_authenticated.status_code != 401
 
 

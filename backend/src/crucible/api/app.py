@@ -178,12 +178,17 @@ def create_app(
                     from crucible.application.errors import OriginRejected
 
                     raise OriginRejected("Exact allowed Origin is required")
-                csrf = request.headers.get("x-csrf-token")
-                if not csrf:
-                    from crucible.application.errors import CsrfRejected
+                if request.url.path == "/api/auth/session":
+                    # Recover a readable CSRF token from a valid HttpOnly session.
+                    # Exact Origin is still required above.
+                    await service.authenticate(token)
+                else:
+                    csrf = request.headers.get("x-csrf-token")
+                    if not csrf:
+                        from crucible.application.errors import CsrfRejected
 
-                    raise CsrfRejected("CSRF token is required")
-                await service.authenticate(token, csrf)
+                        raise CsrfRejected("CSRF token is required")
+                    await service.authenticate(token, csrf)
             else:
                 await service.authenticate(token)
         except ApplicationError as error:

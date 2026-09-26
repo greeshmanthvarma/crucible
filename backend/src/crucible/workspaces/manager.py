@@ -28,8 +28,9 @@ class WorkspaceManager:
         self._git = git
         self._data_dir = data_dir
 
-    def destination_for(self, task_id: UUID) -> Path:
-        return self._data_dir / "workspaces" / str(task_id)
+    def destination_for(self, task_id: UUID, generation: int = 0) -> Path:
+        suffix = f"-g{generation}" if generation else ""
+        return self._data_dir / "workspaces" / f"{task_id}{suffix}"
 
     async def plan(
         self, repository_root: Path, source_ref: str, task_id: UUID

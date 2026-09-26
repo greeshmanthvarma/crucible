@@ -8,7 +8,7 @@ from crucible.application.ports import UnitOfWork
 from crucible.domain.clock import Clock
 from crucible.domain.ids import new_id
 from crucible.domain.repository import Repository, RepositorySettings
-from crucible.workspaces.git import GitClient
+from crucible.workspaces.git import GitClient, TargetSnapshot
 
 
 @dataclass(frozen=True)
@@ -76,3 +76,7 @@ class RepositoryService:
         if repository is None:
             raise RepositoryNotFound(f"Repository {repository_id} was not found")
         return repository
+
+    async def target_state(self, repository_id: UUID) -> TargetSnapshot:
+        repository = await self.get(repository_id)
+        return await self._git.target_snapshot(repository.root_path)

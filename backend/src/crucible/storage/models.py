@@ -57,6 +57,8 @@ tasks = Table(
     Column("source_ref", String, nullable=False),
     Column("base_revision", String),
     Column("workspace_path", String, nullable=False, unique=True),
+    Column("workspace_generation", Integer, nullable=False, server_default="0"),
+    Column("workspace_base_revision", String),
     Column("status", String, nullable=False),
     Column("failure_code", String),
     Column("failure_detail", String),
@@ -66,7 +68,7 @@ tasks = Table(
     Column("updated_at", UTCDateTime(), nullable=False),
     CheckConstraint(
         "status IN "
-        "('provisioning','active','accepted','integrated','provisioning_failed')",
+        "('provisioning','active','accepted','integrated','continuing','provisioning_failed')",
         name="ck_tasks_status",
     ),
     CheckConstraint("next_task_sequence > 0"),

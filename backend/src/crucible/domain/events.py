@@ -15,6 +15,8 @@ class EventType(StrEnum):
     TASK_ACCEPTED = "task.accepted"
     TASK_REOPENED = "task.reopened"
     TASK_INTEGRATED = "task.integrated"
+    TASK_CONTINUATION_STARTED = "task.continuation_started"
+    TASK_CONTINUATION_SUCCEEDED = "task.continuation_succeeded"
     INTEGRATION_FAILED = "integration.failed"
     INTEGRATION_CONFLICT = "integration.conflict"
     INTEGRATION_RECOVERY_REQUIRED = "integration.recovery_required"

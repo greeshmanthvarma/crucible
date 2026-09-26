@@ -39,13 +39,14 @@ class StartupReconciler:
     async def _reconcile_task(self, task: Task) -> None:
         async with self._unit_of_work() as uow:
             repository = await uow.repositories.get(task.repository_id)
-        if repository is None or task.base_revision is None:
+        base_revision = task.workspace_base_revision or task.base_revision
+        if repository is None or base_revision is None:
             await self._fail(task, "repository_not_found", "Repository is unavailable")
             return
         plan = WorkspacePlan(
             repository_root=repository.root_path,
             source_ref=task.source_ref,
-            base_revision=task.base_revision,
+            base_revision=base_revision,
             workspace_path=task.workspace_path,
         )
         try:
@@ -60,19 +61,27 @@ class StartupReconciler:
             )
             await self._fail(task, code, str(error)[:1000])
             return
-        active = task.activate(
-            workspace_path=provisioned.workspace_path, clock=self._clock
-        )
-        await self._persist(active, EventType.TASK_PROVISIONING_SUCCEEDED)
+        if task.status is TaskStatus.CONTINUING:
+            active = task.finish_continuation(self._clock)
+            await self._persist(active, EventType.TASK_CONTINUATION_SUCCEEDED)
+        else:
+            active = task.activate(
+                workspace_path=provisioned.workspace_path, clock=self._clock
+            )
+            await self._persist(active, EventType.TASK_PROVISIONING_SUCCEEDED)
 
     async def _fail(self, task: Task, code: str, detail: str) -> None:
+        if task.status is TaskStatus.CONTINUING:
+            return  # Keep the durable plan so a later message can retry safely.
         failed = task.fail_provisioning(code, detail, self._clock)
         await self._persist(failed, EventType.TASK_PROVISIONING_FAILED)
 
     async def _persist(self, task: Task, event_type: EventType) -> None:
         async with self._unit_of_work() as uow:
             current = await uow.tasks.get(task.id)
-            if current is None or current.status is not TaskStatus.PROVISIONING:
+            if current is None or current.status not in (
+                TaskStatus.PROVISIONING, TaskStatus.CONTINUING
+            ):
                 return
             await uow.tasks.update(task)
             await uow.events.append(

@@ -9,16 +9,20 @@ from crucible.application.integration_service import (
     IntegrationService,
     IntegrationTarget,
 )
+from crucible.application.message_service import MessageService
+from crucible.application.reconciliation import StartupReconciler
 from crucible.application.repository_service import RepositoryService
 from crucible.domain.ids import new_id
 from crucible.domain.results import Integration, IntegrationStatus
 from crucible.storage.database import Database
 from crucible.workspaces.git import GitResult, SubprocessGitClient
+from crucible.workspaces.manager import WorkspaceManager
 from tests.contract.api.test_repositories import create_repository
 from tests.integration.application.test_acceptance import (
     acceptance_service,
     completed_task,
 )
+from tests.integration.application.test_message_submission import RecordingSupervisor
 from tests.integration.engine.conftest import FixedClock, uow_factory
 
 
@@ -93,6 +97,93 @@ async def test_clean_target_integrates_selected_result_revision(
         events = await uow.events.list_after(task.id, 0)
     assert stored_task is not None and stored_task.status.value == "integrated"
     assert events[-1].type.value == "task.integrated"
+
+
+async def test_integrated_chat_continues_in_new_workspace_generation(
+    database: Database, tmp_path: Path
+) -> None:
+    factory, task, repository, result = await accepted_result(
+        database, tmp_path, "continuation"
+    )
+    git_client = SubprocessGitClient()
+    target_ref = git(repository.root_path, "symbolic-ref", "--short", "HEAD")
+    await IntegrationService(git_client, factory, FixedClock()).integrate(
+        result.id,
+        IntegrationTarget(
+            repository.id, target_ref, git(repository.root_path, "rev-parse", "HEAD")
+        ),
+        "integrate-continuation",
+    )
+    (repository.root_path / "later.txt").write_text("later\n")
+    git(repository.root_path, "add", "later.txt")
+    git(repository.root_path, "commit", "-m", "advance target")
+    current_head = git(repository.root_path, "rev-parse", "HEAD")
+    workspaces = WorkspaceManager(git_client, tmp_path / "data")
+    supervisor = RecordingSupervisor()
+    messages = MessageService(
+        factory, FixedClock(), supervisor, git=git_client, workspaces=workspaces
+    )
+
+    submitted = await messages.submit(task.id, "Continue in this chat", "continue-1")
+    retried = await messages.submit(task.id, "Continue in this chat", "continue-1")
+    assert retried == submitted
+    assert submitted.run_id in supervisor.submissions
+    async with factory() as uow:
+        continued = await uow.tasks.get(task.id)
+        conversation = await uow.messages.list_for_task(task.id)
+    assert continued is not None
+    assert continued.status.value == "active"
+    assert continued.workspace_generation == 1
+    assert continued.source_ref == task.source_ref
+    assert continued.base_revision == task.base_revision
+    assert continued.workspace_base_revision == current_head
+    assert continued.workspace_path != task.workspace_path
+    assert git(continued.workspace_path, "rev-parse", "HEAD") == current_head
+    assert git(task.workspace_path, "rev-parse", "HEAD") == result.commit_sha
+    assert conversation[-1].parts[0].text_content == "Continue in this chat"
+    assert sum(
+        message.parts[0].text_content == "Continue in this chat"
+        for message in conversation
+    ) == 1
+
+
+async def test_startup_recovers_a_recorded_continuation(
+    database: Database, tmp_path: Path
+) -> None:
+    factory, task, repository, result = await accepted_result(
+        database, tmp_path, "continuation-recovery"
+    )
+    git_client = SubprocessGitClient()
+    target_ref = git(repository.root_path, "symbolic-ref", "--short", "HEAD")
+    await IntegrationService(git_client, factory, FixedClock()).integrate(
+        result.id,
+        IntegrationTarget(
+            repository.id, target_ref, git(repository.root_path, "rev-parse", "HEAD")
+        ),
+        "integrate-recovery",
+    )
+    workspaces = WorkspaceManager(git_client, tmp_path / "data")
+    async with factory() as uow:
+        integrated = await uow.tasks.get(task.id)
+        assert integrated is not None
+        continuing = integrated.begin_continuation(
+            base_revision=git(repository.root_path, "rev-parse", "HEAD"),
+            workspace_path=workspaces.destination_for(task.id, 1),
+            clock=FixedClock(),
+        )
+        await uow.tasks.update(continuing)
+        await uow.commit()
+
+    await StartupReconciler(workspaces, factory, FixedClock()).reconcile()
+
+    async with factory() as uow:
+        recovered = await uow.tasks.get(task.id)
+    assert recovered is not None and recovered.status.value == "active"
+    assert recovered.workspace_generation == 1
+    assert (
+        git(recovered.workspace_path, "rev-parse", "HEAD")
+        == continuing.workspace_base_revision
+    )
 
 
 @pytest.mark.parametrize("dirty_kind", ["tracked", "untracked"])

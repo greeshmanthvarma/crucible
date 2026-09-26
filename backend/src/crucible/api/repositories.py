@@ -11,6 +11,7 @@ from crucible.api.schemas import (
     RepositoryResponse,
     RepositorySettingsRequest,
     RepositorySettingsResponse,
+    RepositoryTargetResponse,
     ValidationCommandSettings,
 )
 from crucible.application.repository_service import (
@@ -112,6 +113,19 @@ async def list_repositories(
     service: RepositoryServiceDependency,
 ) -> list[RepositoryResponse]:
     return [to_response(result) for result in await service.list()]
+
+
+@router.get("/{repository_id}/target", response_model=RepositoryTargetResponse)
+async def get_repository_target(
+    repository_id: UUID,
+    service: RepositoryServiceDependency,
+) -> RepositoryTargetResponse:
+    snapshot = await service.target_state(repository_id)
+    return RepositoryTargetResponse(
+        current_ref=snapshot.current_ref,
+        head_revision=snapshot.head_revision,
+        clean=not bool(snapshot.status),
+    )
 
 
 @router.put("/{repository_id}/settings", response_model=RepositoryResponse)

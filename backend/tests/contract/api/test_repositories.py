@@ -52,6 +52,7 @@ async def test_repository_registration_and_listing_contract(
         created = await client.post("/api/repositories", json={"path": str(nested)})
         duplicate = await client.post("/api/repositories", json={"path": str(root)})
         listed = await client.get("/api/repositories")
+        target = await client.get(f"/api/repositories/{created.json()['id']}/target")
 
     assert created.status_code == 201
     assert created.json()["rootPath"] == str(root.resolve())
@@ -60,6 +61,10 @@ async def test_repository_registration_and_listing_contract(
     assert duplicate.json()["id"] == created.json()["id"]
     assert listed.status_code == 200
     assert listed.json() == [duplicate.json()]
+    assert target.status_code == 200
+    assert target.json()["headRevision"] == created.json()["headRevision"]
+    assert target.json()["currentRef"] is not None
+    assert target.json()["clean"] is True
 
 
 async def test_invalid_repository_path_has_stable_error_contract(
@@ -78,6 +83,25 @@ async def test_invalid_repository_path_has_stable_error_contract(
     assert response.status_code == 422
     assert response.json()["code"] == "repository_path_not_found"
     assert "does not exist" in response.json()["detail"]
+
+
+async def test_repository_target_reports_untracked_changes(
+    database: Database, tmp_path: Path
+) -> None:
+    root = tmp_path / "repository"
+    create_repository(root)
+    (root / "new.txt").write_text("untracked\n")
+    service = RepositoryService(
+        SubprocessGitClient(), uow_factory(database), FixedClock()
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(service)), base_url="http://test"
+    ) as client:
+        created = await client.post("/api/repositories", json={"path": str(root)})
+        target = await client.get(f"/api/repositories/{created.json()['id']}/target")
+
+    assert target.status_code == 200
+    assert target.json()["clean"] is False
 
 
 async def test_repository_validation_settings_contract(

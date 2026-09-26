@@ -184,7 +184,9 @@ uv run uvicorn crucible.api.app:create_app --factory --host 127.0.0.1 --reload
 Production defaults to one origin (`http://127.0.0.1:8000`). Set
 `CRUCIBLE_ORIGIN` when changing the API port, `CRUCIBLE_DEVELOPMENT_ORIGIN` for
 the Vite origin, and `CRUCIBLE_SECURE_COOKIE=true` for HTTPS. Unsafe API requests
-require that exact Origin plus the in-memory CSRF token issued at bootstrap.
+require that exact Origin plus a CSRF token. The session-refresh endpoint can
+recover a CSRF token from a valid session cookie after a reload, but still
+requires the exact Origin.
 
 ### Milestone-one workflow
 

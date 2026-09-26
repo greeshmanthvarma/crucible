@@ -201,7 +201,9 @@ class ApplicationContainer:
             task_service=TaskService(
                 workspaces, unit_of_work, clock, notifier, resource_manager
             ),
-            message_service=MessageService(unit_of_work, clock, supervisor, notifier),
+            message_service=MessageService(
+                unit_of_work, clock, supervisor, notifier, git, workspaces
+            ),
             supervisor=supervisor,
             event_source=TaskEventSource(unit_of_work, notifier),
             approval_service=approval_service,

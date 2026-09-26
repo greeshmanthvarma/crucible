@@ -141,6 +141,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/repositories/{repository_id}/target": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Repository Target */
+        get: operations["get_repository_target_api_repositories__repository_id__target_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/repositories/{repository_id}/tasks": {
         parameters: {
             query?: never;
@@ -186,6 +203,23 @@ export interface paths {
         put?: never;
         /** Cancel Run */
         post: operations["cancel_run_api_runs__run_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Tasks */
+        get: operations["list_tasks_api_tasks_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -667,6 +701,15 @@ export interface components {
             /** Validationrepairlimit */
             validationRepairLimit: number;
         };
+        /** RepositoryTargetResponse */
+        RepositoryTargetResponse: {
+            /** Clean */
+            clean: boolean;
+            /** Currentref */
+            currentRef: string | null;
+            /** Headrevision */
+            headRevision: string;
+        };
         /** ResultRevisionResponse */
         ResultRevisionResponse: {
             /** Commitsha */
@@ -812,6 +855,10 @@ export interface components {
              * Format: date-time
              */
             updatedAt: string;
+            /** Workspacebaserevision */
+            workspaceBaseRevision: string | null;
+            /** Workspacegeneration */
+            workspaceGeneration: number;
             /** Workspacepath */
             workspacePath: string;
         };
@@ -1261,6 +1308,37 @@ export interface operations {
             };
         };
     };
+    get_repository_target_api_repositories__repository_id__target_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                repository_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepositoryTargetResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     create_task_api_repositories__repository_id__tasks_post: {
         parameters: {
             query?: never;
@@ -1364,6 +1442,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_tasks_api_tasks_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskResponse"][];
                 };
             };
         };

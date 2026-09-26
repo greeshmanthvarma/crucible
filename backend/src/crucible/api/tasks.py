@@ -42,6 +42,8 @@ def to_response(task: Task) -> TaskResponse:
         source_ref=task.source_ref,
         base_revision=task.base_revision,
         workspace_path=str(task.workspace_path),
+        workspace_generation=task.workspace_generation,
+        workspace_base_revision=task.workspace_base_revision or task.base_revision,
         status=task.status,
         failure_code=task.failure_code,
         failure_detail=task.failure_detail,
@@ -66,6 +68,11 @@ async def create_task(
     return to_response(
         await service.create(repository_id, request.source_ref, idempotency_key)
     )
+
+
+@router.get("/api/tasks", response_model=list[TaskResponse])
+async def list_tasks(service: TaskServiceDependency) -> list[TaskResponse]:
+    return [to_response(task) for task in await service.list()]
 
 
 @router.get("/api/tasks/{task_id}", response_model=TaskResponse)

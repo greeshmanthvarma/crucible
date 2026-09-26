@@ -1,12 +1,14 @@
 import { useRef, useState } from "react";
 
 import type { ApprovalResponse } from "../../api/client";
+import { Button } from "../../components/ui/button";
+import { Badge } from "../../components/ui/badge";
 
-export function ApprovalPanel({
-  approvals,
+export function CommandApprovalCard({
+  approval,
   decide,
 }: {
-  approvals: ApprovalResponse[];
+  approval: ApprovalResponse;
   decide: (
     approvalId: string,
     decision: "approved" | "denied",
@@ -14,57 +16,48 @@ export function ApprovalPanel({
     key: string,
   ) => Promise<void>;
 }) {
-  const keys = useRef(new Map<string, string>());
-  const [submitting, setSubmitting] = useState<string>();
+  const key = useRef<string>(undefined);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
 
-  function submit(approval: ApprovalResponse, decision: "approved" | "denied") {
-    const existing = keys.current.get(approval.id);
-    const key = existing ?? crypto.randomUUID();
-    keys.current.set(approval.id, key);
-    setSubmitting(approval.id);
-    void decide(approval.id, decision, approval.specDigest, key)
-      .catch(() => undefined)
-      .finally(() => setSubmitting(undefined));
+  async function submit(decision: "approved" | "denied") {
+    key.current ??= crypto.randomUUID();
+    setSubmitting(true);
+    setError("");
+    try {
+      await decide(approval.id, decision, approval.specDigest, key.current);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Decision failed");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
-    <section aria-label="Command approvals">
-      <h3>Command approvals</h3>
-      {approvals.map((approval) => (
-        <article key={approval.id}>
-          <h4>{approval.spec.reason}</h4>
-          <p>
-            Command: {approval.spec.executable}{" "}
-            {approval.spec.arguments.join(" ")}
-          </p>
-          <p>Working directory: {approval.spec.cwd}</p>
-          <p>Network: {approval.spec.network}</p>
-          <p>Timeout: {approval.spec.timeoutSeconds}s</p>
-          <p>Image: {approval.spec.image}</p>
-          <p>
-            Environment names:{" "}
-            {approval.spec.environmentNames.join(", ") || "none"}
-          </p>
-          <p>Digest: {approval.specDigest}</p>
-          <p>Status: {approval.status}</p>
-          {approval.status === "pending" && (
-            <div>
-              <button
-                disabled={submitting === approval.id}
-                onClick={() => submit(approval, "approved")}
-              >
-                Approve
-              </button>
-              <button
-                disabled={submitting === approval.id}
-                onClick={() => submit(approval, "denied")}
-              >
-                Deny
-              </button>
-            </div>
-          )}
-        </article>
-      ))}
+    <section aria-label="Command approval" className="space-y-3 rounded-xl border border-amber-500/40 bg-amber-500/5 p-4 text-sm">
+      <div className="flex items-center justify-between gap-3">
+        <h4 className="font-medium">Command approval</h4>
+        <Badge variant={approval.status === "pending" ? "secondary" : "outline"}>
+          {approval.status}
+        </Badge>
+      </div>
+      <p>{approval.spec.reason}</p>
+      <pre className="overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-xs">{[approval.spec.executable, ...approval.spec.arguments].join(" ")}</pre>
+      <div className="grid gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-2">
+        <p>Working directory: {approval.spec.cwd}</p>
+        <p>Network: {approval.spec.network}</p>
+        <p>Timeout: {approval.spec.timeoutSeconds}s</p>
+        <p>Environment names: {approval.spec.environmentNames.join(", ") || "none"}</p>
+        <p className="col-span-full break-all">Image: {approval.spec.image}</p>
+        <p className="col-span-full break-all">Digest: {approval.specDigest}</p>
+      </div>
+      {approval.status === "pending" && (
+        <div className="flex gap-2">
+          <Button disabled={submitting} onClick={() => void submit("approved")}>Approve</Button>
+          <Button variant="outline" disabled={submitting} onClick={() => void submit("denied")}>Deny</Button>
+        </div>
+      )}
+      {error && <p role="alert" className="text-destructive">{error}</p>}
     </section>
   );
 }

@@ -224,6 +224,8 @@ class TaskRepository:
                 source_ref=task.source_ref,
                 base_revision=task.base_revision,
                 workspace_path=str(task.workspace_path),
+                workspace_generation=task.workspace_generation,
+                workspace_base_revision=task.workspace_base_revision,
                 status=task.status,
                 failure_code=task.failure_code,
                 failure_detail=task.failure_detail,
@@ -251,6 +253,8 @@ class TaskRepository:
             source_ref=row["source_ref"],
             base_revision=row["base_revision"],
             workspace_path=Path(row["workspace_path"]),
+            workspace_generation=row["workspace_generation"],
+            workspace_base_revision=row["workspace_base_revision"],
             status=TaskStatus(row["status"]),
             failure_code=row["failure_code"],
             failure_detail=row["failure_detail"],
@@ -264,6 +268,8 @@ class TaskRepository:
             .where(models.tasks.c.id == str(task.id))
             .values(
                 workspace_path=str(task.workspace_path),
+                workspace_generation=task.workspace_generation,
+                workspace_base_revision=task.workspace_base_revision,
                 status=task.status,
                 failure_code=task.failure_code,
                 failure_detail=task.failure_detail,
@@ -272,11 +278,25 @@ class TaskRepository:
         )
         await self._session.flush()
 
+    async def list(self) -> tuple[Task, ...]:
+        rows = (
+            await self._session.execute(
+                select(models.tasks).order_by(
+                    models.tasks.c.updated_at.desc(), models.tasks.c.id.desc()
+                )
+            )
+        ).mappings()
+        return tuple(self._from_row(row) for row in rows)
+
     async def list_provisioning(self) -> tuple[Task, ...]:
         rows = (
             await self._session.execute(
                 select(models.tasks)
-                .where(models.tasks.c.status == TaskStatus.PROVISIONING)
+                .where(
+                    models.tasks.c.status.in_(
+                        (TaskStatus.PROVISIONING, TaskStatus.CONTINUING)
+                    )
+                )
                 .order_by(models.tasks.c.created_at, models.tasks.c.id)
             )
         ).mappings()
@@ -291,6 +311,8 @@ class TaskRepository:
             source_ref=cast(str, values["source_ref"]),
             base_revision=cast(str | None, values["base_revision"]),
             workspace_path=Path(cast(str, values["workspace_path"])),
+            workspace_generation=cast(int, values["workspace_generation"]),
+            workspace_base_revision=cast(str | None, values["workspace_base_revision"]),
             status=TaskStatus(cast(str, values["status"])),
             failure_code=cast(str | None, values["failure_code"]),
             failure_detail=cast(str | None, values["failure_detail"]),

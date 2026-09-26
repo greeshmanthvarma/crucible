@@ -2,6 +2,8 @@ import type { components } from "./schema";
 import { sessionFetch } from "../auth/session";
 
 export type RepositoryResponse = components["schemas"]["RepositoryResponse"];
+export type RepositoryTargetResponse =
+  components["schemas"]["RepositoryTargetResponse"];
 export type TaskResponse = components["schemas"]["TaskResponse"];
 export type MessageResponse = components["schemas"]["MessageResponse"];
 export type SubmittedRunResponse =
@@ -72,6 +74,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export interface CrucibleClient {
   registerRepository(path: string): Promise<RepositoryResponse>;
+  listRepositories(): Promise<RepositoryResponse[]>;
+  getRepositoryTarget(repositoryId: string): Promise<RepositoryTargetResponse>;
+  listTasks(): Promise<TaskResponse[]>;
   createTask(
     repositoryId: string,
     sourceRef: string,
@@ -109,6 +114,10 @@ export interface CrucibleClient {
 }
 
 export const apiClient: CrucibleClient = {
+  listRepositories: () => request("/api/repositories"),
+  getRepositoryTarget: (repositoryId) =>
+    request(`/api/repositories/${repositoryId}/target`),
+  listTasks: () => request("/api/tasks"),
   registerRepository: (path) =>
     request("/api/repositories", {
       method: "POST",

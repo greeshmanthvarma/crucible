@@ -14,6 +14,7 @@ class TaskStatus(StrEnum):
     ACTIVE = "active"
     ACCEPTED = "accepted"
     INTEGRATED = "integrated"
+    CONTINUING = "continuing"
     PROVISIONING_FAILED = "provisioning_failed"
 
 
@@ -29,9 +30,15 @@ class Task:
     failure_detail: str | None
     created_at: datetime
     updated_at: datetime
+    workspace_generation: int = 0
+    workspace_base_revision: str | None = None
 
     def __post_init__(self) -> None:
         require_utc(self.created_at, self.updated_at)
+        if self.workspace_generation < 0:
+            raise ValueError("Workspace generation cannot be negative")
+        if self.workspace_generation > 0 and self.workspace_base_revision is None:
+            raise ValueError("Continuation requires a workspace base revision")
         if self.base_revision is None and not (
             self.status is TaskStatus.PROVISIONING_FAILED
             and self.failure_code == "revision_not_found"
@@ -121,6 +128,25 @@ class Task:
         if self.status is not TaskStatus.ACCEPTED:
             raise InvalidTransition(f"cannot integrate Task from {self.status}")
         return replace(self, status=TaskStatus.INTEGRATED, updated_at=clock.now())
+
+    def begin_continuation(
+        self, *, base_revision: str, workspace_path: Path, clock: Clock
+    ) -> Self:
+        if self.status is not TaskStatus.INTEGRATED:
+            raise InvalidTransition(f"cannot continue Task from {self.status}")
+        return replace(
+            self,
+            status=TaskStatus.CONTINUING,
+            workspace_generation=self.workspace_generation + 1,
+            workspace_base_revision=base_revision,
+            workspace_path=workspace_path,
+            updated_at=clock.now(),
+        )
+
+    def finish_continuation(self, clock: Clock) -> Self:
+        if self.status is not TaskStatus.CONTINUING:
+            raise InvalidTransition(f"cannot finish continuation from {self.status}")
+        return replace(self, status=TaskStatus.ACTIVE, updated_at=clock.now())
 
     def _require_provisioning(self, target: TaskStatus) -> None:
         if self.status is not TaskStatus.PROVISIONING:

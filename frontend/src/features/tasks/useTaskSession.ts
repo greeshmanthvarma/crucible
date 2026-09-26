@@ -37,6 +37,10 @@ export function useTaskSession(
   const [approvals, setApprovals] = useState<ApprovalResponse[]>([]);
   const [review, setReview] = useState<TaskReviewResponse>(emptyReview);
   const [pending, setPending] = useState<{ text: string; key: string }>();
+  const [failedRequest, setFailedRequest] = useState<{
+    text: string;
+    key: string;
+  }>();
   const [error, setError] = useState("");
   const [events, setEvents] = useState<TaskEventState>({
     events: [],
@@ -119,12 +123,15 @@ export function useTaskSession(
 
   async function send(payload: { text: string; key: string }) {
     setPending(payload);
+    setFailedRequest(undefined);
     setError("");
     try {
       await client.sendMessage(taskId, payload.text, payload.key);
       setPending(undefined);
       await refresh();
     } catch (reason) {
+      setPending(undefined);
+      setFailedRequest(payload);
       setError(reason instanceof Error ? reason.message : "Message failed");
       throw reason;
     }
@@ -170,6 +177,7 @@ export function useTaskSession(
     approvals,
     review,
     pending,
+    failedRequest,
     error,
     events,
     send,

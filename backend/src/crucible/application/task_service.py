@@ -193,6 +193,10 @@ class TaskService:
             raise TaskNotFound(f"Task not found: {task_id}")
         return task
 
+    async def list(self) -> tuple[Task, ...]:
+        async with self._unit_of_work() as uow:
+            return await uow.tasks.list()
+
     async def trace(self, task_id: UUID) -> tuple[StepTrace, ...]:
         async with self._unit_of_work() as uow:
             task = await uow.tasks.get(task_id)

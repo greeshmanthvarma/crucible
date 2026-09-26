@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 
 import { AcceptancePanel } from "./AcceptancePanel";
@@ -57,6 +63,7 @@ it("keeps one acceptance retry key and disables acceptance when invalid", async 
 
   rerender(<AcceptancePanel enabled accept={accept} />);
   fireEvent.click(screen.getByRole("button", { name: "Accept result" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm acceptance" }));
   await screen.findByRole("alert");
   fireEvent.click(screen.getByRole("button", { name: "Retry acceptance" }));
   await waitFor(() => expect(accept).toHaveBeenCalledTimes(2));
@@ -65,9 +72,17 @@ it("keeps one acceptance retry key and disables acceptance when invalid", async 
 
 it("requires an explicit clean-target integration and displays conflicts", async () => {
   const integrate = vi.fn().mockResolvedValue(undefined);
+  const inspectTarget = vi
+    .fn()
+    .mockResolvedValue({
+      currentRef: "main",
+      headRevision: "c".repeat(40),
+      clean: true,
+    });
   render(
     <IntegrationPanel
       repositoryId="repository"
+      inspectTarget={inspectTarget}
       results={[
         {
           id: "result",
@@ -106,13 +121,9 @@ it("requires an explicit clean-target integration and displays conflicts", async
     screen.getByText(/clean and still at the expected revision/),
   ).toBeVisible();
   expect(screen.getByText(/README.md conflicted/)).toBeVisible();
-  fireEvent.change(screen.getByLabelText("Target ref"), {
-    target: { value: "main" },
-  });
-  fireEvent.change(screen.getByLabelText("Expected revision"), {
-    target: { value: "c".repeat(40) },
-  });
+  await screen.findByText(/Branch:/);
   fireEvent.click(screen.getByRole("button", { name: "Integrate result" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm integration" }));
   await waitFor(() =>
     expect(integrate).toHaveBeenCalledWith(
       "result",
@@ -122,4 +133,42 @@ it("requires an explicit clean-target integration and displays conflicts", async
       expect.any(String),
     ),
   );
+});
+
+it("blocks integration when the target checkout is dirty", async () => {
+  const integrate = vi.fn();
+  const rendered = render(
+    <IntegrationPanel
+      repositoryId="repository"
+      inspectTarget={vi
+        .fn()
+        .mockResolvedValue({
+          currentRef: "main",
+          headRevision: "a".repeat(40),
+          clean: false,
+        })}
+      results={[
+        {
+          id: "result",
+          taskId: "task",
+          commitSha: "b".repeat(40),
+          parentRevision: "a".repeat(40),
+          previousResultRevisionId: null,
+          diffArtifactId: "diff",
+          validationSnapshot: {},
+          summary: "Ready",
+          createdBy: "user",
+          createdAt: "2026-09-20T00:00:00Z",
+        },
+      ]}
+      integrations={[]}
+      integrate={integrate}
+    />,
+  );
+  const view = within(rendered.container);
+
+  expect(await view.findByText("Has local changes")).toBeVisible();
+  expect(view.getByRole("button", { name: "Integrate result" })).toBeDisabled();
+  expect(view.getByText(/will not modify a dirty checkout/)).toBeVisible();
+  expect(integrate).not.toHaveBeenCalled();
 });

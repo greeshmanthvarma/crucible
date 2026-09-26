@@ -54,3 +54,28 @@ async def test_unsafe_requests_require_exact_origin_and_csrf(database) -> None: 
             },
         )
     assert valid.status_code == 204
+
+
+async def test_session_can_recover_csrf_from_cookie_with_exact_origin(database) -> None:  # type: ignore[no-untyped-def]
+    auth = AuthService(uow_factory(database), AuthClock(), "bootstrap")
+    app = create_app(
+        repository_service=EmptyRepositories(),  # type: ignore[arg-type]
+        auth_service=auth,
+        allowed_origins=("http://localhost:5173",),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://localhost:5173"
+    ) as client:
+        exchanged = await client.post(
+            "/api/auth/bootstrap", json={"secret": "bootstrap"}
+        )
+        assert exchanged.status_code == 201
+        wrong_origin = await client.post(
+            "/api/auth/session", headers={"Origin": "http://evil.example"}
+        )
+        assert wrong_origin.json()["code"] == "origin_rejected"
+        recovered = await client.post(
+            "/api/auth/session", headers={"Origin": "http://localhost:5173"}
+        )
+        assert recovered.status_code == 200
+        assert recovered.json()["csrfToken"] != exchanged.json()["csrfToken"]

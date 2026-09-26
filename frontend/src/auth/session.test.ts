@@ -57,7 +57,6 @@ it("rotates the readable CSRF token after a browser reload", async () => {
   expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/auth/session", {
     method: "POST",
     credentials: "include",
-    headers: { "X-CSRF-Token": "retained-csrf" },
   });
   const mutation = fetchMock.mock.calls[1][1] as RequestInit;
   expect(new Headers(mutation.headers).get("X-CSRF-Token")).toBe("rotated");

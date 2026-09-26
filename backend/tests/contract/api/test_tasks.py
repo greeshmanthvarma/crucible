@@ -67,12 +67,15 @@ async def test_task_create_and_get_contract(database: Database, tmp_path: Path) 
             headers={"Idempotency-Key": "create-task-1"},
         )
         fetched = await client.get(f"/api/tasks/{created.json()['id']}")
+        listed = await client.get("/api/tasks")
 
     assert created.status_code == 201
     assert created.json()["status"] == "active"
     assert created.json()["baseRevision"] == registered.head_revision
     assert fetched.status_code == 200
     assert fetched.json() == created.json()
+    assert listed.status_code == 200
+    assert listed.json() == [created.json()]
 
 
 async def test_task_review_is_a_canonical_refreshable_snapshot(
