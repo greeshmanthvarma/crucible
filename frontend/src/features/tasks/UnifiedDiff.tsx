@@ -25,19 +25,23 @@ export function UnifiedDiff({ diff }: { diff: string }) {
   return (
     <div className="space-y-3" aria-label="Code diff">
       {splitDiff(diff).map((file, index) => (
-        <section key={`${file.name}-${index}`} className="overflow-hidden rounded-lg border">
+        <section
+          key={`${file.name}-${index}`}
+          className="overflow-hidden rounded-lg border"
+        >
           <h4 className="border-b bg-muted/60 px-3 py-2 font-mono text-xs font-medium">
             {file.name}
           </h4>
           <div className="overflow-x-auto py-1 font-mono text-xs leading-5">
             {file.lines.map((line, lineIndex) => {
-              const kind = line.startsWith("+") && !line.startsWith("+++")
-                ? "added"
-                : line.startsWith("-") && !line.startsWith("---")
-                  ? "removed"
-                  : line.startsWith("@@")
-                    ? "hunk"
-                    : "context";
+              const kind =
+                line.startsWith("+") && !line.startsWith("+++")
+                  ? "added"
+                  : line.startsWith("-") && !line.startsWith("---")
+                    ? "removed"
+                    : line.startsWith("@@")
+                      ? "hunk"
+                      : "context";
               return (
                 <div
                   key={lineIndex}

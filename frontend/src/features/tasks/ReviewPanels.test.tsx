@@ -72,13 +72,11 @@ it("keeps one acceptance retry key and disables acceptance when invalid", async 
 
 it("requires an explicit clean-target integration and displays conflicts", async () => {
   const integrate = vi.fn().mockResolvedValue(undefined);
-  const inspectTarget = vi
-    .fn()
-    .mockResolvedValue({
-      currentRef: "main",
-      headRevision: "c".repeat(40),
-      clean: true,
-    });
+  const inspectTarget = vi.fn().mockResolvedValue({
+    currentRef: "main",
+    headRevision: "c".repeat(40),
+    clean: true,
+  });
   render(
     <IntegrationPanel
       repositoryId="repository"
@@ -140,13 +138,11 @@ it("blocks integration when the target checkout is dirty", async () => {
   const rendered = render(
     <IntegrationPanel
       repositoryId="repository"
-      inspectTarget={vi
-        .fn()
-        .mockResolvedValue({
-          currentRef: "main",
-          headRevision: "a".repeat(40),
-          clean: false,
-        })}
+      inspectTarget={vi.fn().mockResolvedValue({
+        currentRef: "main",
+        headRevision: "a".repeat(40),
+        clean: false,
+      })}
       results={[
         {
           id: "result",

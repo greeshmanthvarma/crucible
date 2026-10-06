@@ -64,7 +64,10 @@ export async function sessionFetch(
   }
   const response = await send();
   if (unsafe && response.status === 403) {
-    const body = (await response.clone().json().catch(() => ({}))) as {
+    const body = (await response
+      .clone()
+      .json()
+      .catch(() => ({}))) as {
       code?: string;
     };
     if (body.code === "csrf_rejected" && (await refreshSession())) {
