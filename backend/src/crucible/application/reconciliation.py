@@ -80,7 +80,8 @@ class StartupReconciler:
         async with self._unit_of_work() as uow:
             current = await uow.tasks.get(task.id)
             if current is None or current.status not in (
-                TaskStatus.PROVISIONING, TaskStatus.CONTINUING
+                TaskStatus.PROVISIONING,
+                TaskStatus.CONTINUING,
             ):
                 return
             await uow.tasks.update(task)

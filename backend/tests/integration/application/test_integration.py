@@ -141,10 +141,13 @@ async def test_integrated_chat_continues_in_new_workspace_generation(
     assert git(continued.workspace_path, "rev-parse", "HEAD") == current_head
     assert git(task.workspace_path, "rev-parse", "HEAD") == result.commit_sha
     assert conversation[-1].parts[0].text_content == "Continue in this chat"
-    assert sum(
-        message.parts[0].text_content == "Continue in this chat"
-        for message in conversation
-    ) == 1
+    assert (
+        sum(
+            message.parts[0].text_content == "Continue in this chat"
+            for message in conversation
+        )
+        == 1
+    )
 
 
 async def test_startup_recovers_a_recorded_continuation(
