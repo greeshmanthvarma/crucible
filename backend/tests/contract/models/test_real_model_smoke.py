@@ -13,7 +13,6 @@ from crucible.engine.gateway import (
     ModelToolDefinition,
     PreparedModelRequest,
 )
-from crucible.models.litellm_gateway import LiteLLMModelGateway
 from crucible.models.responses_gateway import LiteLLMResponsesGateway
 
 REAL_MODEL = os.environ.get("CRUCIBLE_REAL_MODEL")
@@ -43,11 +42,7 @@ async def test_configured_real_model_stream_smoke() -> None:
         16,
     )
 
-    gateway = (
-        LiteLLMResponsesGateway()
-        if request.model.startswith("openai/")
-        else LiteLLMModelGateway()
-    )
+    gateway = LiteLLMResponsesGateway()
     items = [item async for item in gateway.stream(request)]
 
     assert not [item for item in items if isinstance(item, ModelError)]
@@ -55,8 +50,8 @@ async def test_configured_real_model_stream_smoke() -> None:
 
 
 @pytest.mark.skipif(
-    REAL_MODEL is None or not REAL_MODEL.startswith("openai/"),
-    reason="requires an opted-in OpenAI Responses model",
+    REAL_MODEL is None,
+    reason="requires an opted-in Responses-compatible model",
 )
 @pytest.mark.real_model
 async def test_real_responses_function_call_round_trip() -> None:

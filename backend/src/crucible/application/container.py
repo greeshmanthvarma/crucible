@@ -34,7 +34,6 @@ from crucible.engine.journal import RunJournal
 from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
 from crucible.engine.supervisor import LocalRunSupervisor
-from crucible.models.litellm_gateway import LiteLLMModelGateway
 from crucible.models.responses_gateway import LiteLLMResponsesGateway
 from crucible.sandbox.docker import DockerSandboxBackend
 from crucible.sandbox.docker_client import DockerClient, SubprocessDockerClient
@@ -113,8 +112,6 @@ class ApplicationContainer:
             gateway_factory()
             if gateway_factory is not None
             else LiteLLMResponsesGateway()
-            if model.startswith("openai/")
-            else LiteLLMModelGateway()
             if model != "fake"
             else FakeModelGateway()
         )

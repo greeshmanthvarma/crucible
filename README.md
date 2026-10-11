@@ -222,8 +222,10 @@ pnpm dev
 
 ## Model configuration
 
-Crucible embeds LiteLLM `1.102.0` behind a provider-neutral gateway. OpenAI models
-use the Responses API; other supported providers use Chat Completions. Set the
+Crucible embeds LiteLLM `1.102.0` behind a single Responses gateway for all real
+providers. Provider/model pairs must support LiteLLM's Responses interface;
+unsupported combinations fail without a Chat Completions fallback. The `fake`
+model remains available for deterministic local execution and tests. Set the
 credential env var for the selected provider (for example `OPENAI_API_KEY`).
 Secrets are read by the provider SDK and never written to Events, Context
 Manifests, or Task worktrees. Default quality gates use captured chunks and
@@ -244,7 +246,7 @@ records a Context Manifest (model, estimated input size, root instruction digest
 Tool schema digest). Oversize required evidence fails with `context_limit`;
 exhausted Steps fail with `budget_exhausted`.
 
-The OpenAI Responses adapter uses stateless requests (`store=false`) and replays
+The Responses adapter uses stateless requests (`store=false`) and replays
 Crucible's durable normalized conversation, including provider Tool Call IDs.
 Encrypted reasoning-state replay is not yet persisted.
 

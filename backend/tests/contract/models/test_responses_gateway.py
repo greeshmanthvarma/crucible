@@ -1,5 +1,8 @@
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
+
+import pytest
 
 from crucible.domain.ids import new_id
 from crucible.engine.gateway import (
@@ -171,3 +174,33 @@ async def test_incomplete_response_maps_to_length_stop() -> None:
     assert [
         item async for item in LiteLLMResponsesGateway(response).stream(request())
     ] == [ModelStop(ModelStopReason.LENGTH)]
+
+
+@pytest.mark.parametrize("model", ["anthropic/test-model", "custom/test-model"])
+async def test_preserves_non_openai_model_in_responses_request(model: str) -> None:
+    captured: dict[str, object] = {}
+
+    async def events() -> AsyncIterator[dict[str, object]]:
+        yield {"type": "response.completed", "response": {}}
+
+    async def response(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return events()
+
+    prepared = replace(request(), model=model)
+    items = [item async for item in LiteLLMResponsesGateway(response).stream(prepared)]
+
+    assert captured["model"] == model
+    assert captured["stream"] is True
+    assert items == [ModelStop(ModelStopReason.COMPLETE)]
+
+
+async def test_unsupported_responses_request_returns_error() -> None:
+    async def response(**_: object) -> object:
+        raise ValueError("provider does not support this Responses request")
+
+    items = [item async for item in LiteLLMResponsesGateway(response).stream(request())]
+
+    assert len(items) == 1
+    assert isinstance(items[0], ModelError)
+    assert items[0].code == "provider_request_failed"
