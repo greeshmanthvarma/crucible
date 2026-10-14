@@ -1,6 +1,7 @@
 import json
 from typing import cast
 
+from crucible.context import summary_behavior
 from crucible.context.compaction import CompactionRequest, CompactionSummary
 from crucible.domain.ids import new_id
 from crucible.engine.gateway import (
@@ -35,24 +36,7 @@ class ModelCompactionGateway:
         self._max_output_tokens = max_output_tokens
 
     async def compact(self, request: CompactionRequest) -> CompactionSummary:
-        source = [
-            {
-                "role": message.role.value,
-                "parts": [
-                    part.text_content or part.reasoning_content or ""
-                    for part in message.parts
-                ],
-            }
-            for unit in request.source_units
-            for message in unit.messages
-        ]
-        schema = ", ".join(_FIELDS)
-        prompt = (
-            "Summarize these complete Conversation units without inventing facts. "
-            f"Return only one JSON object with string fields: {schema}. "
-            f"Prompt version: {request.prompt_version}.\n"
-            + json.dumps(source, separators=(",", ":"))
-        )
+        prompt = summary_behavior.build_compaction_prompt(request)
         prepared = PreparedModelRequest(
             run_id=new_id(),
             step_id=new_id(),

@@ -22,8 +22,9 @@ from crucible.sandbox.protocol import (
     SandboxTermination,
 )
 from crucible.sandbox.resources import TaskResourceManager
+from crucible.tools import behavior_contracts
 from crucible.tools.definitions import ToolArguments, ToolContext, ToolOutcome
-from crucible.tools.filesystem import WorkspacePathResolver
+from crucible.tools.workspace_authority import WorkspacePathResolver
 
 
 class CommandLimitArguments(ToolArguments):
@@ -76,9 +77,7 @@ class ExecuteCommandTool:
         ]
         self.definition = ModelToolDefinition(
             "execute_command",
-            "Request approval, then execute one structured command in Docker. "
-            "The harness selects the pinned sandbox image. Use cwd (or workdir) "
-            "for a path relative to the workspace.",
+            behavior_contracts.DESCRIPTIONS["execute_command"],
             model_schema,
         )
 

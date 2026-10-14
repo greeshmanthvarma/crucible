@@ -1,8 +1,17 @@
 from collections.abc import AsyncIterable, AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 from crucible.application.ports import UnitOfWork
+from crucible.context import summary_behavior
+from crucible.context.selection import CompactionBoundary as CompactionBoundary
+from crucible.context.selection import ConversationUnit as ConversationUnit
+from crucible.context.selection import (
+    group_conversation_units as group_conversation_units,
+)
+from crucible.context.selection import (
+    select_compaction_boundary as select_compaction_boundary,
+)
 from crucible.domain.clock import Clock
 from crucible.domain.compaction import Compaction
 from crucible.domain.conversation import (
@@ -13,30 +22,8 @@ from crucible.domain.conversation import (
     MessageStatus,
 )
 from crucible.domain.events import EventFactory, EventType
-from crucible.domain.ids import CompactionId, TaskId, ToolCallId, ToolResultId, new_id
+from crucible.domain.ids import CompactionId, TaskId, new_id
 from crucible.domain.run import Run
-
-
-@dataclass(frozen=True)
-class ConversationUnit:
-    messages: tuple[Message, ...]
-    complete: bool
-
-    @property
-    def start_sequence(self) -> int:
-        return self.messages[0].conversation_sequence
-
-    @property
-    def end_sequence(self) -> int:
-        return self.messages[-1].conversation_sequence
-
-
-@dataclass(frozen=True)
-class CompactionBoundary:
-    source_start_sequence: int
-    source_end_sequence: int
-    retained_tail_start_sequence: int
-    source_units: tuple[ConversationUnit, ...]
 
 
 @dataclass(frozen=True)
@@ -62,17 +49,7 @@ class CompactionSummary:
     output_tokens: int = 0
 
     def render(self) -> str:
-        sections = (
-            ("User objective and constraints", self.objective_and_constraints),
-            ("Settled decisions", self.decisions),
-            ("Repository facts", self.repository_facts),
-            ("Changes made", self.changes),
-            ("Commands and Validation", self.commands_and_validation),
-            ("Unresolved problems", self.unresolved_problems),
-            ("Current execution state", self.execution_state),
-            ("Important paths and symbols", self.important_paths_and_symbols),
-        )
-        return "\n\n".join(f"## {heading}\n{body}" for heading, body in sections)
+        return summary_behavior.render_summary(self)
 
 
 class CompactionGateway(Protocol):
@@ -261,70 +238,3 @@ class CompactionLifecycle:
 
 async def _one_chunk(value: bytes) -> AsyncIterator[bytes]:
     yield value
-
-
-def group_conversation_units(
-    messages: tuple[Message, ...], result_to_call: Mapping[ToolResultId, ToolCallId]
-) -> tuple[ConversationUnit, ...]:
-    grouped: list[list[Message]] = []
-    for message in sorted(messages, key=lambda item: item.conversation_sequence):
-        current_has_assistant = bool(grouped) and any(
-            item.role is MessageRole.ASSISTANT for item in grouped[-1]
-        )
-        if not grouped or (message.role is MessageRole.USER and current_has_assistant):
-            grouped.append([])
-        grouped[-1].append(message)
-    return tuple(
-        ConversationUnit(tuple(group), _is_complete(group, result_to_call))
-        for group in grouped
-    )
-
-
-def _is_complete(
-    messages: list[Message], result_to_call: Mapping[ToolResultId, ToolCallId]
-) -> bool:
-    if not messages or messages[0].role is not MessageRole.USER:
-        return False
-    if any(message.status is not MessageStatus.COMPLETED for message in messages):
-        return False
-    calls = {
-        part.tool_call_id
-        for message in messages
-        for part in message.parts
-        if part.kind is MessagePartKind.TOOL_CALL and part.tool_call_id is not None
-    }
-    results: set[ToolCallId] = set()
-    for message in messages:
-        for part in message.parts:
-            result_id = part.tool_result_id
-            if part.kind is MessagePartKind.TOOL_RESULT and result_id is not None:
-                call_id = result_to_call.get(result_id)
-                if call_id is not None:
-                    results.add(call_id)
-    has_assistant = any(message.role is MessageRole.ASSISTANT for message in messages)
-    return has_assistant and calls <= results
-
-
-def select_compaction_boundary(
-    units: tuple[ConversationUnit, ...], *, retain_complete_units: int
-) -> CompactionBoundary | None:
-    if retain_complete_units < 0:
-        raise ValueError("retained unit count cannot be negative")
-    complete_prefix: list[ConversationUnit] = []
-    for unit in units:
-        if not unit.complete:
-            break
-        complete_prefix.append(unit)
-    compact_count = len(complete_prefix) - retain_complete_units
-    if compact_count <= 0:
-        return None
-    source = tuple(complete_prefix[:compact_count])
-    retained_index = compact_count
-    retained_start = (
-        units[retained_index].start_sequence
-        if retained_index < len(units)
-        else source[-1].end_sequence + 1
-    )
-    return CompactionBoundary(
-        source[0].start_sequence, source[-1].end_sequence, retained_start, source
-    )

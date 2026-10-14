@@ -20,7 +20,9 @@ from crucible.domain.tools import (
 from crucible.engine.active_time import ActiveTimeBudget
 from crucible.engine.gateway import CompleteToolCall
 from crucible.engine.journal import EventSpec, JournalMutation, RunJournal
+from crucible.tools import behavior_contracts
 from crucible.tools.definitions import Tool, ToolContext, ToolOutcome
+from crucible.tools.execution_policy import admit_mutation, bound_outcome
 from crucible.tools.registry import ToolRegistry
 
 
@@ -83,6 +85,10 @@ class ToolDispatcher:
             item: AdmittedCall, outcome: ToolOutcome, status: ToolResultStatus
         ) -> None:
             nonlocal completion_sequence
+            if item.tool is not None:
+                outcome = bound_outcome(
+                    outcome, self._registry.policy(item.record.name)
+                )
             async with completion_lock:
                 completion_sequence += 1
                 result = ToolResult(
@@ -145,6 +151,12 @@ class ToolDispatcher:
                     ),
                 )
                 try:
+                    policy = self._registry.policy(item.record.name)
+                    authority = None
+                    if policy.mutation:
+                        authority = admit_mutation(
+                            item.record.name, item.record.arguments, context.workspace
+                        ).authority
                     outcome = await item.tool.invoke(
                         ToolContext(
                             context.workspace,
@@ -154,6 +166,7 @@ class ToolDispatcher:
                             item.record.id,
                             context.active_time,
                             context.sandbox_image,
+                            authority,
                         ),
                         item.arguments,
                     )
@@ -172,7 +185,9 @@ class ToolDispatcher:
             await record_result(item, outcome, status)
 
         all_parallel = bool(admitted) and all(
-            item.rejection is None and item.tool is not None and item.tool.parallel_safe
+            item.rejection is None
+            and item.tool is not None
+            and self._registry.policy(item.record.name).parallel_safe
             for item in admitted
         )
         try:
@@ -232,14 +247,19 @@ class ToolDispatcher:
                 rejection = f"Unknown tool: {source.name}"
             else:
                 try:
-                    arguments = tool.argument_model.model_validate(
+                    policy = self._registry.policy(source.name)
+                    validated = policy.argument_model.model_validate(
                         source.arguments
                     ).model_dump()
-                except ValidationError as error:
+                    adapted = behavior_contracts.adapt_arguments(source.name, validated)
+                    arguments = policy.argument_model.model_validate(
+                        adapted
+                    ).model_dump()
+                except (ValidationError, ValueError) as error:
                     rejection = str(error)
             mode = (
                 ToolExecutionMode.PARALLEL
-                if tool is not None and tool.parallel_safe
+                if tool is not None and self._registry.policy(source.name).parallel_safe
                 else ToolExecutionMode.SEQUENTIAL
             )
             record = ToolCall(

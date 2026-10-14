@@ -1,26 +1,31 @@
 import hashlib
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
 
 from crucible.application.ports import UnitOfWork
+from crucible.context import selection
 from crucible.context.compaction import (
     CompactionBoundary,
     CompactionLifecycle,
-    group_conversation_units,
-    select_compaction_boundary,
 )
 from crucible.context.instructions import load_root_instructions
+from crucible.context.invariants import (
+    ContextSettings,
+    TokenEstimator,
+    validate_compaction_boundary,
+    validate_prepared,
+)
+from crucible.context.invariants import SimpleTokenEstimator as SimpleTokenEstimator
+from crucible.context.invariants import model_part as _model_part
 from crucible.context.manifests import ContextManifest
 from crucible.domain.clock import Clock
 from crucible.domain.compaction import Compaction
-from crucible.domain.conversation import Message, MessagePart
+from crucible.domain.conversation import Message
 from crucible.domain.events import EventType
-from crucible.domain.ids import ToolCallId, ToolResultId, new_id
+from crucible.domain.ids import new_id
 from crucible.domain.run import Run
 from crucible.domain.steps import Step
-from crucible.domain.tools import ToolCall, ToolResult
 from crucible.domain.validation import ValidationStatus
 from crucible.engine.gateway import (
     ModelMessage,
@@ -47,20 +52,6 @@ class CompactionNeeded(Exception):
         self.boundary = boundary
         self.estimated_tokens = estimated_tokens
         self.capacity = capacity
-
-
-class TokenEstimator(Protocol):
-    def estimate(self, messages: tuple[ModelMessage, ...]) -> int: ...
-
-
-class SimpleTokenEstimator:
-    def estimate(self, messages: tuple[ModelMessage, ...]) -> int:
-        characters = sum(
-            len(part.text_content or "")
-            for message in messages
-            for part in message.parts
-        )
-        return max(1, (characters + 3) // 4)
 
 
 @dataclass(frozen=True)
@@ -142,16 +133,6 @@ class ContextManager:
             instruction_texts.append(repository.text)
             instruction_digests["repository"] = repository.digest
 
-        visible_messages = (
-            messages
-            if latest_compaction is None
-            else tuple(
-                message
-                for message in messages
-                if message.conversation_sequence
-                >= latest_compaction.retained_tail_start_sequence
-            )
-        )
         compacted_prefix = (
             []
             if latest_compaction is None
@@ -193,32 +174,39 @@ class ContextManager:
                     ),
                 )
             ]
-        model_messages = tuple(
-            [
-                ModelMessage(ModelRole.SYSTEM, (ModelPart("text", text),))
-                for text in instruction_texts
-            ]
-            + compacted_prefix
-            + repair_context
-            + [
-                ModelMessage(
-                    ModelRole(message.role.value),
-                    tuple(_model_part(part, calls, results) for part in message.parts),
-                )
-                for message in visible_messages
-            ]
+        model_messages = selection.assemble_visible_messages(
+            messages,
+            calls,
+            results,
+            tuple(instruction_texts),
+            latest_compaction,
+            tuple(repair_context),
         )
-        estimate = self._estimator.estimate(model_messages)
-        capacity = int(self._input_limit * self._threshold) - self._output_reserve
+        check = validate_prepared(
+            model_messages,
+            messages,
+            calls,
+            results,
+            tuple(instruction_texts),
+            ContextSettings(
+                self._input_limit,
+                self._output_reserve,
+                self._threshold,
+                self._estimator,
+                tuple(compacted_prefix + repair_context),
+            ),
+        )
+        estimate, capacity = check.estimated_tokens, check.capacity
         if estimate > capacity:
             result_to_call = {
                 result.id: result.tool_call_id for result in results.values()
             }
-            boundary = select_compaction_boundary(
-                group_conversation_units(messages, result_to_call),
+            boundary = selection.select_compaction_boundary(
+                selection.group_conversation_units(messages, result_to_call),
                 retain_complete_units=self._recent_complete_units,
             )
             if boundary is not None:
+                validate_compaction_boundary(boundary, messages, result_to_call)
                 if self._compaction_lifecycle is not None:
                     try:
                         await self._compaction_lifecycle.compact(run, boundary)
@@ -318,31 +306,6 @@ def _digest_text(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _model_part(
-    part: MessagePart,
-    calls: Mapping[ToolCallId, ToolCall],
-    results: Mapping[ToolResultId, ToolResult],
-) -> ModelPart:
-    call = calls.get(part.tool_call_id) if part.tool_call_id is not None else None
-    result = (
-        results.get(part.tool_result_id) if part.tool_result_id is not None else None
-    )
-    if call is None and result is not None:
-        call = calls.get(result.tool_call_id)
-    return ModelPart(
-        part.kind.value,
-        part.text_content or part.reasoning_content,
-        tool_call_id=(
-            call.id if call is not None else result.tool_call_id if result else None
-        ),
-        tool_name=call.name if call is not None else None,
-        arguments=call.arguments if call is not None else None,
-        provider_correlation_id=(
-            call.provider_correlation_id if call is not None else None
-        ),
-    )
-
-
 def _tool_digest(tools: tuple[ModelToolDefinition, ...]) -> str:
     value = [
         {
@@ -355,3 +318,7 @@ def _tool_digest(tools: tuple[ModelToolDefinition, ...]) -> str:
     ]
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+# Compatibility for callers that inspect normalized provider identities.
+__all__ = ["ContextManager", "SimpleTokenEstimator", "_model_part"]

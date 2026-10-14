@@ -1,10 +1,11 @@
 import asyncio
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from pydantic import ValidationError
 
 from crucible.engine.gateway import ModelToolDefinition
+from crucible.tools import behavior_contracts
 from crucible.tools.definitions import (
     ListFilesArguments,
     ReadFileArguments,
@@ -12,39 +13,7 @@ from crucible.tools.definitions import (
     ToolContext,
     ToolOutcome,
 )
-
-
-class WorkspacePathResolver:
-    def __init__(self, workspace: Path) -> None:
-        self.root = workspace.resolve(strict=True)
-
-    def resolve(self, value: str, *, allow_missing: bool = False) -> Path:
-        logical = PurePosixPath(value)
-        if logical.is_absolute() or ".." in logical.parts:
-            raise ValueError("Workspace path must be relative and cannot traverse")
-        candidate = self.root.joinpath(*logical.parts)
-        if candidate.is_symlink() and not candidate.exists():
-            raise ValueError("Workspace path contains a dangling symlink")
-        if candidate.exists():
-            resolved = candidate.resolve(strict=True)
-            self._require_contained(resolved)
-            return resolved
-        if not allow_missing:
-            raise ValueError(f"Workspace path does not exist: {value}")
-        parent = candidate.parent
-        missing: list[str] = [candidate.name]
-        while not parent.exists():
-            if parent.is_symlink():
-                raise ValueError("Workspace path contains a dangling symlink")
-            missing.append(parent.name)
-            parent = parent.parent
-        resolved_parent = parent.resolve(strict=True)
-        self._require_contained(resolved_parent)
-        return resolved_parent.joinpath(*reversed(missing))
-
-    def _require_contained(self, path: Path) -> None:
-        if not path.is_relative_to(self.root):
-            raise ValueError("Workspace path escapes the Task Workspace")
+from crucible.tools.workspace_authority import WorkspacePathResolver
 
 
 class ListFilesTool:
@@ -56,7 +25,7 @@ class ListFilesTool:
         self.max_bytes = max_bytes
         self.definition = ModelToolDefinition(
             "list_files",
-            "List stable workspace-relative file paths.",
+            behavior_contracts.DESCRIPTIONS["list_files"],
             ListFilesArguments.model_json_schema(),
         )
 
@@ -102,7 +71,7 @@ class ReadFileTool:
         self.max_bytes = max_bytes
         self.definition = ModelToolDefinition(
             "read_file",
-            "Read a bounded UTF-8 workspace file range.",
+            behavior_contracts.DESCRIPTIONS["read_file"],
             ReadFileArguments.model_json_schema(),
         )
 
@@ -155,7 +124,7 @@ class SearchFilesTool:
         self.max_bytes = max_bytes
         self.definition = ModelToolDefinition(
             "search_files",
-            "Search workspace text with ripgrep.",
+            behavior_contracts.DESCRIPTIONS["search_files"],
             SearchFilesArguments.model_json_schema(),
         )
 

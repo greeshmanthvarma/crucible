@@ -2,7 +2,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from crucible.tools.filesystem import WorkspacePathResolver
+from crucible.tools.workspace_authority import WorkspacePathResolver
 
 
 @dataclass(frozen=True)

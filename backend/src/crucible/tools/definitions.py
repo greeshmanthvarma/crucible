@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import TYPE_CHECKING, Mapping, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -8,6 +10,9 @@ from crucible.domain.ids import ArtifactId, RunId, StepId, TaskId, ToolCallId
 from crucible.domain.tools import ToolResultStatus
 from crucible.engine.active_time import ActiveTimeBudget
 from crucible.engine.gateway import ModelToolDefinition
+
+if TYPE_CHECKING:
+    from crucible.tools.workspace_authority import WorkspaceAuthority
 
 
 class ToolArguments(BaseModel):
@@ -55,6 +60,7 @@ class ToolContext:
     tool_call_id: ToolCallId | None = None
     active_time: ActiveTimeBudget | None = None
     sandbox_image: str | None = None
+    workspace_authority: WorkspaceAuthority | None = None
 
 
 @dataclass(frozen=True)
