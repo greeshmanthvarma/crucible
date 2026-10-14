@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -20,10 +21,13 @@ from crucible.domain.tools import (
 from crucible.engine.active_time import ActiveTimeBudget
 from crucible.engine.gateway import CompleteToolCall
 from crucible.engine.journal import EventSpec, JournalMutation, RunJournal
+from crucible.repair.evidence import EvidenceRecorder
 from crucible.tools import behavior_contracts
 from crucible.tools.definitions import Tool, ToolContext, ToolOutcome
 from crucible.tools.execution_policy import admit_mutation, bound_outcome
 from crucible.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -56,12 +60,14 @@ class ToolDispatcher:
         *,
         max_calls: int = 100,
         journal: RunJournal | None = None,
+        evidence: EvidenceRecorder | None = None,
     ) -> None:
         self._registry = registry
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._max_calls = max_calls
         self._journal = journal
+        self._evidence = evidence
 
     async def execute_batch(
         self,
@@ -154,9 +160,26 @@ class ToolDispatcher:
                     policy = self._registry.policy(item.record.name)
                     authority = None
                     if policy.mutation:
-                        authority = admit_mutation(
+                        admission = admit_mutation(
                             item.record.name, item.record.arguments, context.workspace
-                        ).authority
+                        )
+                        authority = admission.authority
+                        if self._evidence is not None:
+                            try:
+                                await self._evidence.capture_preedit(
+                                    context.task_id,
+                                    context.run_id,
+                                    item.record.id,
+                                    admission,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Pre-edit evidence capture unavailable",
+                                    extra={
+                                        "run_id": str(context.run_id),
+                                        "tool_call_id": str(item.record.id),
+                                    },
+                                )
                     outcome = await item.tool.invoke(
                         ToolContext(
                             context.workspace,

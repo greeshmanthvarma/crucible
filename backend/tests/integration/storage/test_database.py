@@ -31,6 +31,7 @@ async def test_sqlite_policy_and_migrated_table_set(database: Database) -> None:
         "artifacts",
         "external_resources",
         "compactions",
+        "repair_evidence",
         "validation_attempts",
         "validation_command_results",
         "completion_proposals",

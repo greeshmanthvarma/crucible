@@ -35,6 +35,8 @@ from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
 from crucible.engine.supervisor import LocalRunSupervisor
 from crucible.models.responses_gateway import LiteLLMResponsesGateway
+from crucible.repair.evidence import EvidenceRecorder
+from crucible.repair.identity import RuntimeIdentity, capture_runtime_identity
 from crucible.sandbox.docker import DockerSandboxBackend
 from crucible.sandbox.docker_client import DockerClient, SubprocessDockerClient
 from crucible.sandbox.resources import TaskResourceManager
@@ -66,6 +68,8 @@ class ApplicationContainer:
     reconciler: StartupReconciler
     unit_of_work: Callable[[], UnitOfWork]
     eval_sandbox: DockerSandboxBackend
+    runtime_identity: RuntimeIdentity
+    evidence: EvidenceRecorder
 
     @classmethod
     async def create(
@@ -99,6 +103,19 @@ class ApplicationContainer:
         artifact_service = ArtifactService(
             LocalArtifactStore(data_dir / "artifacts", clock), unit_of_work
         )
+        runtime_identity = await capture_runtime_identity(Path(__file__).parents[4])
+        secret_values = tuple(
+            value
+            for name, value in os.environ.items()
+            if value and name.endswith(("API_KEY", "TOKEN", "SECRET", "PASSWORD"))
+        )
+        evidence = EvidenceRecorder(
+            unit_of_work,
+            artifact_service,
+            clock,
+            secret_values=secret_values,
+            runtime_identity=runtime_identity,
+        )
         sandbox_backend = DockerSandboxBackend(docker, unit_of_work, clock)
         command_tool = ExecuteCommandTool(
             CommandAuthority(approval_service, approval_broker, clock),
@@ -118,7 +135,7 @@ class ApplicationContainer:
         compaction_gateway = (
             FakeCompactionGateway()
             if model == "fake"
-            else ModelCompactionGateway(gateway)
+            else ModelCompactionGateway(gateway, evidence=evidence)
         )
         registry = default_registry(cast(Tool, command_tool))
         context_manager = ContextManager(
@@ -140,6 +157,7 @@ class ApplicationContainer:
             ),
             tools=registry.definitions,
             journal=journal,
+            evidence=evidence,
             compaction_lifecycle=CompactionLifecycle(
                 unit_of_work,
                 artifact_service,
@@ -155,7 +173,9 @@ class ApplicationContainer:
             notifier,
             journal=journal,
             context_manager=context_manager,
-            dispatcher=ToolDispatcher(registry, unit_of_work, clock, journal=journal),
+            dispatcher=ToolDispatcher(
+                registry, unit_of_work, clock, journal=journal, evidence=evidence
+            ),
             max_steps=run_budgets.max_steps
             if run_budgets
             else int(os.environ.get("CRUCIBLE_MAX_STEPS", "20")),
@@ -214,6 +234,8 @@ class ApplicationContainer:
             ),
             unit_of_work=unit_of_work,
             eval_sandbox=sandbox_backend,
+            runtime_identity=runtime_identity,
+            evidence=evidence,
         )
 
     async def start(self) -> None:

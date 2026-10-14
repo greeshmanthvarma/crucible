@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -515,4 +516,36 @@ run_summaries = Table(
     Column("projection_json", JSON, nullable=False),
     Column("created_at", UTCDateTime(), nullable=False),
     CheckConstraint("schema_version > 0"),
+)
+
+
+repair_evidence = Table(
+    "repair_evidence",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("task_id", ForeignKey("tasks.id"), nullable=False),
+    Column("run_id", ForeignKey("runs.id"), nullable=False),
+    Column("step_id", ForeignKey("steps.id")),
+    Column("tool_call_id", ForeignKey("tool_calls.id")),
+    Column("kind", String, nullable=False),
+    Column("source_key", String, nullable=False),
+    Column("attempt_index", Integer, nullable=False),
+    Column("artifact_id", ForeignKey("artifacts.id")),
+    Column("source_ids_json", JSON, nullable=False),
+    Column("manifest_digest", String(64), nullable=False),
+    Column("complete", Boolean, nullable=False),
+    Column("unsupported_code", String),
+    Column("created_at", UTCDateTime(), nullable=False),
+    UniqueConstraint(
+        "run_id",
+        "kind",
+        "source_key",
+        "attempt_index",
+        name="uq_repair_evidence_source",
+    ),
+    CheckConstraint("attempt_index >= 0", name="ck_repair_evidence_attempt"),
+    CheckConstraint(
+        "NOT complete OR (artifact_id IS NOT NULL AND unsupported_code IS NULL)",
+        name="ck_repair_evidence_complete",
+    ),
 )

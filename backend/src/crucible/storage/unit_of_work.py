@@ -12,6 +12,7 @@ from crucible.application.ports import (
     ContextManifestStore,
     EvalStore,
     EventStore,
+    EvidenceStore,
     ExternalResourceStore,
     IntegrationStore,
     MessageStore,
@@ -29,6 +30,7 @@ from crucible.application.ports import (
 from crucible.application.ports import IdempotencyStore as IdempotencyStorePort
 from crucible.storage.database import Database
 from crucible.storage.evals import SqlAlchemyEvalStore
+from crucible.storage.repair_evidence import SqlAlchemyEvidenceStore
 from crucible.storage.repositories import (
     ApprovalRepository,
     ArtifactRepository,
@@ -56,6 +58,7 @@ __all__ = ["SqlAlchemyUnitOfWork", "UnitOfWork"]
 
 
 class SqlAlchemyUnitOfWork:
+    repair_evidence: EvidenceStore
     evals: EvalStore
     repositories: RepositoryStore
     tasks: TaskStore
@@ -86,6 +89,7 @@ class SqlAlchemyUnitOfWork:
     async def __aenter__(self) -> Self:
         self.session = self._session_factory()
         self.evals = SqlAlchemyEvalStore(self.session)
+        self.repair_evidence = SqlAlchemyEvidenceStore(self.session)
         self.repositories = RepositoryRepository(self.session)
         self.tasks = TaskRepository(self.session)
         self.messages = MessageRepository(self.session)

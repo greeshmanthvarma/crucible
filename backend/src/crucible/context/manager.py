@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -35,6 +36,9 @@ from crucible.engine.gateway import (
     PreparedModelRequest,
 )
 from crucible.engine.journal import EventSpec, JournalMutation, RunJournal
+from crucible.repair.evidence import EvidenceRecorder
+
+logger = logging.getLogger(__name__)
 
 
 class ContextLimitExceeded(Exception):
@@ -78,6 +82,7 @@ class ContextManager:
         journal: RunJournal | None = None,
         recent_complete_units: int = 2,
         compaction_lifecycle: CompactionLifecycle | None = None,
+        evidence: EvidenceRecorder | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._clock = clock
@@ -93,6 +98,7 @@ class ContextManager:
         self._journal = journal
         self._recent_complete_units = recent_complete_units
         self._compaction_lifecycle = compaction_lifecycle
+        self._evidence = evidence
 
     async def prepare(self, run: Run, step: Step) -> PreparedContext:
         async with self._unit_of_work() as uow:
@@ -209,7 +215,27 @@ class ContextManager:
                 validate_compaction_boundary(boundary, messages, result_to_call)
                 if self._compaction_lifecycle is not None:
                     try:
-                        await self._compaction_lifecycle.compact(run, boundary)
+                        await self._compaction_lifecycle.compact(
+                            run,
+                            boundary,
+                            step_id=step.id,
+                            context_snapshot={
+                                "required_instructions": instruction_texts,
+                                "tools": [
+                                    {
+                                        "name": tool.name,
+                                        "description": tool.description,
+                                        "input_schema": dict(tool.input_schema),
+                                        "schema_version": tool.schema_version,
+                                    }
+                                    for tool in self._tools
+                                ],
+                                "settings": run.settings_snapshot,
+                                "input_limit": self._input_limit,
+                                "output_reserve": self._output_reserve,
+                                "threshold": self._threshold,
+                            },
+                        )
                     except Exception as error:
                         absolute_capacity = self._input_limit - self._output_reserve
                         if estimate <= absolute_capacity:
@@ -299,6 +325,34 @@ class ContextManager:
                     ),
                 )
             )
+        if self._evidence is not None:
+            try:
+                await self._evidence.capture_request(
+                    run.task_id,
+                    run.id,
+                    0,
+                    request,
+                    kind="model_context",
+                    step_id=step.id,
+                    context={
+                        "settings": run.settings_snapshot,
+                        "input_limit": self._input_limit,
+                        "output_reserve": self._output_reserve,
+                        "threshold": self._threshold,
+                        "estimator_version": getattr(
+                            self._estimator, "version", "custom"
+                        ),
+                        "message_ids": [str(message.id) for message in all_messages],
+                        "compaction_id": str(latest_compaction.id)
+                        if latest_compaction
+                        else None,
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "Prepared context evidence unavailable",
+                    extra={"run_id": str(run.id), "step_id": str(step.id)},
+                )
         return PreparedContext(request, manifest)
 
 

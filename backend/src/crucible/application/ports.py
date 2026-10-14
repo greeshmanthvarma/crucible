@@ -32,6 +32,7 @@ from crucible.domain.validation import (
     ValidationAttempt,
     ValidationCommandResult,
 )
+from crucible.repair.evidence import EvidenceCapture
 
 
 class RepositoryStore(Protocol):
@@ -219,6 +220,25 @@ class EvalStore(Protocol):
     async def rebuild_summary(self, run_id: UUID, now: datetime) -> RunSummary: ...
 
 
+class EvidenceStore(Protocol):
+    async def add(self, capture: EvidenceCapture) -> EvidenceCapture: ...
+    async def get(
+        self, capture_id: UUID, *, task_id: UUID
+    ) -> EvidenceCapture | None: ...
+    async def get_by_source(
+        self,
+        run_id: UUID,
+        kind: str,
+        source_key: str,
+        attempt_index: int,
+        *,
+        task_id: UUID,
+    ) -> EvidenceCapture | None: ...
+    async def list_for_run(
+        self, run_id: UUID, *, task_id: UUID
+    ) -> tuple[EvidenceCapture, ...]: ...
+
+
 class RunSupervisor(Protocol):
     async def submit(self, run_id: UUID) -> None: ...
     async def reconcile(self) -> None: ...
@@ -230,6 +250,7 @@ class EventNotifier(Protocol):
 
 
 class UnitOfWork(Protocol):
+    repair_evidence: EvidenceStore
     evals: EvalStore
     repositories: RepositoryStore
     tasks: TaskStore

@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterable, AsyncIterator, Callable
-from dataclasses import dataclass
-from typing import Any, Protocol
+from dataclasses import dataclass, replace
+from typing import Any, Mapping, Protocol
+from uuid import UUID
 
 from crucible.application.ports import UnitOfWork
 from crucible.context import summary_behavior
@@ -33,6 +34,11 @@ class CompactionRequest:
     previous_compaction_id: CompactionId | None
     model: str
     prompt_version: str
+    run_id: UUID | None = None
+    step_id: UUID | None = None
+    capture_key: str = ""
+    attempt_index: int = 0
+    context_snapshot: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -105,7 +111,14 @@ class CompactionLifecycle:
         self._prompt_version = prompt_version
         self._events = EventFactory()
 
-    async def compact(self, run: Run, boundary: CompactionBoundary) -> Compaction:
+    async def compact(
+        self,
+        run: Run,
+        boundary: CompactionBoundary,
+        *,
+        step_id: UUID | None = None,
+        context_snapshot: Mapping[str, object] | None = None,
+    ) -> Compaction:
         async with self._unit_of_work() as uow:
             previous = await uow.compactions.latest_for_task(run.task_id)
         source_units = boundary.source_units
@@ -154,6 +167,10 @@ class CompactionLifecycle:
             previous.id if previous else None,
             model,
             prompt_version,
+            run_id=run.id,
+            step_id=step_id,
+            capture_key=str(new_id()),
+            context_snapshot=context_snapshot,
         )
         async with self._unit_of_work() as uow:
             await uow.events.append(
@@ -172,7 +189,9 @@ class CompactionLifecycle:
         last_error: Exception | None = None
         for _attempt in range(attempt_limit):
             try:
-                summary = await self._gateway.compact(request)
+                summary = await self._gateway.compact(
+                    replace(request, attempt_index=_attempt)
+                )
                 break
             except Exception as error:
                 last_error = error
