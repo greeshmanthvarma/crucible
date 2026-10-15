@@ -3,15 +3,6 @@
 from uuid import uuid4
 
 import pytest
-from crucible.repair.worker_protocol import (
-    WorkerJob,
-    WorkerObservation,
-    decode_event,
-    decode_request,
-    encode_event,
-    encode_request,
-    read_observation,
-)
 from pydantic import ValidationError
 
 from crucible.domain.ids import new_id
@@ -28,6 +19,15 @@ from crucible.engine.gateway import (
     PreparedModelRequest,
     ReasoningDelta,
     TextDelta,
+)
+from crucible.repair.worker_protocol import (
+    WorkerJob,
+    WorkerObservation,
+    decode_event,
+    decode_request,
+    encode_event,
+    encode_request,
+    read_observation,
 )
 
 

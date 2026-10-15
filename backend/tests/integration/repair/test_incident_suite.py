@@ -5,10 +5,10 @@ import stat
 from uuid import uuid4
 
 import pytest
-from crucible.repair.incident_suite import IncidentSuite
 from pydantic import ValidationError
 
 from crucible.repair.cases import ApprovedCase
+from crucible.repair.incident_suite import IncidentSuite
 from tests.integration.repair.test_trials import approved_case, environment
 
 COMMIT = "a" * 40

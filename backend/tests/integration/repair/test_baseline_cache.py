@@ -5,9 +5,9 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
-from crucible.repair.baselines import BaselineCache
 from sqlalchemy.exc import IntegrityError
 
+from crucible.repair.baselines import BaselineCache
 from tests.integration.repair.test_trials import (
     Worker,
     approved_case,
