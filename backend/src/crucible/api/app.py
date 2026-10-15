@@ -16,6 +16,7 @@ from crucible.api.auth import router as auth_router
 from crucible.api.errors import application_error_handler
 from crucible.api.events import router as events_router
 from crucible.api.integrations import router as integrations_router
+from crucible.api.repair_gateway import router as repair_gateway_router
 from crucible.api.repositories import router as repositories_router
 from crucible.api.runs import router as runs_router
 from crucible.api.tasks import messages_router
@@ -98,6 +99,7 @@ def create_app(
             os.environ.get("CRUCIBLE_DATABASE_URL", "sqlite+aiosqlite:///crucible.db"),
             Path(os.environ.get("CRUCIBLE_DATA_DIR", "data")),
         )
+        app.state.repair_gateway = container.repair_gateway
         app.state.repository_service = container.repository_service
         app.state.task_service = container.task_service
         app.state.message_service = container.message_service
@@ -200,6 +202,7 @@ def create_app(
 
     if auth_service is not None or repository_service is None:
         app.include_router(auth_router)
+    app.include_router(repair_gateway_router)
     app.include_router(repositories_router)
     if event_source is not None or repository_service is None:
         app.include_router(events_router)

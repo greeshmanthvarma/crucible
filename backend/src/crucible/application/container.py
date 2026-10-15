@@ -36,9 +36,12 @@ from crucible.engine.run_engine import RunEngine
 from crucible.engine.supervisor import LocalRunSupervisor
 from crucible.models.responses_gateway import LiteLLMResponsesGateway
 from crucible.repair.evidence import EvidenceRecorder
+from crucible.repair.gateway import ScopedModelGateway
 from crucible.repair.identity import RuntimeIdentity, capture_runtime_identity
+from crucible.repair.worker_protocol import WorkerJob
 from crucible.sandbox.docker import DockerSandboxBackend
 from crucible.sandbox.docker_client import DockerClient, SubprocessDockerClient
+from crucible.sandbox.protocol import SandboxBackend
 from crucible.sandbox.resources import TaskResourceManager
 from crucible.storage.database import Database
 from crucible.storage.unit_of_work import SqlAlchemyUnitOfWork
@@ -70,6 +73,10 @@ class ApplicationContainer:
     eval_sandbox: DockerSandboxBackend
     runtime_identity: RuntimeIdentity
     evidence: EvidenceRecorder
+    repair_gateway: ScopedModelGateway
+    context_manager: ContextManager
+    tool_dispatcher: ToolDispatcher
+    command_sandbox: SandboxBackend
 
     @classmethod
     async def create(
@@ -82,6 +89,7 @@ class ApplicationContainer:
         docker_client: DockerClient | None = None,
         run_budgets: EvalBudgets | None = None,
         context_limits: tuple[int, int] | None = None,
+        worker_job: WorkerJob | None = None,
     ) -> "ApplicationContainer":
         database = await Database.create(database_url)
         await _verify_current_revision(database)
@@ -103,7 +111,20 @@ class ApplicationContainer:
         artifact_service = ArtifactService(
             LocalArtifactStore(data_dir / "artifacts", clock), unit_of_work
         )
-        runtime_identity = await capture_runtime_identity(Path(__file__).parents[4])
+        if worker_job is None:
+            runtime_identity = await capture_runtime_identity(Path(__file__).parents[4])
+        else:
+            # Worker exports intentionally have no source .git metadata.
+            original = WorkerJob.model_validate_json(
+                Path("/job/request.json").read_bytes()
+            )
+            if original != worker_job or data_dir.resolve() != Path("/state"):
+                raise ValueError(
+                    "Worker mode requires the controller-mounted job and private state"
+                )
+            runtime_identity = RuntimeIdentity(
+                "worker-export", worker_job.source_digest, "image-pinned"
+            )
         secret_values = tuple(
             value
             for name, value in os.environ.items()
@@ -117,10 +138,30 @@ class ApplicationContainer:
             runtime_identity=runtime_identity,
         )
         sandbox_backend = DockerSandboxBackend(docker, unit_of_work, clock)
+        command_resources = resource_manager
+        command_sandbox: SandboxBackend = sandbox_backend
+        command_authority = CommandAuthority(approval_service, approval_broker, clock)
+        if worker_job is not None:
+            from crucible.repair.incontainer_commands import (
+                InContainerSandbox,
+                WorkerCommandAuthority,
+                WorkerResourceManager,
+            )
+
+            command_sandbox = InContainerSandbox(
+                Path("/workspace"), os.environ["CRUCIBLE_REPAIR_IMAGE"]
+            )
+            command_resources = cast(
+                TaskResourceManager, WorkerResourceManager(worker_job.job_id)
+            )
+            command_authority = cast(
+                CommandAuthority,
+                WorkerCommandAuthority(approval_service, clock, worker_job.job_id),
+            )
         command_tool = ExecuteCommandTool(
-            CommandAuthority(approval_service, approval_broker, clock),
-            sandbox_backend,
-            resource_manager,
+            command_authority,
+            command_sandbox,
+            command_resources,
             artifact_service,
             journal=journal,
         )
@@ -138,12 +179,33 @@ class ApplicationContainer:
             else ModelCompactionGateway(gateway, evidence=evidence)
         )
         registry = default_registry(cast(Tool, command_tool))
+        threshold = worker_job.settings.get("threshold", 0.8) if worker_job else 0.8
+        if (
+            not isinstance(threshold, (float, int))
+            or isinstance(threshold, bool)
+            or not 0 < threshold <= 1
+        ):
+            raise ValueError("Invalid controlled context threshold")
         context_manager = ContextManager(
             unit_of_work,
             clock,
             SimpleTokenEstimator(),
-            harness_policy="Follow harness safety and execution policy.",
-            tool_contract="Use only the structured tools supplied by the harness.",
+            harness_policy=str(
+                worker_job.settings.get(
+                    "harness_policy", "Follow harness safety and execution policy."
+                )
+            )
+            if worker_job
+            else "Follow harness safety and execution policy.",
+            tool_contract=str(
+                worker_job.settings.get(
+                    "tool_contract",
+                    "Use only the structured tools supplied by the harness.",
+                )
+            )
+            if worker_job
+            else "Use only the structured tools supplied by the harness.",
+            threshold=float(threshold),
             model=model,
             input_limit=(
                 context_limits[0]
@@ -166,6 +228,9 @@ class ApplicationContainer:
                 model=model,
             ),
         )
+        dispatcher = ToolDispatcher(
+            registry, unit_of_work, clock, journal=journal, evidence=evidence
+        )
         engine = RunEngine(
             unit_of_work,
             clock,
@@ -173,9 +238,7 @@ class ApplicationContainer:
             notifier,
             journal=journal,
             context_manager=context_manager,
-            dispatcher=ToolDispatcher(
-                registry, unit_of_work, clock, journal=journal, evidence=evidence
-            ),
+            dispatcher=dispatcher,
             max_steps=run_budgets.max_steps
             if run_budgets
             else int(os.environ.get("CRUCIBLE_MAX_STEPS", "20")),
@@ -236,6 +299,17 @@ class ApplicationContainer:
             eval_sandbox=sandbox_backend,
             runtime_identity=runtime_identity,
             evidence=evidence,
+            repair_gateway=ScopedModelGateway(
+                gateway,
+                clock=clock,
+                endpoint=os.environ.get(
+                    "CRUCIBLE_REPAIR_GATEWAY_ENDPOINT",
+                    "http://host.docker.internal:8000/internal/repair-model/responses",
+                ),
+            ),
+            context_manager=context_manager,
+            tool_dispatcher=dispatcher,
+            command_sandbox=command_sandbox,
         )
 
     async def start(self) -> None:
@@ -250,7 +324,9 @@ class ApplicationContainer:
 
 async def _verify_current_revision(database: Database) -> None:
     config_path = Path(__file__).parents[3] / "alembic.ini"
-    expected = ScriptDirectory.from_config(Config(config_path)).get_current_head()
+    config = Config(config_path)
+    config.set_main_option("script_location", str(config_path.parent / "migrations"))
+    expected = ScriptDirectory.from_config(config).get_current_head()
     async with database.engine.connect() as connection:
         actual = await connection.scalar(
             text("SELECT version_num FROM alembic_version")
