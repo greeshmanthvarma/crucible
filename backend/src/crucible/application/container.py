@@ -17,6 +17,7 @@ from crucible.application.integration_service import IntegrationService
 from crucible.application.message_service import MessageService
 from crucible.application.ports import UnitOfWork
 from crucible.application.reconciliation import StartupReconciler
+from crucible.application.repair_service import RepairService
 from crucible.application.repository_service import RepositoryService
 from crucible.application.run_service import RunService
 from crucible.application.sandbox_reconciliation import SandboxReconciler
@@ -35,6 +36,11 @@ from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
 from crucible.engine.supervisor import LocalRunSupervisor
 from crucible.models.responses_gateway import LiteLLMResponsesGateway
+from crucible.repair.admission import (
+    LocalRepairAdmissionGit,
+    LocalRepairAdmissionGitHub,
+    LocalRepairWorkerRecovery,
+)
 from crucible.repair.evidence import EvidenceRecorder
 from crucible.repair.gateway import ScopedModelGateway
 from crucible.repair.identity import RuntimeIdentity, capture_runtime_identity
@@ -59,6 +65,7 @@ class ApplicationContainer:
     database: Database
     repository_service: RepositoryService
     task_service: TaskService
+    repair_service: RepairService
     message_service: MessageService
     supervisor: LocalRunSupervisor
     event_source: TaskEventSource
@@ -274,7 +281,17 @@ class ApplicationContainer:
             clock,
             approval_broker,
         )
+        repair_service = RepairService(
+            unit_of_work,
+            clock,
+            LocalRepairAdmissionGit(Path(__file__).parents[4], data_dir),
+            LocalRepairAdmissionGitHub(Path(__file__).parents[4]),
+            runtime_identity,
+            notifier=notifier,
+            worker_recovery=LocalRepairWorkerRecovery(Path(__file__).parents[4]),
+        )
         return cls(
+            repair_service=repair_service,
             model_id=model,
             database=database,
             repository_service=RepositoryService(git, unit_of_work, clock),
@@ -282,7 +299,13 @@ class ApplicationContainer:
                 workspaces, unit_of_work, clock, notifier, resource_manager
             ),
             message_service=MessageService(
-                unit_of_work, clock, supervisor, notifier, git, workspaces
+                unit_of_work,
+                clock,
+                supervisor,
+                notifier,
+                git,
+                workspaces,
+                repair_service,
             ),
             supervisor=supervisor,
             event_source=TaskEventSource(unit_of_work, notifier),
@@ -315,9 +338,11 @@ class ApplicationContainer:
     async def start(self) -> None:
         await self.sandbox_reconciler.reconcile()
         await self.reconciler.reconcile()
+        await self.repair_service.start()
         await self.supervisor.reconcile()
 
     async def close(self) -> None:
+        await self.repair_service.close()
         await self.supervisor.close()
         await self.database.dispose()
 

@@ -106,6 +106,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/repairs/{repair_id}/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Stop Repair */
+        post: operations["stop_repair_api_repairs__repair_id__stop_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/repositories": {
         parameters: {
             query?: never;
@@ -306,6 +323,23 @@ export interface paths {
         put?: never;
         /** Submit Message */
         post: operations["submit_message_api_tasks__task_id__messages_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks/{task_id}/repairs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Repairs */
+        get: operations["list_repairs_api_tasks__task_id__repairs_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -630,6 +664,58 @@ export interface components {
         RegisterRepositoryRequest: {
             /** Path */
             path: string;
+        };
+        /** RepairCommandResponse */
+        RepairCommandResponse: {
+            /** Code */
+            code: string | null;
+            /** Detail */
+            detail: string;
+            /**
+             * Kind
+             * @default repair_command
+             * @constant
+             */
+            kind: "repair_command";
+            /** Prurls */
+            prUrls: string[];
+            /** Repairid */
+            repairId: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "admitted" | "resumed" | "closed" | "nothing_eligible" | "blocked";
+        };
+        /**
+         * RepairStage
+         * @enum {string}
+         */
+        RepairStage: "intake" | "diagnosis" | "eval_review" | "baseline_reproduction" | "proposal" | "candidate_validation" | "commit_acceptance" | "publication";
+        /**
+         * RepairStatus
+         * @enum {string}
+         */
+        RepairStatus: "queued" | "running" | "stopped" | "interrupted" | "retryable_error" | "completed" | "exhausted" | "closed" | "invalidated";
+        /** RepairStatusResponse */
+        RepairStatusResponse: {
+            /** Attempts */
+            attempts: {
+                [key: string]: number;
+            };
+            /** Detail */
+            detail: string | null;
+            /** Outcomecode */
+            outcomeCode: string | null;
+            /** Prurl */
+            prUrl: string | null;
+            /**
+             * Repairid
+             * Format: uuid
+             */
+            repairId: string;
+            stage: components["schemas"]["RepairStage"];
+            status: components["schemas"]["RepairStatus"];
         };
         /** RepositoryResponse */
         RepositoryResponse: {
@@ -1220,6 +1306,39 @@ export interface operations {
             };
         };
     };
+    stop_repair_api_repairs__repair_id__stop_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                repair_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepairStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_repositories_api_repositories_get: {
         parameters: {
             query?: never;
@@ -1646,7 +1765,38 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SubmittedRunResponse"];
+                    "application/json": components["schemas"]["SubmittedRunResponse"] | components["schemas"]["RepairCommandResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_repairs_api_tasks__task_id__repairs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepairStatusResponse"][];
                 };
             };
             /** @description Validation Error */

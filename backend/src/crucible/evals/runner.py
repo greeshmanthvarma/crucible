@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from crucible.application.container import ApplicationContainer
+from crucible.application.message_service import SubmittedRun
 from crucible.domain.approvals import Approval, ApprovalStatus
 from crucible.domain.evals import (
     EvalCase,
@@ -165,9 +166,15 @@ class EvalRunner:
             task = await self._container.task_service.create(
                 registered.repository.id, fixture.source_commit, f"eval-task-{trial.id}"
             )
+            if case.prompt.strip().split(maxsplit=1)[0:1] == ["/repair"]:
+                raise ValueError(
+                    "Repository eval prompts cannot invoke repair commands"
+                )
             submitted = await self._container.message_service.submit(
                 task.id, case.prompt, f"eval-message-{trial.id}"
             )
+            if not isinstance(submitted, SubmittedRun):
+                raise ValueError("Repository eval prompt dispatched a repair command")
             trial = await self._update(
                 trial.run(
                     registered.repository.id,

@@ -9,6 +9,7 @@ from crucible.domain.ids import EventId, RunId, TaskId, new_id
 
 
 class EventType(StrEnum):
+    REPAIR_UPDATED = "repair.updated"
     TASK_PROVISIONING_STARTED = "task.provisioning_started"
     TASK_PROVISIONING_SUCCEEDED = "task.provisioning_succeeded"
     TASK_PROVISIONING_FAILED = "task.provisioning_failed"

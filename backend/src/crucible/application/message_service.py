@@ -16,6 +16,7 @@ from crucible.application.idempotency import (
     canonical_request_hash,
 )
 from crucible.application.ports import EventNotifier, RunSupervisor, UnitOfWork
+from crucible.application.repair_service import RepairService
 from crucible.domain.clock import Clock
 from crucible.domain.conversation import (
     Message,
@@ -26,6 +27,7 @@ from crucible.domain.conversation import (
 )
 from crucible.domain.events import EventFactory, EventType
 from crucible.domain.ids import new_id
+from crucible.domain.repair import RepairCommandResult
 from crucible.domain.results import IntegrationStatus
 from crucible.domain.run import Run, RunStatus
 from crucible.domain.task import TaskStatus
@@ -66,7 +68,9 @@ class MessageService:
         notifier: EventNotifier | None = None,
         git: GitClient | None = None,
         workspaces: WorkspaceManager | None = None,
+        repairs: RepairService | None = None,
     ) -> None:
+        self._repairs = repairs
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._supervisor = supervisor
@@ -78,7 +82,13 @@ class MessageService:
 
     async def submit(
         self, task_id: UUID, text: str, idempotency_key: str
-    ) -> SubmittedRun:
+    ) -> SubmittedRun | RepairCommandResult:
+        if text.strip().split(maxsplit=1)[0:1] == ["/repair"]:
+            if self._repairs is None:
+                from crucible.application.repair_service import InvalidRepairCommand
+
+                raise InvalidRepairCommand("Repair is not configured")
+            return await self._repairs.command(task_id, text, idempotency_key)
         async with self._task_locks.setdefault(task_id, asyncio.Lock()):
             return await self._submit_locked(task_id, text, idempotency_key)
 

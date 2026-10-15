@@ -16,6 +16,7 @@ from crucible.application.ports import (
     ExternalResourceStore,
     IntegrationStore,
     MessageStore,
+    RepairStore,
     RepairTrialStore,
     RepositoryStore,
     ResultRevisionStore,
@@ -33,6 +34,7 @@ from crucible.storage.database import Database
 from crucible.storage.evals import SqlAlchemyEvalStore
 from crucible.storage.repair_evidence import SqlAlchemyEvidenceStore
 from crucible.storage.repair_trials import SqlAlchemyTrialStore
+from crucible.storage.repairs import SqlAlchemyRepairStore
 from crucible.storage.repositories import (
     ApprovalRepository,
     ArtifactRepository,
@@ -60,6 +62,7 @@ __all__ = ["SqlAlchemyUnitOfWork", "UnitOfWork"]
 
 
 class SqlAlchemyUnitOfWork:
+    repairs: RepairStore
     repair_trials: RepairTrialStore
     repair_evidence: EvidenceStore
     evals: EvalStore
@@ -91,6 +94,7 @@ class SqlAlchemyUnitOfWork:
 
     async def __aenter__(self) -> Self:
         self.session = self._session_factory()
+        self.repairs = SqlAlchemyRepairStore(self.session)
         self.repair_trials = SqlAlchemyTrialStore(self.session)
         self.evals = SqlAlchemyEvalStore(self.session)
         self.repair_evidence = SqlAlchemyEvidenceStore(self.session)

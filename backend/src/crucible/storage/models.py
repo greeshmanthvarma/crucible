@@ -554,7 +554,7 @@ repair_trial_jobs = Table(
     "repair_trial_jobs",
     metadata,
     Column("id", String(36), primary_key=True),
-    Column("repair_id", String(36)),
+    Column("repair_id", ForeignKey("repair_runs.id")),
     Column("invocation_id", String(36), nullable=False),
     Column("candidate_generation", Integer, nullable=False),
     Column("case_id", String, nullable=False),
@@ -601,4 +601,111 @@ repair_incident_cases = Table(
     Column("fixture_manifest_artifact_id", ForeignKey("artifacts.id"), nullable=False),
     Column("accepted_commit", String, nullable=False),
     Column("created_at", UTCDateTime(), nullable=False),
+)
+
+
+repair_runs = Table(
+    "repair_runs",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("source_task_id", ForeignKey("tasks.id"), nullable=False),
+    Column("status", String, nullable=False),
+    Column("stage", String, nullable=False),
+    Column("initial_identity_json", JSON, nullable=False),
+    Column("branch", String),
+    Column("worktree_path", String),
+    Column("last_accepted_commit", String, nullable=False),
+    Column("current_fix_id", String(36)),
+    Column("created_at", UTCDateTime(), nullable=False),
+    Column("updated_at", UTCDateTime(), nullable=False),
+    Column("outcome_code", String),
+    Column("outcome_detail", String),
+    Column("predecessor_repair_id", ForeignKey("repair_runs.id")),
+    CheckConstraint(
+        "status IN ('queued','running','stopped','interrupted','retryable_error',"
+        "'completed','exhausted','closed','invalidated')"
+    ),
+    CheckConstraint(
+        "stage IN ('intake','diagnosis','eval_review','baseline_reproduction',"
+        "'proposal','candidate_validation','commit_acceptance','publication')"
+    ),
+)
+repair_ownership = Table(
+    "repair_ownership",
+    metadata,
+    Column("singleton_id", Integer, primary_key=True),
+    Column("repair_id", ForeignKey("repair_runs.id"), unique=True),
+    Column("owner_execution_id", String),
+    Column("heartbeat_at", UTCDateTime()),
+    Column("lease_expires_at", UTCDateTime()),
+    CheckConstraint("singleton_id = 1"),
+)
+repair_fixes = Table(
+    "repair_fixes",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("repair_id", ForeignKey("repair_runs.id"), nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("diagnosis_case_digest", String, nullable=False),
+    Column("approved_case_digest", String),
+    Column("status", String, nullable=False),
+    Column("accepted_commit", String),
+    Column("attempts_used", Integer, nullable=False),
+    UniqueConstraint("repair_id", "ordinal"),
+    CheckConstraint("ordinal >= 0 AND attempts_used >= 0"),
+)
+repair_attempts = Table(
+    "repair_attempts",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("repair_id", ForeignKey("repair_runs.id"), nullable=False),
+    Column("fix_id", ForeignKey("repair_fixes.id")),
+    Column("role", String, nullable=False),
+    Column("attempt_index", Integer, nullable=False),
+    Column("harness_run_id", ForeignKey("runs.id")),
+    Column("status", String, nullable=False),
+    Column("charged", Boolean, nullable=False),
+    Column("started_at", UTCDateTime(), nullable=False),
+    Column("completed_at", UTCDateTime()),
+    Column("output_artifact_id", ForeignKey("artifacts.id")),
+    CheckConstraint("attempt_index >= 0"),
+)
+repair_checkpoints = Table(
+    "repair_checkpoints",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("repair_id", ForeignKey("repair_runs.id"), nullable=False),
+    Column("stage", String, nullable=False),
+    Column("fix_id", ForeignKey("repair_fixes.id")),
+    Column("trial_job_id", ForeignKey("repair_trial_jobs.id")),
+    Column("input_fingerprint", String, nullable=False),
+    Column("accepted_commit", String, nullable=False),
+    Column("attempts_json", JSON, nullable=False),
+    Column("result_refs_json", JSON, nullable=False),
+    Column("created_at", UTCDateTime(), nullable=False),
+)
+repair_acceptances = Table(
+    "repair_acceptances",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("repair_id", ForeignKey("repair_runs.id"), nullable=False),
+    Column("fix_id", ForeignKey("repair_fixes.id"), nullable=False),
+    Column("expected_parent", String, nullable=False),
+    Column("candidate_tree_digest", String, nullable=False),
+    Column("evaluated_source_digest", String, nullable=False),
+    Column("result_refs_json", JSON, nullable=False),
+    Column("status", String, nullable=False),
+    Column("commit_sha", String),
+)
+repair_publications = Table(
+    "repair_publications",
+    metadata,
+    Column("repair_id", ForeignKey("repair_runs.id"), primary_key=True),
+    Column("head_branch", String, nullable=False),
+    Column("base_branch", String, nullable=False),
+    Column("head_sha", String, nullable=False),
+    Column("status", String, nullable=False),
+    Column("pr_number", Integer),
+    Column("pr_url", String),
+    Column("last_error", String),
 )

@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from crucible.domain.repair import RepairStage, RepairStatus
+
 
 def to_camel(value: str) -> str:
     first, *rest = value.split("_")
@@ -321,3 +323,22 @@ class BootstrapRequest(ApiModel):
 
 class BootstrapResponse(ApiModel):
     csrf_token: str
+
+
+class RepairCommandResponse(ApiModel):
+    kind: Literal["repair_command"] = "repair_command"
+    status: Literal["admitted", "resumed", "closed", "nothing_eligible", "blocked"]
+    repair_id: UUID | None
+    code: str | None
+    detail: str
+    pr_urls: list[str]
+
+
+class RepairStatusResponse(ApiModel):
+    repair_id: UUID
+    status: RepairStatus
+    stage: RepairStage
+    attempts: dict[str, int]
+    outcome_code: str | None
+    detail: str | None
+    pr_url: str | None

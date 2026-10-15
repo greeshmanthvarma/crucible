@@ -11,6 +11,7 @@ from crucible.api.schemas import (
     IntegrationResponse,
     MessagePartResponse,
     MessageResponse,
+    RepairCommandResponse,
     ResultRevisionResponse,
     StepTraceResponse,
     SubmitMessageRequest,
@@ -26,6 +27,7 @@ from crucible.api.schemas import (
 from crucible.application.errors import IdempotencyKeyRequired
 from crucible.application.message_service import MessageService
 from crucible.application.task_service import TaskService
+from crucible.domain.repair import RepairCommandResult
 from crucible.domain.task import Task
 
 router = APIRouter(tags=["tasks"])
@@ -229,7 +231,7 @@ async def get_task_review(
 
 @messages_router.post(
     "/api/tasks/{task_id}/messages",
-    response_model=SubmittedRunResponse,
+    response_model=SubmittedRunResponse | RepairCommandResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def submit_message(
@@ -237,10 +239,18 @@ async def submit_message(
     request: SubmitMessageRequest,
     service: MessageServiceDependency,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-) -> SubmittedRunResponse:
+) -> SubmittedRunResponse | RepairCommandResponse:
     if idempotency_key is None or not idempotency_key.strip():
         raise IdempotencyKeyRequired("Idempotency-Key header is required")
     result = await service.submit(task_id, request.text, idempotency_key)
+    if isinstance(result, RepairCommandResult):
+        return RepairCommandResponse(
+            status=result.status,
+            repair_id=result.repair_id,
+            code=result.code,
+            detail=result.detail,
+            pr_urls=list(result.pr_urls),
+        )
     return SubmittedRunResponse(
         message_id=result.message_id,
         run_id=result.run_id,

@@ -17,6 +17,7 @@ from crucible.api.errors import application_error_handler
 from crucible.api.events import router as events_router
 from crucible.api.integrations import router as integrations_router
 from crucible.api.repair_gateway import router as repair_gateway_router
+from crucible.api.repairs import router as repairs_router
 from crucible.api.repositories import router as repositories_router
 from crucible.api.runs import router as runs_router
 from crucible.api.tasks import messages_router
@@ -30,6 +31,7 @@ from crucible.application.errors import ApplicationError
 from crucible.application.event_service import TaskEventSource
 from crucible.application.integration_service import IntegrationService
 from crucible.application.message_service import MessageService
+from crucible.application.repair_service import RepairService
 from crucible.application.repository_service import RepositoryService
 from crucible.application.run_service import RunService
 from crucible.application.task_service import TaskService
@@ -51,6 +53,7 @@ def create_app(
     integration_service: IntegrationService | None = None,
     auth_service: AuthService | None = None,
     *,
+    repair_service: RepairService | None = None,
     allowed_origins: tuple[str, ...] | None = None,
     development_origin: str | None = None,
     secure_cookie: bool | None = None,
@@ -81,8 +84,10 @@ def create_app(
                 acceptance_service,
                 integration_service,
                 auth_service,
+                repair_service,
             )
         ):
+            app.state.repair_service = repair_service
             app.state.repository_service = repository_service
             app.state.task_service = task_service
             app.state.message_service = message_service
@@ -99,6 +104,7 @@ def create_app(
             os.environ.get("CRUCIBLE_DATABASE_URL", "sqlite+aiosqlite:///crucible.db"),
             Path(os.environ.get("CRUCIBLE_DATA_DIR", "data")),
         )
+        app.state.repair_service = container.repair_service
         app.state.repair_gateway = container.repair_gateway
         app.state.repository_service = container.repository_service
         app.state.task_service = container.task_service
@@ -134,6 +140,7 @@ def create_app(
             acceptance_service,
             integration_service,
             auth_service,
+            repair_service,
         )
     ):
         app.state.repository_service = repository_service
@@ -146,6 +153,9 @@ def create_app(
         app.state.acceptance_service = acceptance_service
         app.state.integration_service = integration_service
         app.state.auth_service = auth_service
+    if repair_service is not None:
+        app.state.repair_service = repair_service
+    app.include_router(repairs_router)
     app.add_exception_handler(ApplicationError, application_error_handler)  # type: ignore[arg-type]
     app.state.session_cookie_name = SESSION_COOKIE
     app.state.secure_cookie = secure_cookie

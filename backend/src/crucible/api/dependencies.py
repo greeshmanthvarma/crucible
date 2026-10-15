@@ -5,6 +5,7 @@ from crucible.application.approval_service import ApprovalService
 from crucible.application.artifact_service import ArtifactService
 from crucible.application.integration_service import IntegrationService
 from crucible.application.message_service import MessageService
+from crucible.application.repair_service import RepairService
 from crucible.application.repository_service import RepositoryService
 from crucible.application.run_service import RunService
 from crucible.application.task_service import TaskService
@@ -47,4 +48,9 @@ def get_artifact_service(request: Request) -> ArtifactService:
 
 def get_run_service(request: Request) -> RunService:
     service: RunService = request.app.state.run_service
+    return service
+
+
+def get_repair_service(request: Request) -> "RepairService":
+    service: RepairService = request.app.state.repair_service
     return service
