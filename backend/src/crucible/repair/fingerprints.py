@@ -62,6 +62,13 @@ async def capture_source_identity(root: "Path") -> SourceIdentity:
         .decode()
         .split("\0")
     )
+    # Keep deleted HEAD paths in the identity after staging removes them from
+    # the index, so staging cannot change the evaluated source identity.
+    names.extend(
+        (await _git(root, "ls-tree", "-r", "--name-only", "-z", "HEAD"))
+        .decode()
+        .split("\0")
+    )
     included = sorted(
         {
             name

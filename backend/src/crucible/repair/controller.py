@@ -390,6 +390,7 @@ class RepairController:
                 return
             state = await self._load_state(repair_id)
             try:
+                repair = await self._recover_acceptance(repair, state, "reconcile")
                 configuration = self.roles.configuration_fingerprint
                 if (
                     state.get("role_configuration")
@@ -399,6 +400,7 @@ class RepairController:
                 state["role_configuration"] = configuration
                 if self.recovery:
                     await self.recovery.verify(repair)
+                repair = await self._recover_acceptance(repair, state, "resume_pending")
                 repair = await self._checkpoint(repair, state)
                 await self._execute(repair, state)
             except asyncio.CancelledError:
@@ -961,6 +963,8 @@ class RepairController:
         await self._publish(repair, state)
 
     async def _publish(self, repair: RepairRun, state: dict[str, Any]) -> None:
+        if self.recovery:
+            await self.recovery.verify(repair)
         state["publication_only"] = True
         repair = await self._checkpoint(repair, state, stage=RepairStage.PUBLICATION)
         if self.publication is None:
@@ -1008,11 +1012,38 @@ class RepairController:
                 "Evaluation did not produce behavioral evidence"
             )
 
+    async def _recover_acceptance(
+        self, repair: RepairRun, state: dict[str, Any], method: str
+    ) -> RepairRun:
+        recover = getattr(self.acceptance, method, None)
+        if recover is not None and await recover(repair):
+            repair = await self._get(repair.id)
+            state["candidate_dirty"] = False
+            for name in (
+                "candidate_snapshot",
+                "validation_evidence",
+                "baseline",
+                "baseline_parent",
+                "baseline_fingerprint",
+                "proposal_feedback",
+            ):
+                state.pop(name, None)
+        return repair
+
     async def _interrupt_candidate(
         self, repair: RepairRun, state: dict[str, Any]
     ) -> None:
         if not state.get("candidate_dirty"):
             return
+        if self.acceptance and hasattr(self.acceptance, "interrupt"):
+            if await self.acceptance.interrupt(repair):
+                state.update(candidate_dirty=False, candidate_snapshot=None)
+                await self._checkpoint(
+                    await self._get(repair.id),
+                    state,
+                    status=(await self._get(repair.id)).status,
+                )
+                return
         if self.recovery is None:
             raise RepairNeedsReview("Unaccepted workspace requires review")
         snapshot = state.get("candidate_snapshot")

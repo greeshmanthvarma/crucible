@@ -138,7 +138,10 @@ class SqlAlchemyRepairStore:
             await self.session.execute(
                 select(table)
                 .where(table.c[column] == str(key))
-                .order_by(table.c[order], literal_column("rowid"))
+                .order_by(
+                    literal_column("rowid") if order == "rowid" else table.c[order],
+                    literal_column("rowid"),
+                )
             )
         ).mappings()
         return tuple(_record(cls, row) for row in rows)
@@ -263,6 +266,11 @@ class SqlAlchemyRepairStore:
     async def list_fixes(self, repair_id: UUID) -> tuple[RepairFix, ...]:
         return await self._list(
             models.repair_fixes, RepairFix, "repair_id", repair_id, "ordinal"
+        )
+
+    async def list_acceptances(self, repair_id: UUID) -> tuple[RepairAcceptance, ...]:
+        return await self._list(
+            models.repair_acceptances, RepairAcceptance, "repair_id", repair_id, "rowid"
         )
 
     async def add_acceptance(self, record: RepairAcceptance) -> None:

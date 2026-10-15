@@ -407,6 +407,11 @@ class ApplicationContainer:
             from crucible.evals.evaluators import EvaluatorRegistry
             from crucible.evals.fixtures import FixturePreparer
             from crucible.repair.evaluation import RepairEvaluation
+            from crucible.repair.git import LocalRepairGit, RepairAcceptanceService
+            from crucible.repair.github import LocalRepairGitHub
+            from crucible.repair.incident_suite import IncidentSuite
+            from crucible.repair.publication import PublicationService
+            from crucible.repair.reporting import RepairReporter
 
             repair_image = os.environ.get("CRUCIBLE_REPAIR_IMAGE", "")
             evaluation = RepairEvaluation(
@@ -460,6 +465,25 @@ class ApplicationContainer:
                 incident,
                 artifact_service,
                 evaluation=evaluation,
+                acceptance=RepairAcceptanceService(
+                    unit_of_work,
+                    LocalRepairGit(Path(__file__).parents[4], data_dir),
+                    artifact_service,
+                    clock,
+                    IncidentSuite(
+                        data_dir / "repair-incidents",
+                        unit_of_work,
+                        artifact_service,
+                        clock,
+                        fixtures={},
+                    ),
+                ),
+                publication=PublicationService(
+                    unit_of_work,
+                    clock,
+                    LocalRepairGitHub(Path(__file__).parents[4]),
+                    RepairReporter(unit_of_work, artifact_service, clock),
+                ),
                 recovery=ManagedRepairWorkspace(
                     unit_of_work,
                     artifact_service,

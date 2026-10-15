@@ -156,26 +156,21 @@ class ManagedRepairWorkspace:
                 stderr=asyncio.subprocess.PIPE,
             )
             before_raw, _ = await process.communicate()
-            if process.returncode:
+            tree_entry = await self._git(
+                repair, "ls-tree", repair.last_accepted_commit, "--", name
+            )
+            if process.returncode and tree_entry:
                 raise RepairNeedsReview("Candidate baseline is unavailable")
             files.append(
                 {
                     "path": name,
-                    "before": base64.b64encode(before_raw).decode(),
+                    "before": base64.b64encode(before_raw).decode()
+                    if tree_entry
+                    else None,
                     "after": after,
-                    "mode": int(
-                        (
-                            await self._git(
-                                repair,
-                                "ls-tree",
-                                repair.last_accepted_commit,
-                                "--",
-                                name,
-                            )
-                        ).split()[0],
-                        8,
-                    )
-                    & 0o777,
+                    "mode": (int(tree_entry.split()[0], 8) & 0o777)
+                    if tree_entry
+                    else None,
                 }
             )
         artifact_id = await private_artifact(
@@ -227,8 +222,11 @@ class ManagedRepairWorkspace:
         for item in saved["files"]:
             # Precisely restore known targets; no reset/clean or whole-tree writes.
             path = authority.validate_target(item["path"])
-            content = base64.b64decode(item["before"], validate=True)
-            authority.write_text(item["path"], content.decode("utf-8"))
-            path.chmod(item["mode"])
+            if item["before"] is None:
+                path.unlink(missing_ok=True)
+            else:
+                content = base64.b64decode(item["before"], validate=True)
+                authority.write_text(item["path"], content.decode("utf-8"))
+                path.chmod(item["mode"])
         if await self._git(repair, "status", "--porcelain", "--untracked-files=all"):
             raise RepairNeedsReview("Restoration found unrelated changes")

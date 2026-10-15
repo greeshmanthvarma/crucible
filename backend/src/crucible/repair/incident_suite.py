@@ -71,6 +71,35 @@ class IncidentSuite:
                 if existing.accepted_commit != accepted_commit:
                     raise ValueError("Incident acceptance is immutable")
                 return existing
+        reference = self.root / (case.case_digest + ".json")
+        if reference.exists() or reference.is_symlink():
+            if reference.is_symlink():
+                raise ValueError("Private incident reference cannot be a symlink")
+            saved = json.loads(reference.read_bytes())
+            definition_id = UUID(saved["definition_artifact_id"])
+            fixture_id = UUID(saved["fixture_manifest_artifact_id"])
+            prior_case = ApprovedCase.model_validate_json(
+                await self._read(definition_id)
+            )
+            prior_fixture = json.loads(await self._read(fixture_id))
+            if (
+                saved["case_digest"] != case.case_digest
+                or saved["accepted_commit"] != accepted_commit
+                or prior_case != case
+                or digest(prior_fixture) != case.case.fixture_manifest_digest
+            ):
+                raise ValueError("Private incident acceptance reference changed")
+            record = AcceptedIncident(
+                case.case_digest,
+                definition_id,
+                fixture_id,
+                accepted_commit,
+                self.clock.now(),
+            )
+            async with self.factory() as uow:
+                await uow.repair_trials.add_incident(record)
+                await uow.commit()
+            return record
         fixture = self.fixtures.get(case.case.fixture_manifest_digest)
         if fixture is None:
             raise ValueError("Fixture is unavailable")
@@ -97,18 +126,21 @@ class IncidentSuite:
                 "accepted_commit": record.accepted_commit,
             }
         )
-        try:
-            descriptor = os.open(
-                reference, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
-            )
-        except FileExistsError:
-            if reference.is_symlink() or reference.read_bytes() != raw:
-                raise ValueError("Private incident reference already exists") from None
-        else:
-            with os.fdopen(descriptor, "wb") as stream:
+        import tempfile
+
+        # Publish a complete fsynced reference atomically; a crash cannot leave
+        # a truncated acceptance reference that blocks reconciliation.
+        with tempfile.NamedTemporaryFile(
+            dir=self.root, prefix=".incident-", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            try:
                 stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
+                os.link(temporary, reference, follow_symlinks=False)
+            finally:
+                temporary.unlink(missing_ok=True)
         async with self.factory() as uow:
             await uow.repair_trials.add_incident(record)
             await uow.commit()

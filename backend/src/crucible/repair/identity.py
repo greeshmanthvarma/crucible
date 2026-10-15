@@ -11,12 +11,16 @@ from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
+from pydantic import BaseModel
+
 
 def _json_value(value: object) -> object:
     if isinstance(value, (UUID, Path)):
         return str(value)
     if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
     if isinstance(value, Mapping):
         return dict(value)
     if is_dataclass(value) and not isinstance(value, type):
