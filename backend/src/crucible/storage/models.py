@@ -7,11 +7,13 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     MetaData,
     String,
     Table,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.types import TypeDecorator
@@ -57,7 +59,14 @@ tasks = Table(
     Column("repository_id", ForeignKey("repositories.id"), nullable=False),
     Column("source_ref", String, nullable=False),
     Column("base_revision", String),
-    Column("workspace_path", String, nullable=False, unique=True),
+    Column("workspace_path", String, nullable=False),
+    Column("internal_repair_id", ForeignKey("repair_runs.id")),
+    Index(
+        "uq_public_task_workspace",
+        "workspace_path",
+        unique=True,
+        sqlite_where=text("internal_repair_id IS NULL"),
+    ),
     Column("workspace_generation", Integer, nullable=False, server_default="0"),
     Column("workspace_base_revision", String),
     Column("status", String, nullable=False),

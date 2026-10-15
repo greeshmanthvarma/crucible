@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, TypeVar
 from uuid import UUID
 
-from sqlalchemy import Table, insert, select, update
+from sqlalchemy import Table, insert, literal_column, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crucible.domain.repair import (
@@ -85,6 +85,20 @@ class SqlAlchemyRepairStore:
                 jobs.append(job)
         return tuple(jobs)
 
+    async def attempt_for_run(self, run_id: UUID) -> RepairAttempt | None:
+        row = (
+            (
+                await self.session.execute(
+                    select(models.repair_attempts).where(
+                        models.repair_attempts.c.harness_run_id == str(run_id)
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return _record(RepairAttempt, row) if row is not None else None
+
     async def lock(self) -> None:
         # This must be the first statement in any admission mutation transaction.
         # A write, rather than SELECT then UPDATE, avoids WAL read-upgrade races.
@@ -124,7 +138,7 @@ class SqlAlchemyRepairStore:
             await self.session.execute(
                 select(table)
                 .where(table.c[column] == str(key))
-                .order_by(table.c[order], table.c.get("id", table.c[column]))
+                .order_by(table.c[order], literal_column("rowid"))
             )
         ).mappings()
         return tuple(_record(cls, row) for row in rows)

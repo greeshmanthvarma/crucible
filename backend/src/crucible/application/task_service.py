@@ -92,7 +92,7 @@ class TaskService:
                         "Idempotency key was already used for a different request"
                     )
                 task = await uow.tasks.get(UUID(str(previous.response_json["taskId"])))
-                if task is None:
+                if task is None or task.internal_repair_id is not None:
                     raise RuntimeError("Idempotency record references a missing Task")
                 if previous.response_json.get("errorCode") == RevisionNotFound.code:
                     raise RevisionNotFound(
@@ -189,7 +189,7 @@ class TaskService:
     async def get(self, task_id: UUID) -> Task:
         async with self._unit_of_work() as uow:
             task = await uow.tasks.get(task_id)
-        if task is None:
+        if task is None or task.internal_repair_id is not None:
             raise TaskNotFound(f"Task not found: {task_id}")
         return task
 
@@ -200,7 +200,7 @@ class TaskService:
     async def trace(self, task_id: UUID) -> tuple[StepTrace, ...]:
         async with self._unit_of_work() as uow:
             task = await uow.tasks.get(task_id)
-            if task is None:
+            if task is None or task.internal_repair_id is not None:
                 raise TaskNotFound(f"Task not found: {task_id}")
             runs = await uow.runs.list_for_task(task_id)
             traces: list[StepTrace] = []
@@ -234,7 +234,7 @@ class TaskService:
     async def review(self, task_id: UUID) -> TaskReview:
         async with self._unit_of_work() as uow:
             task = await uow.tasks.get(task_id)
-            if task is None:
+            if task is None or task.internal_repair_id is not None:
                 raise TaskNotFound(f"Task not found: {task_id}")
             runs = await uow.runs.list_for_task(task_id)
             proposal = None

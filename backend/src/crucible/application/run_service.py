@@ -31,6 +31,11 @@ class RunService:
         self._events = EventFactory()
 
     async def cancel(self, run_id: UUID, idempotency_key: str) -> CancelledRun:
+        async with self._unit_of_work() as uow:
+            target = await uow.runs.get(run_id)
+            task = await uow.tasks.get(target.task_id) if target else None
+            if task is None or task.internal_repair_id is not None:
+                raise RunNotFound("Run not found")
         scope = f"run:{run_id}:cancel"
         request_hash = canonical_request_hash({"code": "cancelled"})
         task_id = None

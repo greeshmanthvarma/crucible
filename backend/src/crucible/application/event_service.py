@@ -24,7 +24,8 @@ class TaskEventSource:
 
     async def resolve_cursor(self, task_id: UUID, cursor: UUID | None) -> int:
         async with self._unit_of_work() as uow:
-            if await uow.tasks.get(task_id) is None:
+            task = await uow.tasks.get(task_id)
+            if task is None or task.internal_repair_id is not None:
                 raise TaskNotFound(f"Task not found: {task_id}")
             if cursor is None:
                 return 0

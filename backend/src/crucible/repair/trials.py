@@ -188,9 +188,11 @@ class TrialService:
         invocation_id: UUID,
         candidate_generation: int = 0,
         credential_factory: Any = None,
+        repair_id: UUID | None = None,
     ) -> None:
         if candidate_generation < 0:
             raise ValueError("Invalid candidate generation")
+        self.repair_id = repair_id
         self.factory, self.worker = unit_of_work, worker
         self.credential_factory = credential_factory
         self.source_root, self.fixtures = source_root, fixtures
@@ -302,6 +304,7 @@ class TrialService:
             repeat_index,
             "running",
             self.clock.now(),
+            repair_id=self.repair_id,
         )
         async with self.factory() as uow:
             await uow.repair_trials.add_job(job)
@@ -654,6 +657,7 @@ class TrialService:
                     repeat,
                     "running",
                     self.clock.now(),
+                    repair_id=self.repair_id,
                 )
                 async with self.factory() as uow:
                     await uow.repair_trials.add_job(job)

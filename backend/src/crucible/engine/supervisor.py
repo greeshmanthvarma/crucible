@@ -73,7 +73,15 @@ class LocalRunSupervisor:
                 )
             )
         for run in queued:
-            await self.submit(run.id)
+            async with self._unit_of_work() as uow:
+                internal = await uow.repairs.attempt_for_run(run.id)
+                task = await uow.tasks.get(run.task_id)
+            if (
+                internal is None
+                and task is not None
+                and task.internal_repair_id is None
+            ):
+                await self.submit(run.id)
 
     async def cancel(self, run_id: UUID) -> None:
         pending = await self._cancel_pending_approvals(run_id)

@@ -18,7 +18,6 @@ from crucible.application.errors import (
 from crucible.application.idempotency import IdempotencyRecord, canonical_request_hash
 from crucible.application.ports import EventNotifier, UnitOfWork
 from crucible.domain.clock import Clock
-from crucible.domain.events import EventFactory, EventType
 from crucible.domain.repair import (
     TERMINAL_STATUSES,
     RepairCheckpoint,
@@ -29,6 +28,7 @@ from crucible.domain.repair import (
 )
 from crucible.domain.run import RunStatus
 from crucible.domain.task import TaskStatus
+from crucible.repair.events import append_repair_event
 from crucible.repair.identity import RuntimeIdentity
 from crucible.repair.ports import (
     RepairAdmissionGitHubPort,
@@ -86,6 +86,11 @@ class RepairService:
         self._worker_recovery = worker_recovery
         self._heartbeat_task: asyncio.Task[None] | None = None
         self.execution_id = f"{socket.gethostname()}:{os.getpid()}:{uuid4()}"
+
+    def bind_scheduler(self, scheduler: RepairScheduler) -> None:
+        if self._scheduler is not None:
+            raise RuntimeError("Repair scheduler already bound")
+        self._scheduler = scheduler
 
     async def start(self) -> None:
         await self.reconcile()
@@ -151,29 +156,7 @@ class RepairService:
         )
 
     async def _event(self, uow: UnitOfWork, run: RepairRun) -> None:
-        attempts = await uow.repairs.list_attempts(run.id)
-        publication = await uow.repairs.get_publication(run.id)
-        await uow.events.append(
-            EventFactory().create(
-                task_id=run.source_task_id,
-                run_id=None,
-                type=EventType.REPAIR_UPDATED,
-                created_at=self._clock.now(),
-                payload={
-                    "source_task_id": str(run.source_task_id),
-                    "repair_id": str(run.id),
-                    "stage": run.stage,
-                    "status": run.status,
-                    "attempts": {
-                        role: sum(a.charged for a in attempts if a.role == role)
-                        for role in {a.role for a in attempts}
-                    },
-                    "outcome_code": run.outcome_code,
-                    "detail": run.outcome_detail,
-                    "pr_url": publication.pr_url if publication else None,
-                },
-            )
-        )
+        await append_repair_event(uow, self._clock, run)
 
     async def _notify(self, task_id: UUID) -> None:
         if self._notifier:
@@ -193,7 +176,8 @@ class RepairService:
             previous = await self._replay(uow, scope, idempotency_key, request_hash)
             if previous:
                 return previous
-            if await uow.tasks.get(task_id) is None:
+            source_task = await uow.tasks.get(task_id)
+            if source_task is None or source_task.internal_repair_id is not None:
                 raise TaskNotFound(f"Task not found: {task_id}")
         # External reads do not hold the database write lock. Eligibility is rechecked
         # atomically afterward, including same-key replay from another process.
@@ -509,7 +493,8 @@ class RepairService:
 
     async def list_for_task(self, task_id: UUID) -> tuple[RepairRun, ...]:
         async with self._uow() as uow:
-            if await uow.tasks.get(task_id) is None:
+            source_task = await uow.tasks.get(task_id)
+            if source_task is None or source_task.internal_repair_id is not None:
                 raise TaskNotFound("Task not found")
             return await uow.repairs.list_for_task(task_id)
 

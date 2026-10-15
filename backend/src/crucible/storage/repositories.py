@@ -221,6 +221,9 @@ class TaskRepository:
             insert(models.tasks).values(
                 id=str(task.id),
                 repository_id=str(task.repository_id),
+                internal_repair_id=str(task.internal_repair_id)
+                if task.internal_repair_id
+                else None,
                 source_ref=task.source_ref,
                 base_revision=task.base_revision,
                 workspace_path=str(task.workspace_path),
@@ -249,6 +252,9 @@ class TaskRepository:
             return None
         return Task(
             id=UUID(row["id"]),
+            internal_repair_id=UUID(row["internal_repair_id"])
+            if row["internal_repair_id"]
+            else None,
             repository_id=UUID(row["repository_id"]),
             source_ref=row["source_ref"],
             base_revision=row["base_revision"],
@@ -281,9 +287,9 @@ class TaskRepository:
     async def list(self) -> tuple[Task, ...]:
         rows = (
             await self._session.execute(
-                select(models.tasks).order_by(
-                    models.tasks.c.updated_at.desc(), models.tasks.c.id.desc()
-                )
+                select(models.tasks)
+                .where(models.tasks.c.internal_repair_id.is_(None))
+                .order_by(models.tasks.c.updated_at.desc(), models.tasks.c.id.desc())
             )
         ).mappings()
         return tuple(self._from_row(row) for row in rows)
@@ -293,9 +299,10 @@ class TaskRepository:
             await self._session.execute(
                 select(models.tasks)
                 .where(
+                    models.tasks.c.internal_repair_id.is_(None),
                     models.tasks.c.status.in_(
                         (TaskStatus.PROVISIONING, TaskStatus.CONTINUING)
-                    )
+                    ),
                 )
                 .order_by(models.tasks.c.created_at, models.tasks.c.id)
             )
@@ -307,6 +314,9 @@ class TaskRepository:
         values = cast(dict[str, object], row)
         return Task(
             id=UUID(cast(str, values["id"])),
+            internal_repair_id=UUID(str(values["internal_repair_id"]))
+            if values["internal_repair_id"]
+            else None,
             repository_id=UUID(cast(str, values["repository_id"])),
             source_ref=cast(str, values["source_ref"]),
             base_revision=cast(str | None, values["base_revision"]),

@@ -41,10 +41,15 @@ from crucible.repair.admission import (
     LocalRepairAdmissionGitHub,
     LocalRepairWorkerRecovery,
 )
+from crucible.repair.controller import RepairController
 from crucible.repair.evidence import EvidenceRecorder
 from crucible.repair.gateway import ScopedModelGateway
-from crucible.repair.identity import RuntimeIdentity, capture_runtime_identity
+from crucible.repair.identity import RuntimeIdentity, capture_runtime_identity, digest
+from crucible.repair.incident_context import IncidentContext
+from crucible.repair.recovery import ManagedRepairWorkspace
+from crucible.repair.roles import RoleExecutor
 from crucible.repair.worker_protocol import WorkerJob
+from crucible.repair.worker_supervisor import WorkerSupervisor
 from crucible.sandbox.docker import DockerSandboxBackend
 from crucible.sandbox.docker_client import DockerClient, SubprocessDockerClient
 from crucible.sandbox.protocol import SandboxBackend
@@ -65,6 +70,7 @@ class ApplicationContainer:
     database: Database
     repository_service: RepositoryService
     task_service: TaskService
+    repair_controller: RepairController | None
     repair_service: RepairService
     message_service: MessageService
     supervisor: LocalRunSupervisor
@@ -147,7 +153,13 @@ class ApplicationContainer:
         sandbox_backend = DockerSandboxBackend(docker, unit_of_work, clock)
         command_resources = resource_manager
         command_sandbox: SandboxBackend = sandbox_backend
-        command_authority = CommandAuthority(approval_service, approval_broker, clock)
+        command_authority = CommandAuthority(
+            approval_service,
+            approval_broker,
+            clock,
+            unit_of_work,
+            lambda: repair_service.execution_id,
+        )
         if worker_job is not None:
             from crucible.repair.incontainer_commands import (
                 InContainerSandbox,
@@ -290,7 +302,176 @@ class ApplicationContainer:
             notifier=notifier,
             worker_recovery=LocalRepairWorkerRecovery(Path(__file__).parents[4]),
         )
+        scoped_gateway = ScopedModelGateway(
+            gateway,
+            clock=clock,
+            endpoint=os.environ.get(
+                "CRUCIBLE_REPAIR_GATEWAY_ENDPOINT",
+                "http://host.docker.internal:8000/internal/repair-model/responses",
+            ),
+        )
+        incident = IncidentContext(unit_of_work, artifact_service)
+
+        def role_engine(role_registry: object) -> RunEngine:
+            from crucible.tools.registry import ToolRegistry
+
+            assert isinstance(role_registry, ToolRegistry)
+            role_context = ContextManager(
+                unit_of_work,
+                clock,
+                SimpleTokenEstimator(),
+                harness_policy="Follow harness safety and execution policy.",
+                tool_contract="Use only the structured tools supplied by the harness.",
+                model=model,
+                input_limit=context_limits[0]
+                if context_limits
+                else int(os.environ.get("CRUCIBLE_MODEL_INPUT_LIMIT", "100000")),
+                output_reserve=context_limits[1]
+                if context_limits
+                else int(os.environ.get("CRUCIBLE_MODEL_OUTPUT_RESERVE", "4096")),
+                tools=role_registry.definitions,
+                journal=journal,
+                evidence=evidence,
+                compaction_lifecycle=CompactionLifecycle(
+                    unit_of_work,
+                    artifact_service,
+                    compaction_gateway,
+                    clock,
+                    model=model,
+                ),
+            )
+            return RunEngine(
+                unit_of_work,
+                clock,
+                gateway,
+                notifier,
+                journal=journal,
+                context_manager=role_context,
+                dispatcher=ToolDispatcher(
+                    role_registry,
+                    unit_of_work,
+                    clock,
+                    journal=journal,
+                    evidence=evidence,
+                ),
+                max_steps=run_budgets.max_steps
+                if run_budgets
+                else int(os.environ.get("CRUCIBLE_MAX_STEPS", "20")),
+                max_tool_calls=run_budgets.max_tool_calls
+                if run_budgets
+                else int(os.environ.get("CRUCIBLE_MAX_TOOL_CALLS", "100")),
+                max_model_tokens=run_budgets.max_model_tokens
+                if run_budgets
+                else int(os.environ.get("CRUCIBLE_MAX_MODEL_TOKENS", "200000")),
+                max_active_seconds=float(
+                    run_budgets.max_active_seconds
+                    if run_budgets
+                    else os.environ.get("CRUCIBLE_MAX_ACTIVE_SECONDS", "600")
+                ),
+            )
+
+        roles = RoleExecutor(
+            unit_of_work,
+            clock,
+            artifact_service,
+            role_engine,
+            incident,
+            command_tool=cast(Tool, command_tool),
+            resources=resource_manager,
+            notifier=notifier,
+            configuration={
+                "model": model,
+                "max_steps": run_budgets.max_steps
+                if run_budgets
+                else int(os.environ.get("CRUCIBLE_MAX_STEPS", "20")),
+                "max_tool_calls": run_budgets.max_tool_calls
+                if run_budgets
+                else int(os.environ.get("CRUCIBLE_MAX_TOOL_CALLS", "100")),
+                "max_model_tokens": run_budgets.max_model_tokens
+                if run_budgets
+                else int(os.environ.get("CRUCIBLE_MAX_MODEL_TOKENS", "200000")),
+                "max_active_seconds": run_budgets.max_active_seconds
+                if run_budgets
+                else float(os.environ.get("CRUCIBLE_MAX_ACTIVE_SECONDS", "600")),
+                "context_limits": context_limits
+                or (
+                    int(os.environ.get("CRUCIBLE_MODEL_INPUT_LIMIT", "100000")),
+                    int(os.environ.get("CRUCIBLE_MODEL_OUTPUT_RESERVE", "4096")),
+                ),
+            },
+        )
+        repair_controller: RepairController | None = None
+        if worker_job is None:
+            # Private evaluator libraries never enter candidate workers. Import
+            # and compose the control-plane evaluator only on the host.
+            from crucible.evals.evaluators import EvaluatorRegistry
+            from crucible.evals.fixtures import FixturePreparer
+            from crucible.repair.evaluation import RepairEvaluation
+
+            repair_image = os.environ.get("CRUCIBLE_REPAIR_IMAGE", "")
+            evaluation = RepairEvaluation(
+                unit_of_work,
+                clock,
+                artifact_service,
+                main_root=Path(__file__).parents[4],
+                data_dir=data_dir,
+                runtime_identity=runtime_identity,
+                model=model,
+                worker_factory=lambda: WorkerSupervisor(
+                    docker,
+                    image=repair_image,
+                    root=data_dir / "repair-workers",
+                    gateway=scoped_gateway,
+                ),
+                gateway=scoped_gateway,
+                fixtures=FixturePreparer(data_dir),
+                evaluators=lambda partition: EvaluatorRegistry(
+                    data_dir=data_dir,
+                    artifacts=artifact_service,
+                    sandbox=sandbox_backend,
+                    partition_root=Path(__file__).parents[4]
+                    / "evals"
+                    / partition.value,
+                ),
+                image=repair_image,
+                instruction_digest=digest(
+                    "Follow harness safety and execution policy."
+                ),
+                tool_schema_digest=digest(registry.definitions),
+                prompt_digest=digest("compaction-v1"),
+                budgets=run_budgets
+                or EvalBudgets(
+                    max_steps=int(os.environ.get("CRUCIBLE_MAX_STEPS", "20")),
+                    max_tool_calls=int(
+                        os.environ.get("CRUCIBLE_MAX_TOOL_CALLS", "100")
+                    ),
+                    max_model_tokens=int(
+                        os.environ.get("CRUCIBLE_MAX_MODEL_TOKENS", "200000")
+                    ),
+                    max_active_seconds=int(
+                        os.environ.get("CRUCIBLE_MAX_ACTIVE_SECONDS", "600")
+                    ),
+                ),
+            )
+            repair_controller = RepairController(
+                unit_of_work,
+                clock,
+                roles,
+                incident,
+                artifact_service,
+                evaluation=evaluation,
+                recovery=ManagedRepairWorkspace(
+                    unit_of_work,
+                    artifact_service,
+                    main_root=Path(__file__).parents[4],
+                    runtime_identity=runtime_identity,
+                ),
+                notifier=notifier,
+                execution_id=repair_service.execution_id,
+            )
+            repair_service.bind_scheduler(repair_controller)
         return cls(
+            repair_controller=repair_controller,
             repair_service=repair_service,
             model_id=model,
             database=database,
@@ -322,14 +503,7 @@ class ApplicationContainer:
             eval_sandbox=sandbox_backend,
             runtime_identity=runtime_identity,
             evidence=evidence,
-            repair_gateway=ScopedModelGateway(
-                gateway,
-                clock=clock,
-                endpoint=os.environ.get(
-                    "CRUCIBLE_REPAIR_GATEWAY_ENDPOINT",
-                    "http://host.docker.internal:8000/internal/repair-model/responses",
-                ),
-            ),
+            repair_gateway=scoped_gateway,
             context_manager=context_manager,
             tool_dispatcher=dispatcher,
             command_sandbox=command_sandbox,

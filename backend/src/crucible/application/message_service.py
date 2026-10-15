@@ -131,7 +131,7 @@ class MessageService:
                     response_status=previous.response_status,
                 )
             task = await uow.tasks.get(task_id)
-            if task is None:
+            if task is None or task.internal_repair_id is not None:
                 raise TaskNotFound(f"Task not found: {task_id}")
             if task.status is TaskStatus.ACCEPTED:
                 task = task.reopen(self._clock)
@@ -280,7 +280,7 @@ class MessageService:
     async def _ensure_continuation(self, task_id: UUID) -> None:
         async with self._unit_of_work() as uow:
             task = await uow.tasks.get(task_id)
-            if task is None:
+            if task is None or task.internal_repair_id is not None:
                 raise TaskNotFound(f"Task not found: {task_id}")
             if task.status not in (TaskStatus.INTEGRATED, TaskStatus.CONTINUING):
                 return
@@ -359,6 +359,6 @@ class MessageService:
     async def list(self, task_id: UUID) -> tuple[Message, ...]:
         async with self._unit_of_work() as uow:
             task = await uow.tasks.get(task_id)
-            if task is None:
+            if task is None or task.internal_repair_id is not None:
                 raise TaskNotFound(f"Task not found: {task_id}")
             return await uow.messages.list_for_task(task_id)

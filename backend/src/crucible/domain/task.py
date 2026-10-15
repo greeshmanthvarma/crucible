@@ -3,6 +3,7 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Self
+from uuid import UUID
 
 from crucible.domain.clock import Clock, require_utc
 from crucible.domain.errors import InvalidTransition
@@ -32,6 +33,7 @@ class Task:
     updated_at: datetime
     workspace_generation: int = 0
     workspace_base_revision: str | None = None
+    internal_repair_id: UUID | None = None
 
     def __post_init__(self) -> None:
         require_utc(self.created_at, self.updated_at)
