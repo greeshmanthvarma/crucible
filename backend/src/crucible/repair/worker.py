@@ -4,6 +4,8 @@ import asyncio
 import json
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,46 @@ if __name__ == "__main__":
     if not Path("/.dockerenv").exists() or not Path("/job/request.json").is_file():
         raise SystemExit("Worker entry requires a controller-launched Docker job")
     sys.path.insert(0, "/harness/backend/src")
+
+
+def bounded_detail(value: str) -> str:
+    return value.encode("utf-8")[:1024].decode("utf-8", errors="ignore")
+
+
+class WorkerInfrastructureFailure(Exception):
+    """Model transport/provider errors are never incident reproduction."""
+
+
+class WorkerBehaviorFailure(Exception):
+    def __init__(self, error: Exception) -> None:
+        self.code = type(error).__name__
+        self.detail = bounded_detail(str(error))
+        super().__init__(self.detail)
+
+
+@contextmanager
+def behavior_errors() -> Iterator[None]:
+    """Classify exceptions only inside the admitted behavior entry boundary."""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    try:
+        yield
+    except (OSError, TimeoutError, SQLAlchemyError):
+        raise
+    except Exception as error:
+        cause: BaseException | None = error
+        seen: set[int] = set()
+        while cause is not None and id(cause) not in seen:
+            seen.add(id(cause))
+            if isinstance(
+                cause,
+                (WorkerInfrastructureFailure, OSError, TimeoutError, SQLAlchemyError),
+            ):
+                raise WorkerInfrastructureFailure(
+                    "Model or worker infrastructure failed"
+                ) from error
+            cause = cause.__cause__ or cause.__context__
+        raise WorkerBehaviorFailure(error) from error
 
 
 async def execute_job(job: Any) -> Any:
@@ -46,6 +88,7 @@ async def execute_job(job: Any) -> Any:
     from crucible.engine.compaction_gateway import ModelCompactionGateway
     from crucible.engine.gateway import (
         CompleteToolCall,
+        ModelError,
         ModelStop,
         ModelStopReason,
         ModelUsage,
@@ -101,17 +144,26 @@ async def execute_job(job: Any) -> Any:
 
         async def stream(self, request: Any) -> Any:
             chunks = []
-            async for event in model_gateway.stream(request):
-                if isinstance(event, TextDelta):
-                    chunks.append(event.text)
-                yield event
+            try:
+                async for event in model_gateway.stream(request):
+                    if isinstance(event, ModelError):
+                        raise WorkerInfrastructureFailure(
+                            "Model request could not complete"
+                        )
+                    if isinstance(event, TextDelta):
+                        chunks.append(event.text)
+                    yield event
+            except Exception as error:
+                raise WorkerInfrastructureFailure(
+                    "Model request could not complete"
+                ) from error
             self.responses.append("".join(chunks))
 
     capture_gateway = CapturingGateway()
     container = await ApplicationContainer.create(
         url,
         state,
-        gateway_factory=lambda: model_gateway,
+        gateway_factory=lambda: capture_gateway,
         model_id=model,
         context_limits=(
             int(settings.get("input_limit", 100_000)),
@@ -201,6 +253,12 @@ async def execute_job(job: Any) -> Any:
                             error_code=None
                             if terminal.status == RunStatus.COMPLETED
                             else "repository_run_failed",
+                            tool_result={
+                                "run_status": terminal.status.value,
+                                "run_outcome_code": terminal.outcome_code,
+                            },
+                            detail=bounded_detail(terminal.outcome_detail or "")
+                            or None,
                         )
                     await asyncio.sleep(0.05)
             except BaseException:
@@ -328,31 +386,34 @@ async def execute_job(job: Any) -> Any:
                     )
                 )
                 await uow.commit()
-        if kind == "compaction":
-            units = group_conversation_units(
-                remapped, {result.id: result.tool_call_id for result in results}
-            )
-            boundary = select_compaction_boundary(
-                units,
-                retain_complete_units=int(settings.get("retain_complete_units", 0)),
-            )
-            if boundary is None:
-                raise ValueError("Captured context has no complete compaction prefix")
-            validate_compaction_boundary(
-                boundary,
-                remapped,
-                {result.id: result.tool_call_id for result in results},
-            )
-            lifecycle = CompactionLifecycle(
-                container.unit_of_work,
-                container.artifact_service,
-                ModelCompactionGateway(capture_gateway),
-                clock,
-                attempt_limit=1,
-                model=model,
-            )
-            await lifecycle.compact(run, boundary, step_id=step.id)
-        prepared = await container.context_manager.prepare(run, step)
+        with behavior_errors():
+            if kind == "compaction":
+                units = group_conversation_units(
+                    remapped, {result.id: result.tool_call_id for result in results}
+                )
+                boundary = select_compaction_boundary(
+                    units,
+                    retain_complete_units=int(settings.get("retain_complete_units", 0)),
+                )
+                if boundary is None:
+                    raise ValueError(
+                        "Captured context has no complete compaction prefix"
+                    )
+                validate_compaction_boundary(
+                    boundary,
+                    remapped,
+                    {result.id: result.tool_call_id for result in results},
+                )
+                lifecycle = CompactionLifecycle(
+                    container.unit_of_work,
+                    container.artifact_service,
+                    ModelCompactionGateway(capture_gateway),
+                    clock,
+                    attempt_limit=1,
+                    model=model,
+                )
+                await lifecycle.compact(run, boundary, step_id=step.id)
+            prepared = await container.context_manager.prepare(run, step)
         summary = None
         if kind == "compaction":
             # The parser has already validated the response and lifecycle stored it.
@@ -410,6 +471,13 @@ async def main() -> None:
             status="error",
             error_code="deadline_exceeded",
             detail="Worker deadline exceeded",
+        )
+    except WorkerBehaviorFailure as error:
+        observation = WorkerObservation(
+            job_id=job.job_id,
+            status="error",
+            error_code=error.code,
+            detail=error.detail,
         )
     except Exception as error:
         observation = WorkerObservation(

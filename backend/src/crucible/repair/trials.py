@@ -276,6 +276,7 @@ class TrialService:
                     result.repeat_index == repeat_index
                     and result.source_digest == source.tree_digest
                     and result.verdict in {"pass", "fail"}
+                    and result.assertion_results
                     and job is not None
                     and job.status == "completed"
                     and job.case_digest == case.case_digest
@@ -627,6 +628,7 @@ class TrialService:
                             and result.source_digest == source.tree_digest
                             and result.repeat_index == repeat
                             and result.verdict in {"pass", "fail"}
+                            and result.assertion_results
                             and (
                                 side == "baseline"
                                 or (
@@ -746,7 +748,22 @@ class TrialService:
                             else "fail"
                         )
                     elif observed.error_code == "repository_run_failed":
-                        verdict = "fail"
+                        provenance = observed.tool_result or {}
+                        # Only an authoritative validation failure is established
+                        # behavior. Provider and ambiguous outcomes stay error.
+                        if (
+                            provenance.get("run_status") == "failed"
+                            and provenance.get("run_outcome_code")
+                            == "validation_failed"
+                        ):
+                            verdict = "fail"
+                            assertions.append(
+                                {
+                                    "op": "repository_validation",
+                                    "passed": False,
+                                    "run_outcome_code": "validation_failed",
+                                }
+                            )
                 if await capture_source_identity(self.source_root) != source:
                     verdict = "error"
                 result = TrialEvidence(

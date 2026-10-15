@@ -23,6 +23,7 @@ class BaselineCache:
                 if (
                     result.repeat_index == repeat_index
                     and result.verdict in {"pass", "fail"}
+                    and result.assertion_results
                     and job is not None
                     and job.status == "completed"
                 ):

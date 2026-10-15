@@ -128,17 +128,26 @@ async def export_source(source: Path, destination: Path) -> None:
         target.chmod(0o555 if path.stat().st_mode & stat.S_IXUSR else 0o444)
 
 
-def _copy_workspace(source: Path, destination: Path) -> None:
+def _copy_workspace(
+    source: Path, destination: Path, *, exclude_git: bool = False
+) -> None:
     if source.is_symlink() or not source.is_dir():
         raise ValueError("Unsafe workspace root")
     for parent, directories, files in os.walk(source, followlinks=False):
+        if exclude_git:
+            directories[:] = [name for name in directories if name != ".git"]
+            files = [name for name in files if name != ".git"]
         for name in directories + files:
             if name == ".env" or name.startswith(".env."):
                 raise ValueError("Environment files cannot enter worker fixtures")
             mode = (Path(parent) / name).lstat().st_mode
             if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
                 raise ValueError("Unsafe workspace entry")
-    shutil.copytree(source, destination)
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns(".git") if exclude_git else None,
+    )
 
 
 def worker_container_arguments(
@@ -287,10 +296,9 @@ class WorkerSupervisor:
             if original_identity.tree_digest != job.source_digest:
                 raise ValueError("Source differs from the frozen job identity")
             await export_source(source, harness)
-            _copy_workspace(fixture, workspace)
+            # Export content only, including for Git clones/worktrees.
+            _copy_workspace(fixture, workspace, exclude_git=True)
             # Create disposable Git metadata; never inherit host Git state.
-            if (workspace / ".git").exists():
-                raise ValueError("Fixture cannot contain Git metadata")
             await _git(workspace, "init", "-q")
             await _git(workspace, "add", "--all")
             await _git(
