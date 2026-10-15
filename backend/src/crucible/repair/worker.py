@@ -36,6 +36,7 @@ async def execute_job(job: Any) -> Any:
         MessageRole,
         MessageStatus,
     )
+    from crucible.domain.evals import EvalBudgets
     from crucible.domain.ids import new_id
     from crucible.domain.repository import Repository
     from crucible.domain.run import Run
@@ -117,10 +118,24 @@ async def execute_job(job: Any) -> Any:
             int(settings.get("output_reserve", 4096)),
         ),
         worker_job=job,
+        run_budgets=TypeAdapter(EvalBudgets).validate_python(manifest["budgets"])
+        if manifest.get("kind") == "repository"
+        else None,
     )
     task_id, run_id = uuid5(job.job_id, "task"), uuid5(job.job_id, "run")
     try:
-        repository = Repository(new_id(), workspace, clock.now())
+        from crucible.domain.repository import RepositorySettings
+
+        repository = Repository(
+            new_id(),
+            workspace,
+            clock.now(),
+            TypeAdapter(RepositorySettings).validate_python(
+                manifest["repository_settings"]
+            )
+            if manifest.get("kind") == "repository"
+            else RepositorySettings(),
+        )
         task = Task.provisioning(
             task_id=task_id,
             repository_id=repository.id,
@@ -135,15 +150,62 @@ async def execute_job(job: Any) -> Any:
             task_id=task_id,
             triggering_message_id=None,
             created_at=clock.now(),
+            settings_snapshot=repository.settings,
         )
         step = Step.preparing(new_id(), task_id, run_id, 1, clock.now())
         async with container.unit_of_work() as uow:
             await uow.repositories.add_if_absent(repository)
             await uow.tasks.add(task)
             await uow.runs.add(run)
-            await uow.steps.add(step)
+            if manifest.get("kind") != "repository":
+                await uow.steps.add(step)
             await uow.commit()
         kind = manifest.get("kind")
+        if kind == "repository":
+            from crucible.domain.run import RunStatus
+
+            prompt = manifest.get("prompt")
+            if not isinstance(prompt, str):
+                raise ValueError("Repository prompt is missing")
+            message = Message(
+                new_id(),
+                task_id,
+                run_id,
+                None,
+                0,
+                MessageRole.USER,
+                MessageStatus.COMPLETED,
+                (MessagePart(new_id(), 1, MessagePartKind.TEXT, prompt),),
+                clock.now(),
+                clock.now(),
+            )
+            async with container.unit_of_work() as uow:
+                await uow.messages.add(message)
+                await uow.runs.set_triggering_message(run_id, message.id)
+                await uow.commit()
+            await container.supervisor.submit(run_id)
+            try:
+                while True:
+                    async with container.unit_of_work() as uow:
+                        terminal = await uow.runs.get(run_id)
+                    if terminal and terminal.status not in {
+                        RunStatus.QUEUED,
+                        RunStatus.RUNNING,
+                        RunStatus.VALIDATING,
+                    }:
+                        return WorkerObservation(
+                            job_id=job.job_id,
+                            status="completed"
+                            if terminal.status == RunStatus.COMPLETED
+                            else "error",
+                            error_code=None
+                            if terminal.status == RunStatus.COMPLETED
+                            else "repository_run_failed",
+                        )
+                    await asyncio.sleep(0.05)
+            except BaseException:
+                await container.supervisor.cancel(run_id)
+                raise
         if kind == "tool":
             assistant = Message(
                 new_id(),
@@ -297,13 +359,34 @@ async def execute_job(job: Any) -> Any:
             # Recorded text is reused only when explicitly supplied by the controller.
             if capture_gateway.responses:
                 summary = json.loads(capture_gateway.responses[-1])
+        context_messages = json.loads(canonical_json(prepared.request.messages))
+        retained = []
+        sources = settings.get("source_messages", [])
+        for message in context_messages:
+            match = next(
+                (
+                    source
+                    for source in sources
+                    if isinstance(source, dict)
+                    and {
+                        key: value
+                        for key, value in source.items()
+                        if key != "conversation_sequence"
+                    }
+                    == message
+                ),
+                None,
+            )
+            if match is not None:
+                retained.append(match)
+            elif message.get("role") != "system":
+                retained.append(message)
         return WorkerObservation.model_validate(
             {
                 "job_id": job.job_id,
                 "status": "completed",
-                "context_messages": json.loads(
-                    canonical_json(prepared.request.messages)
-                ),
+                "context_messages": context_messages,
+                "tool_result": {"retained_messages": retained},
                 "summary": summary,
             }
         )

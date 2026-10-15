@@ -325,3 +325,36 @@ def test_sealed_nested_json_comparison_preserves_boolean_types(
         case.case, observation(), *workspaces, phase="candidate"
     )
     assert all(result.passed for result in results) is passed
+
+
+@pytest.mark.parametrize("reversed_order", [False, True])
+def test_retained_conversation_order_separate_from_full_request(
+    workspaces, reversed_order
+):
+    source = [
+        {
+            "conversation_sequence": i,
+            "role": "user",
+            "parts": [{"kind": "text", "text_content": str(i)}],
+        }
+        for i in range(2)
+    ]
+    case = make_case(
+        [{"op": "retained_messages_ordered"}], settings={"source_messages": source}
+    )
+    retained = list(reversed(source)) if reversed_order else source
+    full_request = [
+        {
+            "role": "system",
+            "parts": [{"kind": "text", "text_content": "Protected instructions"}],
+        }
+    ] + source
+    results = verify_observation(
+        case,
+        observation(
+            context_messages=full_request, tool_result={"retained_messages": retained}
+        ),
+        *workspaces,
+        "candidate",
+    )
+    assert all(result.passed for result in results) is (not reversed_order)

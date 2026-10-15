@@ -218,6 +218,7 @@ class WorkerExecution:
     termination: str
     usage: TrustedUsage
     wall_seconds: float
+    initial_workspace_snapshot: Path | None = None
 
 
 class WorkerSupervisor:
@@ -272,6 +273,7 @@ class WorkerSupervisor:
             for name in ("harness", "workspace", "state", "job", "driver")
         )
         snapshot = directory / "snapshot"
+        initial_snapshot = directory / "initial-snapshot"
         container: str | None = None
         relay: str | None = None
         network: str | None = None
@@ -307,6 +309,7 @@ class WorkerSupervisor:
                 path.chmod(0o777 if path in (workspace, state) else 0o755)
             for path in workspace.rglob("*"):
                 path.chmod(0o777 if path.is_dir() else 0o666)
+            _copy_workspace(workspace, initial_snapshot)
             (request_dir / "request.json").write_text(job.model_dump_json())
             (request_dir / "request.json").chmod(0o444)
             # The launch script is controller-owned, separate from candidate source.
@@ -474,4 +477,5 @@ class WorkerSupervisor:
             termination,
             self.gateway.usage(job.job_id) if self.gateway else TrustedUsage(),
             time.monotonic() - started,
+            initial_snapshot if initial_snapshot.exists() else None,
         )

@@ -58,6 +58,10 @@ def _read(root: Path, name: str) -> bytes | None:
 def _inventory(root: Path) -> dict[str, tuple[str, int]]:
     inventory = {}
     for parent, directories, files in os.walk(root, followlinks=False):
+        # Git metadata is supervisor-created infrastructure, outside case files.
+        if Path(parent) == root:
+            directories[:] = [name for name in directories if name != ".git"]
+            files = [name for name in files if name != ".git"]
         for name in directories + files:
             path = Path(parent) / name
             metadata = path.lstat()
@@ -217,6 +221,9 @@ def _assert(
     if op == "tool_pairs_complete":
         return _pairs(selected), "Tool exchange identities inspected"
     if op == "retained_messages_ordered":
+        retained = observed.get("tool_result")
+        if isinstance(retained, dict) and "retained_messages" in retained:
+            selected = _messages(retained["retained_messages"])
         return _ordered(
             selected, _messages(settings.get("source_messages"))
         ), "Ordered source subsequence inspected"

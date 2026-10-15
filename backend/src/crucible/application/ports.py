@@ -1,7 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Protocol, Self
+from typing import TYPE_CHECKING, Protocol, Self
 from uuid import UUID
 
 from crucible.application.idempotency import IdempotencyRecord
@@ -249,7 +249,28 @@ class EventNotifier(Protocol):
     async def notify(self, task_id: UUID) -> None: ...
 
 
+if TYPE_CHECKING:
+    from crucible.repair.incident_suite import AcceptedIncident
+    from crucible.repair.trials import TrialEvidence, TrialJob
+
+
+class RepairTrialStore(Protocol):
+    async def add_incident(self, record: "AcceptedIncident") -> None: ...
+    async def list_incidents(self) -> tuple["AcceptedIncident", ...]: ...
+    async def add_job(self, job: "TrialJob") -> None: ...
+    async def update_job(self, job: "TrialJob") -> None: ...
+    async def get_job(self, job_id: UUID) -> "TrialJob | None": ...
+    async def list_jobs(self, invocation_id: UUID) -> tuple["TrialJob", ...]: ...
+    async def add_result(
+        self, result: "TrialEvidence", termination: str = "completed"
+    ) -> None: ...
+    async def list_results(
+        self, fingerprint: str, case_id: str, side: str
+    ) -> tuple["TrialEvidence", ...]: ...
+
+
 class UnitOfWork(Protocol):
+    repair_trials: RepairTrialStore
     repair_evidence: EvidenceStore
     evals: EvalStore
     repositories: RepositoryStore
