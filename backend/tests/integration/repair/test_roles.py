@@ -20,6 +20,100 @@ from tests.integration.repair.test_admission import environment
 from tests.integration.storage.test_tool_loop_storage import CLOCK, NOW
 
 
+def test_diagnosis_schema_excludes_controller_owned_case_fields():
+    from crucible.repair.roles import role_result_schema
+
+    schema = role_result_schema("diagnosis")
+    for name in ("ToolCase", "ContextSelectionCase", "CompactionCase"):
+        properties = schema["$defs"][name]["properties"]
+        assert "fixture_manifest_digest" not in properties
+        assert "settings" not in properties
+    assert schema["anyOf"][1]["properties"]["fix_items"]["maxItems"] == 0
+
+
+def test_invalid_diagnosis_feedback_explains_cross_field_rule_without_echoing_input():
+    raw = json.dumps(
+        {
+            "decision": "unsupported",
+            "reasons": ["PRIVATE_SENTINEL"],
+            "fix_items": [{"mechanism": "PRIVATE_SENTINEL", "decision": "unsupported"}],
+        }
+    )
+    with pytest.raises(
+        ValueError, match="non-repairable diagnosis requires fix_items"
+    ) as error:
+        parse_role_result("diagnosis", raw)
+    assert "PRIVATE_SENTINEL" not in str(error.value)
+
+
+def test_diagnosis_accepts_proposal_without_controller_owned_fields():
+    result = parse_role_result(
+        "diagnosis",
+        json.dumps(
+            {
+                "decision": "repairable",
+                "reasons": ["Exact text was truncated"],
+                "fix_items": [
+                    {
+                        "mechanism": "Trailing newlines removed",
+                        "fixture_files": {"result.txt": None},
+                        "proposed_case": {
+                            "kind": "tool",
+                            "case_id": "exact-write",
+                            "replay_mode": "direct",
+                            "incident_ids": {"task": str(uuid4()), "run": str(uuid4())},
+                            "expected_baseline_failure": {
+                                "status": "error",
+                                "error_code": "write_incomplete",
+                            },
+                            "candidate_assertions": [
+                                {
+                                    "op": "file_text_equals",
+                                    "path": "result.txt",
+                                    "value": "alpha\nbeta\n\n",
+                                }
+                            ],
+                            "expected_behavior": "Preserve exact text",
+                            "evidence_ids": [],
+                            "tool_name": "write_file",
+                            "arguments": {
+                                "path": "result.txt",
+                                "content": "alpha\nbeta\n\n",
+                            },
+                        },
+                    }
+                ],
+            }
+        ),
+    )
+    assert result.fix_items[0].proposed_case.fixture_manifest_digest == ""
+    assert result.fix_items[0].proposed_case.settings == {}
+
+
+def test_prepared_case_still_requires_controller_owned_fields():
+    from crucible.repair.cases import ToolCase
+
+    with pytest.raises(ValueError):
+        ToolCase.model_validate({"kind": "tool"})
+
+
+def test_validation_feedback_redacts_unknown_field_names():
+    with pytest.raises(ValueError) as error:
+        parse_role_result(
+            "diagnosis",
+            json.dumps(
+                {
+                    "decision": "unsupported",
+                    "reasons": ["No supported replay"],
+                    "fix_items": [],
+                    "PRIVATE_SENTINEL": "PRIVATE_SENTINEL",
+                }
+            ),
+        )
+    assert "extra_forbidden" in str(error.value)
+    assert "PRIVATE_SENTINEL" not in str(error.value)
+
+
 class Provider:
     def __init__(self, outputs):
         self.outputs = list(outputs)

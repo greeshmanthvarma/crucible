@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias, cast
 from uuid import UUID, uuid4
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from crucible.application.artifact_service import ArtifactService
 from crucible.application.ports import EventNotifier, UnitOfWork
@@ -70,7 +70,10 @@ class DiagnosisResult(StrictModel):
     @model_validator(mode="after")
     def valid_items(self) -> "DiagnosisResult":
         if (self.decision == "repairable") != bool(self.fix_items):
-            raise ValueError("Repairable diagnosis requires fix items only")
+            raise ValueError(
+                "repairable diagnosis requires nonempty fix_items; "
+                "non-repairable diagnosis requires fix_items=[]"
+            )
         return self
 
 
@@ -111,11 +114,76 @@ class RoleLimitError(RoleOutputError):
         super().__init__(f"Role reached {code}; use targeted evidence retrieval.")
 
 
+def role_result_schema(role: Role) -> dict[str, Any]:
+    """Proposal wire contract; prepared cases retain their strict stored schema."""
+    schema = RESULT_TYPES[role].model_json_schema()
+    if role != "diagnosis":
+        return schema
+    for name in ("ToolCase", "ContextSelectionCase", "CompactionCase"):
+        definition = schema["$defs"][name]
+        for field in ("fixture_manifest_digest", "settings"):
+            definition["properties"].pop(field)
+            definition["required"].remove(field)
+    schema["anyOf"] = [
+        {
+            "properties": {
+                "decision": {"const": "repairable"},
+                "fix_items": {"minItems": 1},
+            }
+        },
+        {
+            "properties": {
+                "decision": {
+                    "enum": ["unsupported", "no_change_needed", "already_resolved"]
+                },
+                "fix_items": {"maxItems": 0},
+            }
+        },
+    ]
+    return schema
+
+
 def parse_role_result(role: Role, raw: str) -> RoleResult:
     if len(raw.encode()) > 1_000_000:
         raise RoleOutputError("Role result exceeds output limit")
     try:
-        return cast(RoleResult, RESULT_TYPES[role].model_validate_json(raw))
+        value = json.loads(raw)
+        if role == "diagnosis" and isinstance(value, dict):
+            items = value.get("fix_items")
+            for item in items if isinstance(items, list) else []:
+                case = item.get("proposed_case") if isinstance(item, dict) else None
+                if isinstance(case, dict):
+                    # These placeholders are never authoritative: _prepare_case
+                    # derives both values from protected historical evidence.
+                    case.setdefault("fixture_manifest_digest", "")
+                    case.setdefault("settings", {})
+        return cast(RoleResult, RESULT_TYPES[role].model_validate(value))
+    except ValidationError as error:
+        details = []
+        schema = RESULT_TYPES[role].model_json_schema()
+        fields = set(schema.get("properties", {}))
+        for definition in schema.get("$defs", {}).values():
+            fields.update(definition.get("properties", {}))
+        for issue in error.errors(include_input=False, include_url=False)[:5]:
+            location = (
+                ".".join(
+                    str(part) if isinstance(part, int) or part in fields else "[key]"
+                    for part in issue["loc"]
+                )[:180]
+                or "$"
+            )
+            # Never echo model-controlled values, custom validator messages,
+            # or Pydantic context (which can contain historical input).
+            details.append(f"{location}: {issue['type']}")
+        guidance = (
+            " A repairable diagnosis requires nonempty fix_items; "
+            "a non-repairable diagnosis requires fix_items=[]."
+            if role == "diagnosis"
+            else ""
+        )
+        raise RoleOutputError(
+            "Invalid role result: " + "; ".join(details) + guidance
+        ) from None
     except ValueError:
         raise RoleOutputError("Role returned an invalid structured result") from None
 
@@ -591,7 +659,7 @@ class RoleExecutor:
             inputs.append(json.loads(raw))
         prompt = role_prompt(
             role,
-            RESULT_TYPES[role].model_json_schema(),
+            role_result_schema(role),
             asdict(index),
             self.incident.safe(inputs),
         )

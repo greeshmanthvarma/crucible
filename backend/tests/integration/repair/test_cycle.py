@@ -98,8 +98,6 @@ async def cycle_environment(
         "incident_ids": {"task": str(task.id), "run": None},
         "kind": "tool",
         "replay_mode": "direct",
-        "fixture_manifest_digest": "controller-fills",
-        "settings": {},
         "expected_baseline_failure": {"status": "error", "error_code": "missing"},
         "candidate_assertions": [{"op": "output_text_contains", "value": "fixed"}],
         "expected_behavior": "A focused synthetic read should return the literal.",
