@@ -18,6 +18,8 @@ import {
 } from "../../events/taskEventStream";
 import { CommandApprovalCard } from "./ApprovalPanel";
 import { ToolCallCard } from "./ToolCallCard";
+import { RepairStatus } from "./RepairStatus";
+import { repairLink } from "./repairLink";
 import { useTaskSession } from "./useTaskSession";
 import { WorkspaceDiff } from "./WorkspaceDiff";
 import { ValidationTrace } from "./ValidationTrace";
@@ -120,6 +122,32 @@ export function TaskView({
           Run: {canonicalRunStatus}
         </p>
       </div>
+      {session.repairs.slice(-1).map((repair) => (
+        <RepairStatus
+          key={repair.repairId}
+          repair={repair}
+          stop={(key) => session.stopRepair(repair.repairId, key)}
+          command={(text, key) => session.send({ text, key })}
+        />
+      ))}
+      {session.repairResult && (
+        <div className="text-sm" role="status">
+          <p>{session.repairResult.detail}</p>
+          {session.repairResult.prUrls.map((url) =>
+            repairLink(url) ? (
+              <a
+                key={url}
+                className="mr-3 underline"
+                href={repairLink(url)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Review existing repair PR
+              </a>
+            ) : null,
+          )}
+        </div>
+      )}
       <MessageScrollerProvider
         autoScroll
         defaultScrollPosition="last-anchor"

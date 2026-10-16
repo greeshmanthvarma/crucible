@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type {
   CrucibleClient,
+  RepairStatusView,
+  RepairCommandResponse,
   ApprovalResponse,
   MessageResponse,
   StepTraceResponse,
@@ -30,6 +32,8 @@ export function useTaskSession(
   client: CrucibleClient,
   streamFactory: EventStreamFactory = openTaskEventStream,
 ) {
+  const [repairs, setRepairs] = useState<RepairStatusView[]>([]);
+  const [repairResult, setRepairResult] = useState<RepairCommandResponse>();
   const [task, setTask] = useState<TaskResponse>();
   const [messages, setMessages] = useState<MessageResponse[]>([]);
   const [trace, setTrace] = useState<StepTraceResponse[]>([]);
@@ -48,7 +52,9 @@ export function useTaskSession(
   });
   const eventState = useRef<TaskEventState>({ events: [], needsReplay: false });
 
+  const refreshVersion = useRef(0);
   const refresh = useCallback(async () => {
+    const version = ++refreshVersion.current;
     const [
       loadedTask,
       loadedMessages,
@@ -56,6 +62,7 @@ export function useTaskSession(
       loadedWorkspace,
       loadedApprovals,
       loadedReview,
+      loadedRepairs,
     ] = await Promise.all([
       client.getTask(taskId),
       client.getMessages(taskId),
@@ -63,17 +70,22 @@ export function useTaskSession(
       client.getWorkspaceState(taskId),
       client.getApprovals(taskId),
       client.getTaskReview?.(taskId) ?? Promise.resolve(emptyReview),
+      client.getRepairs?.(taskId) ?? Promise.resolve([]),
     ]);
+    if (version !== refreshVersion.current) return;
     setTask(loadedTask);
     setMessages(loadedMessages);
     setTrace(loadedTrace);
     setWorkspace(loadedWorkspace);
     setApprovals(loadedApprovals);
     setReview(loadedReview);
+    setRepairs(loadedRepairs);
   }, [client, taskId]);
 
   useEffect(() => {
     let disposed = false;
+    const version = ++refreshVersion.current;
+    eventState.current = { events: [], needsReplay: false };
     let stream: ReturnType<EventStreamFactory> | undefined;
     void Promise.all([
       client.getTask(taskId),
@@ -82,6 +94,7 @@ export function useTaskSession(
       client.getWorkspaceState(taskId),
       client.getApprovals(taskId),
       client.getTaskReview?.(taskId) ?? Promise.resolve(emptyReview),
+      client.getRepairs?.(taskId) ?? Promise.resolve([]),
     ]).then(
       ([
         loadedTask,
@@ -90,14 +103,18 @@ export function useTaskSession(
         loadedWorkspace,
         loadedApprovals,
         loadedReview,
+        loadedRepairs,
       ]) => {
-        if (disposed) return;
+        if (disposed || version !== refreshVersion.current) return;
+        setEvents(eventState.current);
+        setRepairResult(undefined);
         setTask(loadedTask);
         setMessages(loadedMessages);
         setTrace(loadedTrace);
         setWorkspace(loadedWorkspace);
         setApprovals(loadedApprovals);
         setReview(loadedReview);
+        setRepairs(loadedRepairs);
         let opened = false;
         stream = streamFactory(
           taskId,
@@ -106,13 +123,28 @@ export function useTaskSession(
             if (next === eventState.current) return;
             eventState.current = next;
             setEvents(next);
-            void refresh();
+            void refresh().catch((reason) =>
+              setError(
+                reason instanceof Error ? reason.message : "Refresh failed",
+              ),
+            );
           },
           () => {
-            if (opened) void refresh();
+            if (opened)
+              void refresh().catch((reason) =>
+                setError(
+                  reason instanceof Error ? reason.message : "Refresh failed",
+                ),
+              );
             opened = true;
           },
         );
+      },
+      (reason) => {
+        if (!disposed)
+          setError(
+            reason instanceof Error ? reason.message : "Task load failed",
+          );
       },
     );
     return () => {
@@ -126,7 +158,16 @@ export function useTaskSession(
     setFailedRequest(undefined);
     setError("");
     try {
-      await client.sendMessage(taskId, payload.text, payload.key);
+      const response = await client.sendMessage(
+        taskId,
+        payload.text,
+        payload.key,
+      );
+      setRepairResult(
+        response && "prUrls" in response && response.kind === "repair_command"
+          ? response
+          : undefined,
+      );
       setPending(undefined);
       await refresh();
     } catch (reason) {
@@ -135,6 +176,11 @@ export function useTaskSession(
       setError(reason instanceof Error ? reason.message : "Message failed");
       throw reason;
     }
+  }
+
+  async function stopRepair(repairId: string, key: string) {
+    await client.stopRepair(repairId, key);
+    await refresh();
   }
 
   async function decideApproval(
@@ -171,6 +217,9 @@ export function useTaskSession(
 
   return {
     task,
+    repairs,
+    repairResult,
+    stopRepair,
     messages,
     trace,
     workspace,

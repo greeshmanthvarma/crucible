@@ -39,7 +39,8 @@ it("registers, creates a task, reconstructs it, and submits a message", async ()
       else if (url === "/api/tasks") body = [];
       else if (url.endsWith("/tasks") && init?.method === "POST") body = task;
       else if (url === "/api/tasks/task") body = task;
-      else if (url.endsWith("/approvals")) body = [];
+      else if (url.endsWith("/approvals") || url.endsWith("/repairs"))
+        body = [];
       else if (url.endsWith("/review")) {
         body = {
           latestRunStatus: null,

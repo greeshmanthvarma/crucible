@@ -6,6 +6,10 @@ export type RepositoryTargetResponse =
   components["schemas"]["RepositoryTargetResponse"];
 export type TaskResponse = components["schemas"]["TaskResponse"];
 export type MessageResponse = components["schemas"]["MessageResponse"];
+export type RepairStatusView = components["schemas"]["RepairStatusResponse"];
+export type RepairCommandResponse =
+  components["schemas"]["RepairCommandResponse"];
+export type MessageSubmission = SubmittedRunResponse | RepairCommandResponse;
 export type SubmittedRunResponse =
   components["schemas"]["SubmittedRunResponse"];
 export type StepTraceResponse = components["schemas"]["StepTraceResponse"];
@@ -87,6 +91,11 @@ export interface CrucibleClient {
   getTaskTrace(taskId: string): Promise<StepTraceResponse[]>;
   getWorkspaceState(taskId: string): Promise<WorkspaceStateResponse>;
   getApprovals(taskId: string): Promise<ApprovalResponse[]>;
+  getRepairs(taskId: string): Promise<RepairStatusView[]>;
+  stopRepair(
+    repairId: string,
+    idempotencyKey: string,
+  ): Promise<RepairStatusView>;
   getTaskReview(taskId: string): Promise<TaskReviewResponse>;
   acceptTask(
     taskId: string,
@@ -110,7 +119,7 @@ export interface CrucibleClient {
     taskId: string,
     text: string,
     idempotencyKey: string,
-  ): Promise<SubmittedRunResponse>;
+  ): Promise<MessageSubmission>;
 }
 
 export const apiClient: CrucibleClient = {
@@ -134,6 +143,13 @@ export const apiClient: CrucibleClient = {
   getTaskTrace: (taskId) => request(`/api/tasks/${taskId}/trace`),
   getWorkspaceState: (taskId) => request(`/api/tasks/${taskId}/workspace`),
   getApprovals: (taskId) => request(`/api/tasks/${taskId}/approvals`),
+  getRepairs: (taskId) => request(`/api/tasks/${taskId}/repairs`),
+  stopRepair: (repairId, idempotencyKey) =>
+    request(`/api/repairs/${repairId}/stop`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: "{}",
+    }),
   getTaskReview: (taskId) => request(`/api/tasks/${taskId}/review`),
   acceptTask: (taskId, idempotencyKey) =>
     request(`/api/tasks/${taskId}/acceptances`, {

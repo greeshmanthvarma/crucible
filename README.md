@@ -6,9 +6,8 @@ human approval, and the harness—not the model—owns validation, acceptance, a
 integration.
 
 It is built as an eval-driven system: ordinary Tasks and Runs produce durable
-traces, and a Modest Eval Runner scores pinned fixtures offline. Self-improvement
-campaigns are future work; the harness and evaluation substrate are what this
-milestone ships.
+traces, and a Modest Eval Runner scores pinned fixtures offline. Bounded repair runs can diagnose supported failures, verify candidate fixes in
+isolated workers, and publish one PR for manual review.
 
 ## Why it exists
 
@@ -295,3 +294,73 @@ export CRUCIBLE_DOCKER_TEST_IMAGE='example/runner@sha256:...'
 cd backend
 uv run pytest -m docker tests/integration/sandbox/test_docker_lifecycle.py -q
 ```
+
+## Repair runs
+
+In a chat with a failed Run, send `/repair`. The host diagnoses the incident,
+reviews a sealed reproduction, verifies its baseline, and tries up to three
+proposals per independently approved fix. Accepted fixes advance the next fix's
+baseline. Fixed development and private validation gates must not regress.
+The compact repair card survives refresh and shows the stage, charged role
+attempts, safe outcome and PR link. Ordinary command approvals remain unchanged.
+
+Use **Stop repair** to cancel active execution. Send `/repair resume` (or use
+**Resume repair**) after stopping, an interruption or an infrastructure error;
+startup never resumes automatically. `/repair close` closes an inactive repair
+without deleting its evidence or worktree. Unknown edits stop for review and are
+preserved. Stop before closing an active repair. The branch `repair/<repair-id>`
+and `CRUCIBLE_DATA_DIR/repair-worktrees/<repair-id>` are retained.
+
+Run the committed harness from a clean, current `main` checkout and restart it
+before real repairs. Admission fetches remote main without changing working files
+and checks the running source identity. Configure the Crucible origin on GitHub,
+authenticate `gh` on the host, and keep Git author identity configured. One repair
+executes globally; an existing open repair PR blocks another, including a repair
+whose label application failed. Publication retries discover the saved head/base
+PR before creating one. No accepted commits means no PR. Publication never
+force-pushes or merges; merge the PR and update/restart main manually.
+
+Repair workers require Docker and a locally available image pinned by digest:
+
+```sh
+export CRUCIBLE_REPAIR_IMAGE='your-worker@sha256:<full-image-digest>'
+export CRUCIBLE_MODEL='your-provider/model'
+# Set the selected provider's credential on the host, e.g. OPENAI_API_KEY.
+export CRUCIBLE_REPAIR_GATEWAY_ENDPOINT='http://host.docker.internal:8000/internal/repair-model/responses'
+```
+
+The gateway endpoint must be reachable from workers at the backend's actual port.
+Workers receive scoped, expiring gateway credentials and finite budgets; provider
+and GitHub credentials remain on the host. Diagnosis/review cannot edit source;
+proposal commands operate in the repair worktree, without private eval mounts.
+Missing historical evidence can make a reproduction unsupported; it must not be
+invented to obtain an improvement.
+
+Accepted incidents are private local regression data. Back up the database,
+`CRUCIBLE_DATA_DIR/artifacts`, `repair-incidents`, and `repair-fixtures` together;
+references alone are not portable. Keep these private files out of Git and PR
+bodies. The public PR report uses mechanism categories and observed counts, and
+includes measurement limits. A private local JSON report includes case IDs and
+provenance, so retain its output with private permissions:
+
+```sh
+cd backend
+umask 077
+uv run python scripts/report_repairs.py --database crucible.db <repair-id> > data/repair-report.json
+```
+
+The CLI reads durable role attempts (including invalid outputs and infrastructure
+retries), executed trial observations, reported versus estimated tokens, cache
+reuse and wall/execution intervals. Missing historical timings/cache records stay
+unavailable. Reused evidence is not added to executed-job token totals. Provider
+records do not prove a natural failure: `natural_failure_verified` remains false
+until a human separately verifies the source incident. Deterministic fixtures and
+scripted providers are plumbing checks, not natural-improvement measurements.
+
+For the live demonstration, first pass deterministic stop/resume/restoration and
+Docker containment checks. Choose an actual failed Run from normal work under the
+unchanged running harness, invoke `/repair`, and retain its private report and
+verified PR evidence. Do not seed a defect or change evaluation gates to obtain a
+success. If no supported improvement is found, record that result. The user
+reviews/merges the PR and restarts the updated harness. CI uses fake providers;
+paid provider calls and real publication are separate user-invoked work.

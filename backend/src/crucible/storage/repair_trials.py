@@ -62,6 +62,21 @@ class SqlAlchemyTrialStore:
                 jobs.append(job)
         return tuple(jobs)
 
+    async def list_for_repair(self, repair_id: UUID) -> tuple[TrialJob, ...]:
+        ids = (
+            await self.session.execute(
+                select(models.repair_trial_jobs.c.id).where(
+                    models.repair_trial_jobs.c.repair_id == str(repair_id)
+                )
+            )
+        ).scalars()
+        jobs = []
+        for value in ids:
+            job = await self.get_job(UUID(value))
+            if job is not None:
+                jobs.append(job)
+        return tuple(jobs)
+
     async def update_job(self, job: TrialJob) -> None:
         current = await self.get_job(job.id)
         if (

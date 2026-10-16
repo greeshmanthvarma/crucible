@@ -61,3 +61,26 @@ it("rotates the readable CSRF token after a browser reload", async () => {
   const mutation = fetchMock.mock.calls[1][1] as RequestInit;
   expect(new Headers(mutation.headers).get("X-CSRF-Token")).toBe("rotated");
 });
+
+it("uses session CSRF and an idempotency key when stopping a repair", async () => {
+  const { apiClient } = await import("../api/client");
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrfToken: "repair-csrf" })),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ repairId: "repair", status: "stopped" })),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+  await bootstrapSession("bootstrap");
+  await apiClient.stopRepair("repair", "stable-stop-key");
+  const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+  expect(url).toBe("/api/repairs/repair/stop");
+  expect(init.method).toBe("POST");
+  expect(init.credentials).toBe("include");
+  expect(new Headers(init.headers).get("X-CSRF-Token")).toBe("repair-csrf");
+  expect(new Headers(init.headers).get("Idempotency-Key")).toBe(
+    "stable-stop-key",
+  );
+});

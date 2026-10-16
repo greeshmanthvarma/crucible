@@ -10,7 +10,7 @@ format:
 
 lint:
 	cd backend && uv run ruff format --check src tests scripts
-	cd backend && uv run ruff check src tests scripts
+	cd backend && uv run ruff check --no-cache src tests scripts
 	cd frontend && pnpm exec prettier --check src tests package.json
 	cd frontend && pnpm lint
 

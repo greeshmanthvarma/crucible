@@ -389,6 +389,8 @@ class RepairController:
             ):
                 return
             state = await self._load_state(repair_id)
+            if not state:
+                state["baseline_batch_cache_hits"] = 0
             try:
                 repair = await self._recover_acceptance(repair, state, "reconcile")
                 configuration = self.roles.configuration_fingerprint
@@ -756,6 +758,18 @@ class RepairController:
 
                 baseline = TypeAdapter(TrialBatch).validate_python(
                     await self._json(state["baseline"])
+                )
+                state["baseline_batch_cache_hits"] = int(
+                    state.get("baseline_batch_cache_hits", 0)
+                ) + sum(
+                    len(rows)
+                    for suite in (
+                        baseline.custom,
+                        baseline.development,
+                        baseline.held_out,
+                        baseline.regressions,
+                    )
+                    for rows in suite.values()
                 )
             else:
                 baseline = await self.evaluation.baseline(

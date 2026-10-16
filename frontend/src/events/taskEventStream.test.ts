@@ -54,3 +54,32 @@ describe("reduceTaskEvents", () => {
     ]);
   });
 });
+
+it("replays repair updates into one card and rejects duplicate older transitions", () => {
+  const first = {
+    ...event("repair-start", 1),
+    type: "repair.updated",
+    payload: {
+      repair_id: "repair",
+      status: "running",
+      stage: "diagnosis",
+      attempts: { diagnosis: 1 },
+      outcome_code: null,
+      detail: null,
+      pr_url: null,
+    },
+  };
+  const second = {
+    ...first,
+    eventId: "repair-next",
+    taskSequence: 2,
+    payload: { ...first.payload, stage: "proposal" },
+  };
+  const state = reduceTaskEvents(
+    reduceTaskEvents({ events: [], needsReplay: false }, first),
+    second,
+  );
+  expect(state.repairs?.repair.stage).toBe("proposal");
+  expect(Object.keys(state.repairs ?? {})).toEqual(["repair"]);
+  expect(reduceTaskEvents(state, first)).toBe(state);
+});

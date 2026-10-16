@@ -7,6 +7,9 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      CRUCIBLE_MODEL: fake
+      PYTEST_ADDOPTS: "-m 'not docker and not real_model'"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

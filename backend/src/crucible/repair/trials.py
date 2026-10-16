@@ -199,6 +199,34 @@ class TrialService:
         self.artifacts, self.clock = artifacts, clock
         self.invocation_id, self.generation = invocation_id, candidate_generation
 
+    async def _record_cache_hit(self, result: TrialEvidence) -> None:
+        if self.repair_id is None:
+            return
+        from crucible.domain.repair import RepairCheckpoint
+        from crucible.repair.events import append_repair_event
+
+        async with self.factory() as uow:
+            await uow.repairs.lock()
+            repair = await uow.repairs.get(self.repair_id)
+            if repair is None:
+                raise ValueError("Repair missing")
+            await uow.repairs.add_checkpoint(
+                RepairCheckpoint(
+                    uuid4(),
+                    repair.id,
+                    repair.stage,
+                    repair.current_fix_id,
+                    None,
+                    result.fingerprint,
+                    repair.last_accepted_commit,
+                    {},
+                    {"cache_reuse": str(result.id)},
+                    self.clock.now(),
+                )
+            )
+            await append_repair_event(uow, self.clock, repair)
+            await uow.commit()
+
     async def _interrupt_running(self, side: str, fingerprints: set[str]) -> None:
         async with self.factory() as uow:
             for job in await uow.repair_trials.list_jobs(self.invocation_id):
@@ -290,6 +318,7 @@ class TrialService:
                         )
                     )
                 ):
+                    await self._record_cache_hit(result)
                     return result
         payload = await self._materialize(case)
         job = TrialJob(
@@ -406,7 +435,7 @@ class TrialService:
             observation_id,
             verdict,
             assertions,
-            asdict(execution.usage),
+            {**asdict(execution.usage), "worker_wall_seconds": execution.wall_seconds},
             self.clock.now(),
         )
         async with self.factory() as uow:
@@ -643,6 +672,7 @@ class TrialService:
                             cached = result
                             break
                 if cached is not None:
+                    await self._record_cache_hit(cached)
                     rows.append(cached)
                     continue
                 job = TrialJob(
@@ -780,7 +810,10 @@ class TrialService:
                     artifact_id,
                     verdict,
                     tuple(assertions),
-                    asdict(execution.usage),
+                    {
+                        **asdict(execution.usage),
+                        "worker_wall_seconds": execution.wall_seconds,
+                    },
                     self.clock.now(),
                 )
                 async with self.factory() as uow:
