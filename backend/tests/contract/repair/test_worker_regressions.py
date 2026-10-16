@@ -3,7 +3,7 @@
 import asyncio
 import json
 import socket
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -24,7 +24,13 @@ from crucible.domain.conversation import (
 )
 from crucible.domain.evals import EvalBudgets
 from crucible.domain.repository import RepositorySettings
-from crucible.engine.gateway import ModelError
+from crucible.domain.tools import (
+    ToolCall,
+    ToolExecutionMode,
+    ToolResult,
+    ToolResultStatus,
+)
+from crucible.engine.gateway import ModelError, ModelMessage, ModelPart, ModelRole
 from crucible.evals.fixtures import FixturePreparer
 from crucible.evals.manifests import EvalPartition, load_suite
 from crucible.repair.cases import IncidentCase
@@ -123,6 +129,174 @@ def context_messages(*, large=False, units=1):
         for index, role in enumerate((MessageRole.USER, MessageRole.ASSISTANT) * units)
     )
     return json.loads(canonical_json(messages))
+
+
+@pytest.mark.docker
+async def test_worker_search_supports_empty_results(tmp_path, real_worker_image):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "note.txt").write_text("ordinary contents\n")
+    result = await launch(
+        tmp_path,
+        real_worker_image,
+        fixture,
+        {
+            "kind": "tool",
+            "tool_name": "search_files",
+            "arguments": {"query": "absent-pattern"},
+        },
+    )
+    assert result.termination == "completed", result
+    assert result.observation.status == "completed", result.observation
+
+
+@pytest.mark.docker
+async def test_context_replay_matches_duplicate_messages_once(
+    tmp_path, real_worker_image
+):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    messages = context_messages(units=3)
+    source = [
+        {
+            **json.loads(
+                canonical_json(
+                    ModelMessage(
+                        ModelRole(message["role"]),
+                        (ModelPart("text", "synthetic captured context"),),
+                    )
+                )
+            ),
+            "conversation_sequence": index,
+        }
+        for index, message in enumerate(messages)
+    ]
+    result = await launch(
+        tmp_path,
+        real_worker_image,
+        fixture,
+        {"kind": "context_selection", "messages": messages, "calls": [], "results": []},
+        settings={"source_messages": source},
+    )
+    assert result.observation.status == "completed", result.observation
+    retained = result.observation.tool_result["retained_messages"]
+    assert [message["conversation_sequence"] for message in retained] == list(range(6))
+
+
+@pytest.mark.docker
+@pytest.mark.parametrize("invalid", [None, "task", "assistant", "result"])
+async def test_context_replay_preserves_multiple_source_steps(
+    tmp_path, real_worker_image, invalid
+):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    task_id = uuid4()
+    messages, calls, results = [], [], []
+    for index in range(3):
+        run_id, step_id, call_id, result_id = (uuid4() for _ in range(4))
+        user, assistant = TypeAdapter(tuple[Message, ...]).validate_python(
+            context_messages()
+        )
+        user = replace(
+            user, task_id=task_id, run_id=None, conversation_sequence=index * 3 + 1
+        )
+        assistant = replace(
+            assistant,
+            task_id=task_id,
+            run_id=run_id,
+            step_id=step_id,
+            conversation_sequence=index * 3 + 2,
+            parts=(
+                MessagePart(
+                    uuid4(), 1, MessagePartKind.TOOL_CALL, None, tool_call_id=call_id
+                ),
+            ),
+        )
+        tool = replace(
+            assistant,
+            id=uuid4(),
+            role=MessageRole.TOOL,
+            conversation_sequence=index * 3 + 3,
+            parts=(
+                MessagePart(
+                    uuid4(),
+                    1,
+                    MessagePartKind.TOOL_RESULT,
+                    "contents",
+                    tool_result_id=result_id,
+                ),
+            ),
+        )
+        messages.extend((user, assistant, tool))
+        calls.append(
+            ToolCall(
+                call_id,
+                task_id,
+                run_id,
+                step_id,
+                assistant.id,
+                1,
+                "read_file",
+                {"path": "note.txt"},
+                1,
+                f"provider-{index}",
+                ToolExecutionMode.SEQUENTIAL,
+                now,
+            )
+        )
+        results.append(
+            ToolResult(
+                result_id,
+                task_id,
+                run_id,
+                step_id,
+                call_id,
+                ToolResultStatus.SUCCEEDED,
+                {},
+                1,
+                "contents",
+                None,
+                1,
+                now,
+                now,
+            )
+        )
+    if invalid == "task":
+        messages[0] = replace(messages[0], task_id=uuid4())
+    elif invalid == "assistant":
+        calls[0] = replace(calls[0], assistant_message_id=messages[0].id)
+    elif invalid == "result":
+        results[0] = replace(results[0], tool_call_id=calls[1].id)
+    result = await launch(
+        tmp_path,
+        real_worker_image,
+        fixture,
+        json.loads(
+            canonical_json(
+                {
+                    "kind": "context_selection",
+                    "messages": messages,
+                    "calls": calls,
+                    "results": results,
+                }
+            )
+        ),
+    )
+    assert result.termination == "completed", result
+    if invalid:
+        assert result.observation.status == "error", result.observation
+        assert result.observation.error_code == "worker_execution_error"
+        assert result.observation.detail == "ValueError"
+        return
+    assert result.observation.status == "completed", result.observation
+    parts = [
+        part
+        for message in result.observation.context_messages
+        for part in message["parts"]
+    ]
+    assert len([part for part in parts if part["kind"] == "tool_call"]) == 3
+    assert len([part for part in parts if part["kind"] == "tool_result"]) == 3
 
 
 @pytest.mark.docker

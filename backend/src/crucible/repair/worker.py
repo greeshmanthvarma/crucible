@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from uuid import uuid5
+from uuid import UUID, uuid5
 
 # `python -I` ignores PYTHONPATH. The controller mounts the frozen export here.
 if __name__ == "__main__":
@@ -209,7 +209,7 @@ async def execute_job(job: Any) -> Any:
             await uow.repositories.add_if_absent(repository)
             await uow.tasks.add(task)
             await uow.runs.add(run)
-            if manifest.get("kind") != "repository":
+            if manifest.get("kind") == "tool":
                 await uow.steps.add(step)
             await uow.commit()
         kind = manifest.get("kind")
@@ -341,22 +341,95 @@ async def execute_job(job: Any) -> Any:
         results = TypeAdapter(tuple[ToolResult, ...]).validate_python(
             manifest.get("results", [])
         )
+        # Source histories span steps/runs whose local tool sequences restart at
+        # one. Preserve step boundaries rather than flattening these sequences
+        # into the current execution step (or weakening storage constraints).
+        source_steps: dict[UUID, tuple[UUID, UUID | None]] = {}
+        history: tuple[Message | ToolCall | ToolResult, ...] = (
+            *messages,
+            *calls,
+            *results,
+        )
+        source_tasks = {item.task_id for item in history}
+        if len(source_tasks) > 1:
+            raise ValueError("Captured history spans multiple tasks")
+        for item in history:
+            if item.step_id is None:
+                continue
+            owner = (item.task_id, item.run_id)
+            if (
+                item.run_id is None
+                or source_steps.setdefault(item.step_id, owner) != owner
+            ):
+                raise ValueError("Captured step ownership is inconsistent")
+        message_by_id = {message.id: message for message in messages}
+        call_by_id = {call.id: call for call in calls}
+        for call in calls:
+            source_assistant = message_by_id.get(call.assistant_message_id)
+            if source_assistant is None or (
+                source_assistant.task_id,
+                source_assistant.run_id,
+                source_assistant.step_id,
+                source_assistant.role,
+            ) != (call.task_id, call.run_id, call.step_id, MessageRole.ASSISTANT):
+                raise ValueError("Captured call ownership is inconsistent")
+        for result in results:
+            source_call = call_by_id.get(result.tool_call_id)
+            if source_call is None or (
+                result.task_id,
+                result.run_id,
+                result.step_id,
+            ) != (
+                source_call.task_id,
+                source_call.run_id,
+                source_call.step_id,
+            ):
+                raise ValueError("Captured result ownership is inconsistent")
+        history_steps = {
+            source_id: Step.preparing(
+                uuid5(job.job_id, f"history-step:{source_id}"),
+                task_id,
+                run_id,
+                index,
+                clock.now(),
+            ).interrupt(clock.now())
+            for index, source_id in enumerate(source_steps, start=1)
+        }
+        step = replace(step, step_sequence=len(history_steps) + 1)
         remapped = tuple(
-            replace(message, task_id=task_id, run_id=run_id, step_id=step.id)
+            replace(
+                message,
+                task_id=task_id,
+                run_id=run_id,
+                step_id=history_steps[message.step_id].id if message.step_id else None,
+            )
             for message in messages
         )
         # Original tool exchanges retain their IDs/correlation links but use the
         # private job's identities and assistant message associations.
         async with container.unit_of_work() as uow:
+            for historical in history_steps.values():
+                await uow.steps.add(historical)
+            await uow.steps.add(step)
             for message in remapped:
                 await uow.messages.add(message)
             for call in calls:
                 await uow.tool_calls.add(
-                    replace(call, task_id=task_id, run_id=run_id, step_id=step.id)
+                    replace(
+                        call,
+                        task_id=task_id,
+                        run_id=run_id,
+                        step_id=history_steps[call.step_id].id,
+                    )
                 )
             for result in results:
                 await uow.tool_results.add(
-                    replace(result, task_id=task_id, run_id=run_id, step_id=step.id)
+                    replace(
+                        result,
+                        task_id=task_id,
+                        run_id=run_id,
+                        step_id=history_steps[result.step_id].id,
+                    )
                 )
             await uow.commit()
         if manifest.get("prior_compaction") is not None:
@@ -423,12 +496,16 @@ async def execute_job(job: Any) -> Any:
         context_messages = json.loads(canonical_json(prepared.request.messages))
         retained = []
         sources = settings.get("source_messages", [])
+        # Equal-content occurrences still have distinct source positions. Consume
+        # each once, without sorting output (which would hide actual reordering).
+        matched_sources: set[int] = set()
         for message in context_messages:
             match = next(
                 (
-                    source
-                    for source in sources
-                    if isinstance(source, dict)
+                    index
+                    for index, source in enumerate(sources)
+                    if index not in matched_sources
+                    and isinstance(source, dict)
                     and {
                         key: value
                         for key, value in source.items()
@@ -439,7 +516,8 @@ async def execute_job(job: Any) -> Any:
                 None,
             )
             if match is not None:
-                retained.append(match)
+                matched_sources.add(match)
+                retained.append(sources[match])
             elif message.get("role") != "system":
                 retained.append(message)
         return WorkerObservation.model_validate(

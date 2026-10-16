@@ -5,7 +5,7 @@ ARG UV_IMAGE
 FROM ${UV_IMAGE} AS uv
 FROM ${BASE_IMAGE}
 COPY --from=uv /uv /usr/local/bin/uv
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ripgrep \
     && rm -rf /var/lib/apt/lists/*
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_PYTHON_DOWNLOADS=never \
