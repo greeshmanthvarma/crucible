@@ -31,6 +31,7 @@ from crucible.repair.roles import (
     Role,
     RoleExecutor,
     RoleInfrastructureError,
+    RoleLimitError,
     RoleOutputError,
     parse_role_result,
 )
@@ -344,7 +345,10 @@ class RepairController:
         except RoleInfrastructureError:
             await self._finish_attempt(attempt, "infrastructure_error")
             raise
-        except (ValueError, RoleOutputError):
+        except RoleOutputError:
+            await self._finish_attempt(attempt, "invalid_output")
+            raise
+        except ValueError:
             await self._finish_attempt(attempt, "invalid_output")
             raise RoleOutputError("Role result was invalid") from None
         await self._finish_attempt(attempt, "completed", artifact)
@@ -653,6 +657,8 @@ class RepairController:
             except (RepairNeedsReview, RepairSourceDrift):
                 raise
             except (RoleOutputError, ValueError) as error:
+                if isinstance(error, RoleLimitError):
+                    state["last_role_limit"] = error.code
                 state.pop("pending_diagnosis", None)
                 state.setdefault("diagnosis_feedback", []).append(
                     str(self.incident.safe(str(error)))[:1000]
@@ -665,7 +671,12 @@ class RepairController:
             state,
             status=RepairStatus.EXHAUSTED,
             code="diagnosis_exhausted",
-            detail="Diagnosis/review allowance exhausted.",
+            detail="Diagnosis/review allowance exhausted."
+            + (
+                f" Last role limit: {state['last_role_limit']}."
+                if state.get("last_role_limit")
+                else ""
+            ),
         )
         return False
 

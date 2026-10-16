@@ -5,7 +5,7 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from crucible.application.artifact_service import ArtifactService
@@ -137,33 +137,92 @@ class IncidentContext:
         async with self.factory() as uow:
             messages = await uow.messages.list_for_task(task_id)
         selected: list[dict[str, Any]] = []
-        size = 0
         for message in messages[start : start + limit]:
             item = self.safe(json.loads(canonical_json(message)))
-            if message.step_id is not None:
-                async with self.factory() as uow:
-                    calls = await uow.tool_calls.list_for_step(message.step_id)
-                    results = await uow.tool_results.list_for_step(message.step_id)
-                # Step identity comes from the source message.
-                item["tool_calls"] = self.safe(json.loads(canonical_json(calls)))
-                item["tool_results"] = self.safe(json.loads(canonical_json(results)))
-            encoded = canonical_json(item)
-            if size + len(encoded) > 80000:
-                if not selected:
-                    # Retrieval is bounded but can page a large message by parts
-                    # through the original capture; do not invent truncated replay.
-                    item = {
-                        "id": str(message.id),
-                        "unsupported_code": "message_size_limit",
-                    }
-                    selected.append(item)
+            # Navigation is deliberately not an exact replay input. Keep stable
+            # part/call/result IDs; full bodies are available through read_detail.
+            parts = item.pop("parts")
+            item["parts"] = []
+            for part in parts:
+                text = (
+                    part.pop("text_content", None)
+                    or part.pop("reasoning_content", None)
+                    or ""
+                )
+                part.pop("reasoning_content", None)
+                part.update(preview=text[:512], truncated=len(text) > 512)
+                candidate = {**item, "parts": [*item["parts"], part]}
+                if len(canonical_json({"messages": [*selected, candidate]})) > 15000:
+                    # Even a message with many parts remains navigable. Page its
+                    # full representation using the message detail identity.
+                    item["parts_truncated"] = True
+                    break
+                item["parts"].append(part)
+            if len(canonical_json({"messages": [*selected, item]})) > 15000:
                 break
             selected.append(item)
-            size += len(encoded)
         return {
             "messages": selected,
             "next": start + len(selected),
             "total": len(messages),
+            "content_mode": "preview; use read_incident_detail for full source text",
+        }
+
+    async def read_detail(
+        self,
+        repair_id: UUID,
+        kind: Literal[
+            "message", "message_part", "tool_call", "tool_result", "evidence"
+        ],
+        identity: UUID,
+        offset: int = 0,
+        limit: int = 4000,
+    ) -> dict[str, Any]:
+        """Character-paged original records, authorized through source ownership."""
+        if offset < 0 or not 1 <= limit <= 4000:
+            raise ValueError("Invalid detail range")
+        task_id = await self._source(repair_id)
+        value: Any = (
+            await self.read_evidence(repair_id, identity)
+            if kind == "evidence"
+            else None
+        )
+        async with self.factory() as uow:
+            messages = await uow.messages.list_for_task(task_id)
+            if kind in {"message", "message_part"}:
+                for message in messages:
+                    if kind == "message" and message.id == identity:
+                        value = json.loads(canonical_json(message))
+                    elif kind == "message_part":
+                        for part in message.parts:
+                            if part.id == identity:
+                                value = (
+                                    part.text_content or part.reasoning_content or ""
+                                )
+            elif kind in {"tool_call", "tool_result"}:
+                for run in await uow.runs.list_for_task(task_id):
+                    for step in await uow.steps.list_for_run(run.id):
+                        records = (
+                            await uow.tool_calls.list_for_step(step.id)
+                            if kind == "tool_call"
+                            else await uow.tool_results.list_for_step(step.id)
+                        )
+                        for record in records:
+                            if record.id == identity and record.task_id == task_id:
+                                value = json.loads(canonical_json(record))
+        if value is None:
+            raise ValueError("Detail is not available for this repair")
+        value = self.safe(value)
+        text = value if isinstance(value, str) else canonical_json(value).decode()
+        if offset > len(text):
+            raise ValueError("Detail offset exceeds content")
+        end = min(len(text), offset + limit)
+        return {
+            "kind": kind,
+            "id": str(identity),
+            "text": text[offset:end],
+            "next": end if end < len(text) else None,
+            "total_characters": len(text),
         }
 
     async def replay_settings(self, repair_id: UUID, case: Any) -> dict[str, Any]:

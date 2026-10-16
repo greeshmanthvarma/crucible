@@ -28,7 +28,7 @@ from crucible.engine.gateway import ModelToolDefinition
 from crucible.engine.run_engine import RunEngine
 from crucible.repair.cases import IncidentCase, StrictModel
 from crucible.repair.events import append_repair_event
-from crucible.repair.identity import digest
+from crucible.repair.identity import canonical_json, digest
 from crucible.repair.incident_context import IncidentContext
 from crucible.repair.prompts import role_prompt
 from crucible.sandbox.resources import TaskResourceManager
@@ -105,6 +105,12 @@ class RoleOutputError(ValueError):
     pass
 
 
+class RoleLimitError(RoleOutputError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(f"Role reached {code}; use targeted evidence retrieval.")
+
+
 def parse_role_result(role: Role, raw: str) -> RoleResult:
     if len(raw.encode()) > 1_000_000:
         raise RoleOutputError("Role result exceeds output limit")
@@ -121,6 +127,35 @@ class EvidenceArguments(ToolArguments):
 class MessageArguments(ToolArguments):
     start: int = Field(default=0, ge=0)
     limit: int = Field(default=10, ge=1, le=50)
+
+
+class DetailArguments(ToolArguments):
+    kind: Literal["message", "message_part", "tool_call", "tool_result", "evidence"]
+    identity: UUID
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=4000, ge=1, le=4000)
+
+
+class IncidentDetailTool:
+    parallel_safe = True
+    argument_model: type[ToolArguments] = DetailArguments
+
+    def __init__(self, incident: IncidentContext, repair_id: UUID) -> None:
+        self.incident, self.repair_id = incident, repair_id
+        self.definition = ModelToolDefinition(
+            "read_incident_detail",
+            "Read one source message, part, tool call/result or evidence record by ID. "
+            "Character offsets; at most 4000 characters per page. "
+            "Fetch only relevant details.",
+            self.argument_model.model_json_schema(),
+        )
+
+    async def invoke(self, context: ToolContext, arguments: object) -> ToolOutcome:
+        args = DetailArguments.model_validate(arguments)
+        value = await self.incident.read_detail(
+            self.repair_id, args.kind, args.identity, args.offset, args.limit
+        )
+        return ToolOutcome(value, json.dumps(value, ensure_ascii=False))
 
 
 class IncidentTool:
@@ -150,7 +185,18 @@ class IncidentTool:
             value = await self.incident.read_evidence(
                 self.repair_id, evidence.evidence_id
             )
-        return ToolOutcome(value, json.dumps(value, default=str))
+            encoded = canonical_json(value).decode()
+            if len(encoded.encode()) > 8000:
+                value = {
+                    "evidence_id": str(evidence.evidence_id),
+                    "kind": value.get("kind"),
+                    "complete": value.get("complete"),
+                    "source_ids": value.get("source_ids"),
+                    "preview": encoded[:1000],
+                    "truncated": True,
+                    "detail_tool": "read_incident_detail(kind=evidence)",
+                }
+        return ToolOutcome(value, json.dumps(value, default=str, ensure_ascii=False))
 
 
 class SourceTool:
@@ -480,6 +526,7 @@ class RoleExecutor:
         tools += [
             IncidentTool(self.incident, repair_id, False),
             IncidentTool(self.incident, repair_id, True),
+            IncidentDetailTool(self.incident, repair_id),
         ]
         if role == "proposal":
             tools += [
@@ -634,8 +681,11 @@ class RoleExecutor:
             terminal = await uow.runs.get(run.id)
             messages = await uow.messages.list_for_task(task.id)
         if terminal is None or terminal.status is not RunStatus.COMPLETED:
-            if terminal and terminal.outcome_code == "budget_exhausted":
-                raise RoleOutputError("Role exhausted its harness budget")
+            if terminal and terminal.outcome_code in {
+                "budget_exhausted",
+                "context_limit",
+            }:
+                raise RoleLimitError(terminal.outcome_code)
             raise RoleInfrastructureError("Role harness execution did not complete")
         final = next(
             (m for m in reversed(messages) if m.role is MessageRole.ASSISTANT), None

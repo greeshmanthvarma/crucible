@@ -127,6 +127,7 @@ async def test_role_has_separate_task_and_conversation_and_no_write_tools(
         "search_files",
         "read_incident_evidence",
         "read_incident_messages",
+        "read_incident_detail",
     }
     async with factory() as uow:
         assert await uow.messages.list_for_task(task.id) == before
