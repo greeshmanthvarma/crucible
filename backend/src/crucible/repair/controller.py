@@ -188,6 +188,8 @@ class RepairController:
         detail: str | None = None,
         release: bool = False,
         new_fixes: tuple[RepairFix, ...] = (),
+        updated_fixes: tuple[RepairFix, ...] = (),
+        clear_current_fix: bool = False,
     ) -> RepairRun:
         async with self.factory() as uow:
             await uow.repairs.lock()
@@ -205,6 +207,7 @@ class RepairController:
             updated = replace(
                 current,
                 stage=stage or current.stage,
+                current_fix_id=None if clear_current_fix else current.current_fix_id,
                 status=status,
                 updated_at=self.clock.now(),
                 outcome_code=code,
@@ -213,6 +216,8 @@ class RepairController:
             await uow.repairs.update(updated)
             for fix in new_fixes:
                 await uow.repairs.add_fix(fix)
+            for fix in updated_fixes:
+                await uow.repairs.update_fix(fix)
             attempts = await uow.repairs.list_attempts(repair.id)
             await uow.repairs.add_checkpoint(
                 RepairCheckpoint(
@@ -549,7 +554,7 @@ class RepairController:
                 if not isinstance(diagnosis, DiagnosisResult):
                     raise RoleOutputError("Unexpected role")
                 if diagnosis.decision != "repairable":
-                    await self._checkpoint(
+                    await self._finish_diagnosis(
                         repair,
                         state,
                         status=RepairStatus.COMPLETED,
@@ -557,7 +562,6 @@ class RepairController:
                         detail=str(self.incident.safe("; ".join(diagnosis.reasons)))[
                             :1000
                         ],
-                        release=True,
                     )
                     return False
                 prepared = []
@@ -607,7 +611,7 @@ class RepairController:
                         }
                     )
                 if not prepared:
-                    await self._checkpoint(
+                    await self._finish_diagnosis(
                         repair,
                         state,
                         status=RepairStatus.COMPLETED,
@@ -620,11 +624,15 @@ class RepairController:
                         detail=str(self.incident.safe("; ".join(diagnosis.reasons)))[
                             :1000
                         ],
-                        release=True,
                     )
                     return False
+                async with self.factory() as uow:
+                    previous_fixes = await uow.repairs.list_fixes(repair.id)
+                next_ordinal = (
+                    max((fix.ordinal for fix in previous_fixes), default=-1) + 1
+                )
                 new_fixes = []
-                for ordinal, record in enumerate(prepared):
+                for ordinal, record in enumerate(prepared, start=next_ordinal):
                     case = ApprovedCase.model_validate(
                         await self._json(record["approved"])
                     )
@@ -642,24 +650,141 @@ class RepairController:
                 state.pop("pending_diagnosis", None)
                 await self._checkpoint(repair, state, new_fixes=tuple(new_fixes))
                 return True
-            except (RoleOutputError, ValueError):
+            except (RepairNeedsReview, RepairSourceDrift):
+                raise
+            except (RoleOutputError, ValueError) as error:
                 state.pop("pending_diagnosis", None)
-                state.setdefault(
-                    "diagnosis_feedback",
-                    ["Return a valid supported diagnosis and reviewed case."],
+                state.setdefault("diagnosis_feedback", []).append(
+                    str(self.incident.safe(str(error)))[:1000]
                 )
                 chain += 1
                 state["diagnosis_chain"] = chain
                 await self._checkpoint(repair, state)
-        await self._checkpoint(
+        await self._finish_diagnosis(
             repair,
             state,
             status=RepairStatus.EXHAUSTED,
             code="diagnosis_exhausted",
             detail="Diagnosis/review allowance exhausted.",
-            release=True,
         )
         return False
+
+    async def _finish_diagnosis(
+        self,
+        repair: RepairRun,
+        state: dict[str, Any],
+        *,
+        status: RepairStatus,
+        code: str,
+        detail: str,
+    ) -> None:
+        async with self.factory() as uow:
+            fixes = await uow.repairs.list_fixes(repair.id)
+        if any(fix.status == "accepted" for fix in fixes):
+            state["unresolved_outcome"] = code
+            if status is RepairStatus.EXHAUSTED:
+                state["terminal_status"] = "exhausted"
+            try:
+                await self._publish(repair, state)
+            except (RepairNeedsReview, RepairSourceDrift):
+                raise
+            except ValueError as error:
+                raise RepairInfrastructureError(
+                    "Publication must be retried"
+                ) from error
+        else:
+            await self._checkpoint(
+                repair, state, status=status, code=code, detail=detail, release=True
+            )
+
+    async def _failed_reproduction(
+        self,
+        repair: RepairRun,
+        state: dict[str, Any],
+        fix: RepairFix,
+        baseline: TrialBatch,
+        case: ApprovedCase,
+        item: FixItem,
+    ) -> None:
+        evidence_id = await private_artifact(
+            self.artifacts, repair.source_task_id, canonical_json(baseline)
+        )
+        observations = []
+        for rows in baseline.custom.values():
+            for row in rows:
+                observed = (
+                    await self._json(row.observation_artifact_id)
+                    if row.observation_artifact_id
+                    else None
+                )
+                observations.append(
+                    {
+                        "verdict": row.verdict,
+                        "assertions": row.assertion_results,
+                        "observation": {
+                            "status": observed.get("status"),
+                            "error_code": observed.get("error_code"),
+                            "detail": str(
+                                self.incident.safe(observed.get("detail") or "")
+                            )[:2048],
+                            "output_excerpt": canonical_json(
+                                self.incident.safe(observed)
+                            ).decode()[:8000],
+                        }
+                        if isinstance(observed, dict)
+                        else None,
+                    }
+                )
+        next_state = dict(state)
+        # Only custom reproduction observations return to diagnosis. Fixed-suite
+        # and private regression traces stay in the host-only evidence artifact.
+        next_state["diagnosis_feedback"] = [
+            {
+                "reason": "Custom reproduction did not match the recorded incident.",
+                "observations": observations,
+                "failed_case": case.case.model_dump(mode="json"),
+                "fixture_files": item.fixture_files,
+            }
+        ]
+        next_state["diagnosis_chain"] = int(state.get("diagnosis_chain", 1)) + 1
+        next_state["failed_reproductions"] = [
+            *state.get("failed_reproductions", []),
+            str(evidence_id),
+        ]
+        for name in (
+            "fixes",
+            "fix_index",
+            "pending_diagnosis",
+            "baseline",
+            "baseline_parent",
+            "baseline_fingerprint",
+            "proposal",
+            "proposal_feedback",
+            "reuse_proposal_index",
+            "candidate_snapshot",
+            "validation_evidence",
+        ):
+            next_state.pop(name, None)
+        next_state["candidate_dirty"] = False
+        async with self.factory() as uow:
+            fixes = await uow.repairs.list_fixes(repair.id)
+        updates = tuple(
+            replace(
+                item, status="not_reproduced" if item.id == fix.id else "superseded"
+            )
+            for item in fixes
+            if item.status == "approved"
+        )
+        repair = await self._checkpoint(
+            repair,
+            next_state,
+            stage=RepairStage.DIAGNOSIS,
+            updated_fixes=updates,
+            clear_current_fix=True,
+        )
+        state.clear()
+        state.update(next_state)
+        await self._execute(repair, state)
 
     async def _prepare_case(self, repair: RepairRun, item: FixItem) -> FixItem:
         from crucible.repair.cases import relative_path
@@ -781,13 +906,8 @@ class RepairController:
                     for rows in baseline.custom.values()
                     for row in rows
                 ):
-                    await self._checkpoint(
-                        repair,
-                        state,
-                        status=RepairStatus.COMPLETED,
-                        code="not_reproduced",
-                        detail="Baseline did not verify the incident.",
-                        release=True,
+                    await self._failed_reproduction(
+                        repair, state, fix, baseline, case, item
                     )
                     return
                 state["baseline"] = str(

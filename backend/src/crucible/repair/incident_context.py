@@ -254,6 +254,8 @@ class IncidentContext:
             step["step_id"] for step in steps
         }:
             raise ValueError("Incident step belongs to another run")
+        if case.kind == "tool":
+            await self._authorize_tool_case(task_id, case)
         if case.incident_ids.get("tool_call"):
             matched = [
                 call
@@ -286,3 +288,108 @@ class IncidentContext:
                 references.append(value)
         if not set(references) <= allowed_artifacts:
             raise ValueError("Foreign replay artifact")
+
+    async def _authorize_tool_case(self, task_id: UUID, case: Any) -> None:
+        from crucible.domain.tools import ToolResultStatus
+
+        run_id = case.incident_ids["run"]
+        call_id = case.incident_ids.get("tool_call")
+        if call_id is None:
+            raise ValueError("Tool replay requires the original call identity")
+        async with self.factory() as uow:
+            matches = []
+            for step in await uow.steps.list_for_run(run_id):
+                for call in await uow.tool_calls.list_for_step(step.id):
+                    if call.id == call_id:
+                        matches.append(call)
+            if len(matches) != 1:
+                raise ValueError("Original tool call is unavailable")
+            call = matches[0]
+            results = [
+                result
+                for result in await uow.tool_results.list_for_step(call.step_id)
+                if result.tool_call_id == call.id
+            ]
+            captures = [
+                await uow.repair_evidence.get(evidence_id, task_id=task_id)
+                for evidence_id in case.evidence_ids
+            ]
+            task = await uow.tasks.get(task_id)
+        if (
+            call.task_id != task_id
+            or call.run_id != run_id
+            or call.name != case.tool_name
+            or case.incident_ids.get("step", call.step_id) != call.step_id
+            or canonical_json(dict(call.arguments)) != canonical_json(case.arguments)
+            or self.safe(json.loads(canonical_json(call.arguments)))
+            != json.loads(canonical_json(call.arguments))
+        ):
+            raise ValueError("Replay inputs differ from the original tool call")
+        if len(results) != 1:
+            raise ValueError("Original failure result is unavailable or ambiguous")
+        result = results[0]
+        matcher = case.expected_baseline_failure
+        detail = result.display_text.replace("/workspace/", "{workspace}/")
+        if task is not None and task.workspace_path:
+            detail = detail.replace(
+                str(task.workspace_path).rstrip("/") + "/", "{workspace}/"
+            )
+        if (
+            result.task_id != task_id
+            or result.run_id != run_id
+            or result.status
+            not in {
+                ToolResultStatus.FAILED,
+                ToolResultStatus.REJECTED,
+                ToolResultStatus.TIMED_OUT,
+            }
+            or not result.error_code
+            or matcher.status != "error"
+            or matcher.error_code != result.error_code
+            or not all(fragment in detail for fragment in matcher.detail_contains)
+        ):
+            raise ValueError("Replay failure differs from the recorded tool outcome")
+        preedits = []
+        for capture in captures:
+            if capture is None or capture.run_id != run_id:
+                raise ValueError("Replay evidence belongs to another incident")
+            if capture.kind == "preedit":
+                if not capture.complete or capture.tool_call_id != call.id:
+                    raise ValueError("Pre-edit evidence belongs to another tool call")
+                body = await self._preedit_for_call(capture, task_id, call)
+                preedits.append(body)
+        if call.name in {"write_file", "apply_patch"} and len(preedits) != 1:
+            raise ValueError(
+                "Mutation replay requires one complete original pre-edit capture"
+            )
+
+    async def _preedit_for_call(
+        self, capture: Any, task_id: UUID, call: Any
+    ) -> dict[str, Any]:
+        if capture.artifact_id is None:
+            raise ValueError("Pre-edit artifact is unavailable")
+        metadata, raw = await self.artifacts.read(capture.artifact_id)
+        if (
+            metadata.task_id != task_id
+            or metadata.sensitivity != "private"
+            or hashlib.sha256(raw).hexdigest() != capture.manifest_digest
+            or len(raw) > 8 * 1024 * 1024
+        ):
+            raise ValueError("Pre-edit artifact integrity failure")
+        body = json.loads(raw)
+        if not isinstance(body, dict):
+            raise ValueError("Invalid pre-edit artifact")
+        source = body.get("source_ids", {})
+        if not isinstance(source, dict):
+            raise ValueError("Invalid pre-edit source identity")
+        if (
+            body.get("kind") != "preedit"
+            or body.get("complete") is not True
+            or source.get("task_id") != str(task_id)
+            or source.get("run_id") != str(call.run_id)
+            or source.get("tool_call_id") != str(call.id)
+        ):
+            raise ValueError("Pre-edit artifact provenance differs from the tool call")
+        if self.safe(body) != body:
+            raise ValueError("Pre-edit evidence cannot be replayed without redaction")
+        return body

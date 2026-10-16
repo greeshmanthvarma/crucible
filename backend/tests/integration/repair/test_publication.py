@@ -183,7 +183,13 @@ async def test_private_provenance_and_unknown_mechanisms_never_enter_public_body
     )
 
 
-async def test_real_acceptance_publishes_a_only_after_b_exhausts(database, tmp_path):
+@pytest.mark.parametrize(
+    "failure",
+    ["proposal", "reproduction", "no_change", "diagnosis_retry", "publication_retry"],
+)
+async def test_real_acceptance_publishes_a_only_after_b_exhausts(
+    database, tmp_path, failure
+):
     import copy
     import subprocess
     from dataclasses import replace
@@ -220,6 +226,22 @@ async def test_real_acceptance_publishes_a_only_after_b_exhausts(database, tmp_p
         for event in tail[-2]
     ]
     provider.outputs = [diagnosis, review, review, *tail, final_write, tail[-1]]
+    if failure != "proposal":
+        revised = copy.deepcopy(diagnosis)
+        revised["fix_items"] = [copy.deepcopy(second)]
+        provider.outputs = [diagnosis, review, review, *tail[:2]] + (
+            [revised, review, revised, review]
+            if failure == "reproduction"
+            else [
+                {
+                    "decision": "no_change_needed",
+                    "reasons": ["No supported remaining fix"],
+                    "fix_items": [],
+                }
+            ]
+        )
+    if failure == "diagnosis_retry":
+        provider.outputs.insert(-1, RuntimeError("PRIVATE_PROVIDER_FAILURE"))
     run = worker.run
     second_baselines = []
 
@@ -228,6 +250,13 @@ async def test_real_acceptance_publishes_a_only_after_b_exhausts(database, tmp_p
         if job.case_id == "second_custom":
             if job.purpose == "baseline":
                 second_baselines.append((root / editable).read_text())
+                if failure != "proposal":
+                    result = replace(
+                        result,
+                        observation=result.observation.model_copy(
+                            update={"error_code": "different_failure"}
+                        ),
+                    )
             else:
                 result = replace(
                     result,
@@ -250,16 +279,49 @@ async def test_real_acceptance_publishes_a_only_after_b_exhausts(database, tmp_p
     )
     github = GitHub()
     reporter = RepairReporter(factory, controller.artifacts, CLOCK)
+    if failure == "publication_retry":
+        create = github.create_pr
+
+        async def lost_response(*args):
+            await create(*args)
+            raise ValueError("Lost publication response")
+
+        github.create_pr = lost_response
     controller.publication = PublicationService(factory, CLOCK, github, reporter)
     await controller.execute(repair.id)
+    if failure in {"diagnosis_retry", "publication_retry"}:
+        assert (await service.get(repair.id)).status == "retryable_error"
+        before_resume = len(provider.requests)
+        await service.command(
+            repair.source_task_id, "/repair resume", "resume-after-reproduction"
+        )
+        await controller.execute(repair.id)
+        assert len(provider.requests) == before_resume + (failure == "diagnosis_retry")
+        async with factory() as uow:
+            attempts = await uow.repairs.list_attempts(repair.id)
+        assert [a.attempt_index for a in attempts if a.role == "diagnosis"] == (
+            [1, 2, 2] if failure == "diagnosis_retry" else [1, 2]
+        )
     current = await service.get(repair.id)
-    assert current.status == "exhausted" and github.creates == 1
+    assert current.status == (
+        "exhausted" if failure in {"proposal", "reproduction"} else "completed"
+    )
+    assert github.creates == 1
     assert (root / editable).read_text() == "# candidate one\n"
     assert second_baselines == ["# candidate one\n"]
-    assert github.pushes == [(branch, current.last_accepted_commit)]
+    assert github.pushes == [(branch, current.last_accepted_commit)] * (
+        2 if failure == "publication_retry" else 1
+    )
     assert len(await incidents.list_accepted()) == 1
     report = await reporter.build(repair.id)
-    assert "Accepted fixes: 1; diagnosed fixes: 2" in report.public_body
+    diagnosed = 4 if failure == "reproduction" else 2
+    assert f"Accepted fixes: 1; diagnosed fixes: {diagnosed}" in report.public_body
+    if failure != "proposal":
+        async with factory() as uow:
+            attempts = await uow.repairs.list_attempts(repair.id)
+        assert len([a for a in attempts if a.role == "proposal"]) == 1
+        assert "different_failure" in repr(provider.requests)
+        assert "heldout_private_case" not in repr(provider.requests)
     for private in (
         "second_custom",
         "heldout_private_case",

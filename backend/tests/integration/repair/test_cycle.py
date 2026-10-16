@@ -1,3 +1,5 @@
+import pytest
+
 from crucible.repair.controller import RepairController
 from tests.integration.repair.test_roles import role_environment
 from tests.integration.storage.test_tool_loop_storage import CLOCK
@@ -107,6 +109,12 @@ async def cycle_environment(
     }
     async with factory() as uow:
         case["incident_ids"]["run"] = str((await uow.runs.list_for_task(task.id))[0].id)
+    from tests.integration.repair.test_incident_binding import record_failed_tool
+
+    _, source_step, source_call = await record_failed_tool(
+        factory, task, arguments={"path": "note.txt"}
+    )
+    case["incident_ids"].update(step=str(source_step.id), tool_call=str(source_call.id))
     diagnosis = {
         "decision": "repairable",
         "reasons": ["Synthetic fixture plumbing"],
@@ -406,13 +414,33 @@ async def test_baseline_must_reproduce_before_any_proposal(database, tmp_path):
         diagnosis,
         review,
     ) = await cycle_environment(database, tmp_path)
-    diagnosis["fix_items"][0]["proposed_case"]["expected_baseline_failure"][
-        "error_code"
-    ] = "different_failure"
+    from dataclasses import replace
+
+    run = worker.run
+
+    async def mismatched(job, source, fixture, credential):
+        result = await run(job, source, fixture, credential)
+        if job.purpose == "baseline" and job.case_id == "custom":
+            result = replace(
+                result,
+                observation=result.observation.model_copy(
+                    update={"error_code": "different_failure"}
+                ),
+            )
+        return result
+
+    worker.run = mismatched
+    provider.outputs = [diagnosis, review, diagnosis, review, diagnosis, review]
     await controller.execute(repair.id)
-    assert (await service.get(repair.id)).outcome_code == "not_reproduced"
-    assert len(provider.requests) == 2
+    assert (await service.get(repair.id)).outcome_code == "diagnosis_exhausted"
+    assert len(provider.requests) == 6
     assert len(worker.jobs) == 1 and worker.jobs[0].purpose == "baseline"
+    assert "different_failure" in repr(provider.requests)
+    async with factory() as uow:
+        attempts = await uow.repairs.list_attempts(repair.id)
+    assert [(a.role, a.attempt_index) for a in attempts] == [
+        (role, index) for index in (1, 2, 3) for role in ("diagnosis", "review")
+    ]
 
 
 async def test_independent_fixes_follow_expected_accepted_history(database, tmp_path):
@@ -470,3 +498,82 @@ async def test_independent_fixes_follow_expected_accepted_history(database, tmp_
         assert [f.status for f in fixes] == ["accepted", "accepted"]
         assert [f.attempts_used for f in fixes] == [1, 1]
     assert len([job for job in worker.jobs if job.purpose == "baseline"]) == 14
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+async def test_failed_reproduction_can_return_to_a_corrected_second_diagnosis(
+    database, tmp_path, interrupt
+):
+    import copy
+    from dataclasses import replace
+
+    (
+        service,
+        repair,
+        factory,
+        controller,
+        provider,
+        worker,
+        root,
+        editable,
+        diagnosis,
+        review,
+    ) = await cycle_environment(database, tmp_path)
+    revised = copy.deepcopy(diagnosis)
+    revised["fix_items"][0]["fixture_files"] = {"note.txt": "revised fixture"}
+    tail = provider.outputs[2:]
+    provider.outputs = [diagnosis, review, revised, review, *tail]
+    import asyncio
+
+    entered = asyncio.Event()
+
+    async def pause(request):
+        entered.set()
+        await asyncio.Future()
+
+    if interrupt:
+        provider.outputs.insert(2, pause)
+    run = worker.run
+
+    async def mismatched_first(job, source, fixture, credential):
+        result = await run(job, source, fixture, credential)
+        if (
+            job.purpose == "baseline"
+            and job.case_id == "custom"
+            and (fixture / "note.txt").read_text() == "fixture"
+        ):
+            result = replace(
+                result,
+                observation=result.observation.model_copy(
+                    update={"error_code": "different_failure"}
+                ),
+            )
+        return result
+
+    worker.run = mismatched_first
+    if interrupt:
+        service.bind_scheduler(controller)
+        await controller.submit(repair.id)
+        await asyncio.wait_for(entered.wait(), 30)
+        await service.stop(repair.id, "stop-revised-diagnosis")
+        assert (await service.get(repair.id)).status == "stopped"
+        await service.command(
+            repair.source_task_id, "/repair resume", "resume-revised-diagnosis"
+        )
+        if execution := controller.active.get(repair.id):
+            await execution
+    else:
+        await controller.execute(repair.id)
+    assert (await service.get(repair.id)).stage == "commit_acceptance"
+    async with factory() as uow:
+        attempts = await uow.repairs.list_attempts(repair.id)
+        fixes = await uow.repairs.list_fixes(repair.id)
+    expected = [("diagnosis", 1), ("review", 1), ("diagnosis", 2)]
+    if interrupt:
+        expected.append(("diagnosis", 3))
+    expected.extend([("review", 3 if interrupt else 2), ("proposal", 1)])
+    assert [(a.role, a.attempt_index) for a in attempts] == expected
+    assert [f.status for f in fixes] == ["not_reproduced", "approved"]
+    assert "different_failure" in repr(provider.requests[2])
+    assert "heldout_private_case" not in repr(provider.requests)
+    assert "HELDOUT_SENTINEL" not in repr(provider.requests)
