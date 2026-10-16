@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias, cast
 from uuid import UUID, uuid4
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from crucible.application.artifact_service import ArtifactService
 from crucible.application.ports import EventNotifier, UnitOfWork
@@ -47,11 +47,35 @@ EDITABLE_PATHS = frozenset(
 )
 
 
+class IncidentReference(StrictModel):
+    task: UUID
+    run: UUID
+    step: UUID | None = None
+    tool_call: UUID | None = None
+
+
+class ToolIncidentReference(IncidentReference):
+    step: UUID
+    tool_call: UUID
+
+
 class FixItem(StrictModel):
     mechanism: str = Field(min_length=1)
     decision: Literal["repairable", "no_change_needed", "unsupported"] = "repairable"
     proposed_case: IncidentCase | None = None
     fixture_files: dict[str, str | None] = Field(default_factory=dict)
+
+    @field_validator("proposed_case")
+    @classmethod
+    def explicit_incident_reference(
+        cls, case: IncidentCase | None
+    ) -> IncidentCase | None:
+        if case is not None:
+            reference = (
+                ToolIncidentReference if case.kind == "tool" else IncidentReference
+            )
+            reference.model_validate(case.incident_ids)
+        return case
 
     @model_validator(mode="after")
     def case_for_repair(self) -> "FixItem":
@@ -121,6 +145,8 @@ def role_result_schema(role: Role) -> dict[str, Any]:
         return schema
     for name in ("ToolCase", "ContextSelectionCase", "CompactionCase"):
         definition = schema["$defs"][name]
+        reference = ToolIncidentReference if name == "ToolCase" else IncidentReference
+        definition["properties"]["incident_ids"] = reference.model_json_schema()
         for field in ("fixture_manifest_digest", "settings"):
             definition["properties"].pop(field)
             definition["required"].remove(field)
@@ -164,6 +190,7 @@ def parse_role_result(role: Role, raw: str) -> RoleResult:
         fields = set(schema.get("properties", {}))
         for definition in schema.get("$defs", {}).values():
             fields.update(definition.get("properties", {}))
+        fields.update(IncidentReference.model_fields)
         for issue in error.errors(include_input=False, include_url=False)[:5]:
             location = (
                 ".".join(

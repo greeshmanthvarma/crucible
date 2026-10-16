@@ -29,6 +29,9 @@ def test_diagnosis_schema_excludes_controller_owned_case_fields():
         assert "fixture_manifest_digest" not in properties
         assert "settings" not in properties
     assert schema["anyOf"][1]["properties"]["fix_items"]["maxItems"] == 0
+    references = schema["$defs"]["ToolCase"]["properties"]["incident_ids"]
+    assert set(references["required"]) == {"task", "run", "step", "tool_call"}
+    assert references["additionalProperties"] is False
 
 
 def test_invalid_diagnosis_feedback_explains_cross_field_rule_without_echoing_input():
@@ -46,7 +49,35 @@ def test_invalid_diagnosis_feedback_explains_cross_field_rule_without_echoing_in
     assert "PRIVATE_SENTINEL" not in str(error.value)
 
 
-def test_diagnosis_accepts_proposal_without_controller_owned_fields():
+@pytest.mark.parametrize(
+    "invalid_reference",
+    [None, "renamed", "missing_call", "missing_task", "missing_step", "extra_key"],
+)
+def test_diagnosis_accepts_proposal_without_controller_owned_fields(invalid_reference):
+    references = {name: str(uuid4()) for name in ("task", "run", "step", "tool_call")}
+    if invalid_reference == "renamed":
+        references = {name + "_id": value for name, value in references.items()}
+    elif invalid_reference == "missing_call":
+        references.pop("tool_call")
+    elif invalid_reference == "missing_task":
+        references.pop("task")
+    elif invalid_reference == "missing_step":
+        references.pop("step")
+    elif invalid_reference == "extra_key":
+        references["task_id"] = references["task"]
+    if invalid_reference:
+        with pytest.raises(
+            ValueError,
+            match="extra_forbidden" if invalid_reference == "extra_key" else "missing",
+        ):
+            _parse_write_proposal(references)
+        return
+    result = _parse_write_proposal(references)
+    assert result.fix_items[0].proposed_case.fixture_manifest_digest == ""
+    assert result.fix_items[0].proposed_case.settings == {}
+
+
+def _parse_write_proposal(references):
     result = parse_role_result(
         "diagnosis",
         json.dumps(
@@ -61,7 +92,7 @@ def test_diagnosis_accepts_proposal_without_controller_owned_fields():
                             "kind": "tool",
                             "case_id": "exact-write",
                             "replay_mode": "direct",
-                            "incident_ids": {"task": str(uuid4()), "run": str(uuid4())},
+                            "incident_ids": references,
                             "expected_baseline_failure": {
                                 "status": "error",
                                 "error_code": "write_incomplete",
@@ -86,8 +117,7 @@ def test_diagnosis_accepts_proposal_without_controller_owned_fields():
             }
         ),
     )
-    assert result.fix_items[0].proposed_case.fixture_manifest_digest == ""
-    assert result.fix_items[0].proposed_case.settings == {}
+    return result
 
 
 def test_prepared_case_still_requires_controller_owned_fields():
