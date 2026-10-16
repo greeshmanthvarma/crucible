@@ -1,5 +1,7 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from crucible.api.app import create_app
@@ -7,6 +9,7 @@ from crucible.application.approval_service import ApprovalService
 from crucible.domain.approvals import Approval
 from crucible.domain.commands import CommandLimits, CommandNetwork, CommandSpec
 from crucible.domain.ids import new_id
+from crucible.domain.run import RunStatus
 from crucible.domain.tools import ToolCall, ToolExecutionMode
 from crucible.engine.approval_broker import InMemoryApprovalBroker
 from crucible.engine.notifier import TaskEventNotifier
@@ -16,6 +19,50 @@ from tests.integration.storage.test_tool_loop_storage import seed_exchange
 
 NOW = datetime(2026, 9, 23, tzinfo=UTC)
 CLOCK = type("Clock", (), {"now": lambda self: NOW})()
+
+
+@pytest.mark.parametrize("decision", ["approved", "denied"])
+@pytest.mark.parametrize(
+    "status",
+    [
+        RunStatus.VALIDATING,
+        RunStatus.COMPLETED,
+        RunStatus.FAILED,
+        RunStatus.INTERRUPTED,
+        RunStatus.CANCELLED,
+    ],
+)
+async def test_validation_approval_decisions_require_an_active_run(
+    database: Database,
+    status: RunStatus,
+    decision: str,
+) -> None:
+    approval = await pending_approval(database)
+    async with SqlAlchemyUnitOfWork(database) as uow:
+        run = await uow.runs.get(approval.run_id)
+        assert run is not None
+        await uow.runs.update(replace(run, status=status))
+        await uow.commit()
+    service = ApprovalService(
+        lambda: SqlAlchemyUnitOfWork(database),
+        CLOCK,
+        InMemoryApprovalBroker(),
+        TaskEventNotifier(),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(approval_service=service)),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/api/approvals/{approval.id}/decision",
+            json={"decision": decision, "specDigest": approval.spec_digest},
+            headers={"Idempotency-Key": "validation-decision"},
+        )
+    assert response.status_code == (200 if status is RunStatus.VALIDATING else 409)
+    saved = await service.get(approval.id)
+    assert saved.status.value == (
+        decision if status is RunStatus.VALIDATING else "pending"
+    )
 
 
 def command() -> CommandSpec:

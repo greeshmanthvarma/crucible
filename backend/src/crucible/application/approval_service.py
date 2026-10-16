@@ -104,7 +104,11 @@ class ApprovalService:
             if approval.status is not ApprovalStatus.PENDING:
                 raise ApprovalConflict("Approval has already been decided")
             run = await uow.runs.get(approval.run_id)
-            if run is None or run.status not in (RunStatus.QUEUED, RunStatus.RUNNING):
+            if run is None or run.status not in (
+                RunStatus.QUEUED,
+                RunStatus.RUNNING,
+                RunStatus.VALIDATING,
+            ):
                 raise ApprovalConflict("Approval Run is no longer active")
             unresolved = await uow.tool_calls.list_without_result_for_run(run.id)
             if not any(call.id == approval.tool_call_id for call in unresolved):
