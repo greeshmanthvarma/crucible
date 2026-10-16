@@ -256,10 +256,15 @@ class IncidentContext:
                     captures.append(
                         await self.read_evidence(repair_id, UUID(record["id"]))
                     )
+        inputs = [
+            record for record in captures if record.get("kind") == "context_inputs"
+        ]
+        if len(inputs) > 1:
+            raise ValueError("Context inputs are ambiguous")
         selected = next(
             (
                 record
-                for record in captures
+                for record in (inputs or captures)
                 if isinstance(record.get("context"), dict)
                 and "input_limit" in record["context"]
                 and isinstance(record.get("request"), dict)
@@ -270,6 +275,41 @@ class IncidentContext:
             raise ValueError("Captured context settings are missing")
         context, request = selected["context"], selected["request"]
         messages = request.get("messages", [])
+        if selected.get("kind") == "context_inputs":
+            source = selected.get("source_ids", {})
+            if source.get("run_id") != str(case.incident_ids["run"]) or (
+                case.incident_ids.get("step") is not None
+                and source.get("step_id") != str(case.incident_ids["step"])
+            ):
+                raise ValueError("Context inputs belong to another preparation")
+            instructions = context.get("required_instructions")
+            sequences = context.get("source_sequences")
+            if (
+                not isinstance(instructions, list)
+                or len(instructions) < 2
+                or not all(isinstance(text, str) for text in instructions)
+            ):
+                raise ValueError("Captured instruction inputs are missing")
+            projection = messages[len(instructions) :]
+            if not isinstance(sequences, list) or len(sequences) != len(projection):
+                raise ValueError("Captured source ordering is incomplete")
+            return {
+                **{
+                    key: context[key]
+                    for key in ("input_limit", "output_reserve", "threshold")
+                },
+                "harness_policy": instructions[0],
+                "tool_contract": instructions[1],
+                "required_instructions": instructions,
+                "repair_context": context.get("repair_context", []),
+                "retain_complete_units": context["recent_complete_units"],
+                "recent_complete_units": context["recent_complete_units"],
+                "source_messages": [
+                    {**message, "conversation_sequence": sequence}
+                    for message, sequence in zip(projection, sequences, strict=True)
+                ],
+                "source_order_basis": "captured_context_inputs",
+            }
         systems = [
             "\n".join(part.get("text_content") or "" for part in message["parts"])
             for message in messages

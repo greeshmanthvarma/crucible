@@ -126,6 +126,47 @@ def context_messages(*, large=False, units=1):
 
 
 @pytest.mark.docker
+async def test_context_replay_uses_captured_instructions_not_current_fixture(
+    tmp_path, real_worker_image
+):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "AGENTS.md").write_text("changed repository instruction")
+    instructions = [
+        "captured policy",
+        "captured contract",
+        "original repository instruction",
+    ]
+    result = await launch(
+        tmp_path,
+        real_worker_image,
+        fixture,
+        {
+            "kind": "context_selection",
+            "messages": context_messages(),
+            "calls": [],
+            "results": [],
+        },
+        settings={
+            "required_instructions": instructions,
+            "repair_context": [],
+            "harness_policy": instructions[0],
+            "tool_contract": instructions[1],
+            "input_limit": 10000,
+            "output_reserve": 100,
+            "threshold": 0.8,
+            "recent_complete_units": 2,
+        },
+    )
+    assert result.termination == "completed", result
+    assert result.observation.status == "completed", result.observation
+    assert [
+        message["parts"][0]["text_content"]
+        for message in result.observation.context_messages[:3]
+    ] == instructions
+
+
+@pytest.mark.docker
 @pytest.mark.parametrize(
     "scenario,code,fragment",
     [

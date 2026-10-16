@@ -6,6 +6,7 @@ from typing import cast
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from pydantic import TypeAdapter
 from sqlalchemy import text
 
 from crucible.application.acceptance_service import AcceptanceService
@@ -30,7 +31,7 @@ from crucible.domain.evals import EvalBudgets
 from crucible.engine.approval_broker import InMemoryApprovalBroker
 from crucible.engine.compaction_gateway import ModelCompactionGateway
 from crucible.engine.fake_gateway import FakeCompactionGateway, FakeModelGateway
-from crucible.engine.gateway import ModelGateway
+from crucible.engine.gateway import ModelGateway, ModelMessage
 from crucible.engine.journal import RunJournal
 from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
@@ -239,6 +240,21 @@ class ApplicationContainer:
             tools=registry.definitions,
             journal=journal,
             evidence=evidence,
+            replay_instructions=TypeAdapter(tuple[str, ...]).validate_python(
+                worker_job.settings["required_instructions"]
+            )
+            if worker_job and "required_instructions" in worker_job.settings
+            else None,
+            replay_repair_context=TypeAdapter(tuple[ModelMessage, ...]).validate_python(
+                worker_job.settings["repair_context"]
+            )
+            if worker_job and "repair_context" in worker_job.settings
+            else None,
+            recent_complete_units=TypeAdapter(int).validate_python(
+                worker_job.settings.get("recent_complete_units", 2)
+            )
+            if worker_job
+            else 2,
             compaction_lifecycle=CompactionLifecycle(
                 unit_of_work,
                 artifact_service,

@@ -462,7 +462,8 @@ async def test_context_capture_contains_actual_instructions_and_schemas(
     prepared = await manager.prepare(run, step)
     async with factory() as uow:
         captures = await uow.repair_evidence.list_for_run(run.id, task_id=run.task_id)
-    assert len(captures) == 1 and captures[0].kind == "model_context"
+    assert {item.kind for item in captures} == {"context_inputs", "model_context"}
+    captures = tuple(item for item in captures if item.kind == "model_context")
     _, raw = await recorder.read(captures[0].id, task_id=run.task_id)
     payload = json.loads(raw)
     assert [
@@ -481,6 +482,161 @@ async def test_context_capture_contains_actual_instructions_and_schemas(
     assert payload["context"]["settings"]["validation_commands"][0]["environment"] == {
         "LANG": "en_US.UTF-8"
     }
+
+
+@pytest.mark.parametrize("capture_failure", ["none", "store", "secret", "oversize"])
+async def test_context_inputs_are_captured_before_validation_without_interference(
+    database, tmp_path, monkeypatch, capture_failure
+):
+    from crucible.context import selection
+    from crucible.context.invariants import ContextInvariantError
+    from crucible.context.manager import ContextManager, SimpleTokenEstimator
+    from crucible.domain.steps import Step
+    from tests.integration.engine.conftest import queued_run
+
+    capture_broken = capture_failure != "none"
+    _, _, _, _, factory, artifacts, recorder = await setup(
+        database,
+        tmp_path,
+        limits=CaptureLimits(compaction_bytes=16)
+        if capture_failure == "oversize"
+        else CaptureLimits(),
+        secret_values=("required policy",) if capture_failure == "secret" else (),
+    )
+    submitted = await queued_run(database, tmp_path, "early-context")
+    async with factory() as uow:
+        run = await uow.runs.get(submitted.run_id)
+        step = Step.preparing(new_id(), run.task_id, run.id, 1, FixedClock().now())
+        await uow.steps.add(step)
+        await uow.commit()
+    manager = ContextManager(
+        factory,
+        FixedClock(),
+        SimpleTokenEstimator(),
+        harness_policy="required policy",
+        tool_contract="required contract",
+        model="not-called",
+        input_limit=10000,
+        output_reserve=100,
+        evidence=recorder,
+    )
+    if capture_failure == "store":
+
+        async def unavailable(*args, **kwargs):
+            raise OSError("artifact unavailable")
+
+        monkeypatch.setattr(artifacts, "put", unavailable)
+    original = selection.assemble_visible_messages
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            selection,
+            "assemble_visible_messages",
+            lambda *a, **kw: original(*a, **kw)[1:],
+        )
+        with pytest.raises(ContextInvariantError, match="Required instructions"):
+            await manager.prepare(run, step)
+    async with factory() as uow:
+        captures = await uow.repair_evidence.list_for_run(run.id, task_id=run.task_id)
+        assert await uow.context_manifests.get_for_step(step.id) is None
+    assert len(captures) == 1 and captures[0].kind == "context_inputs"
+    assert captures[0].complete is not capture_broken
+    if not capture_broken:
+        _, raw = await recorder.read(captures[0].id, task_id=run.task_id)
+        payload = json.loads(raw)
+        assert payload["context"]["required_instructions"] == [
+            "required policy",
+            "required contract",
+        ]
+        assert payload["context"]["message_ids"]
+        assert payload["source_ids"]["step_id"] == str(step.id)
+        await assert_context_input_replay(
+            factory, artifacts, recorder, captures[0], run, step, tmp_path
+        )
+    await manager.prepare(run, step)
+
+
+async def assert_context_input_replay(
+    factory, artifacts, recorder, capture, run, step, tmp_path
+):
+    from uuid import uuid4
+
+    from crucible.domain.repair import RepairRun, RepairStage, RepairStatus
+    from crucible.domain.run import RunStatus
+    from crucible.repair.cases import ContextSelectionCase, seal_case
+    from crucible.repair.incident_context import IncidentContext
+    from crucible.repair.trials import TrialService
+
+    repair = RepairRun(
+        uuid4(),
+        run.task_id,
+        RepairStatus.QUEUED,
+        RepairStage.INTAKE,
+        {},
+        None,
+        None,
+        "a" * 40,
+        None,
+        FixedClock().now(),
+        FixedClock().now(),
+    )
+    async with factory() as uow:
+        await uow.runs.update(replace(run, status=RunStatus.FAILED))
+        await uow.repairs.add(repair)
+        await uow.commit()
+    case = ContextSelectionCase(
+        kind="context_selection",
+        case_id="early-context",
+        incident_ids={"task": run.task_id, "run": run.id, "step": step.id},
+        replay_mode="direct",
+        fixture_manifest_digest="controller-owned",
+        settings={},
+        expected_baseline_failure={
+            "status": "error",
+            "error_code": "ContextInvariantError",
+        },
+        candidate_assertions=({"op": "context_within_estimated_limit"},),
+        expected_behavior="Preserve required instructions",
+        evidence_ids=(capture.id,),
+        source_artifact_ids=(capture.artifact_id,),
+        correlation_links={},
+    )
+    incident = IncidentContext(factory, artifacts)
+    await incident.authorize_case(repair.id, case)
+    settings = await incident.replay_settings(repair.id, case)
+    assert settings["required_instructions"] == ["required policy", "required contract"]
+    assert settings["recent_complete_units"] == 2
+    sealed = seal_case(case.model_copy(update={"settings": settings}), uuid4())
+    service = TrialService(
+        factory,
+        None,
+        source_root=tmp_path,
+        fixtures={},
+        artifacts=artifacts,
+        clock=FixedClock(),
+        invocation_id=uuid4(),
+    )
+    manifest = await service._materialize(sealed)
+    assert [str(item["id"]) for item in manifest["messages"]] == (
+        await _captured_message_ids(recorder, capture, run.task_id)
+    )
+    assert (
+        manifest["settings"]["required_instructions"]
+        == settings["required_instructions"]
+    )
+    with pytest.raises(ValueError, match="another preparation"):
+        await incident.replay_settings(
+            repair.id,
+            case.model_copy(
+                update={
+                    "incident_ids": {**case.incident_ids, "step": uuid4()},
+                }
+            ),
+        )
+
+
+async def _captured_message_ids(recorder, capture, task_id):
+    _, raw = await recorder.read(capture.id, task_id=task_id)
+    return json.loads(raw)["context"]["message_ids"]
 
 
 async def test_container_captures_runtime_identity_once(

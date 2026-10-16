@@ -83,6 +83,8 @@ class ContextManager:
         recent_complete_units: int = 2,
         compaction_lifecycle: CompactionLifecycle | None = None,
         evidence: EvidenceRecorder | None = None,
+        replay_instructions: tuple[str, ...] | None = None,
+        replay_repair_context: tuple[ModelMessage, ...] | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._clock = clock
@@ -99,6 +101,8 @@ class ContextManager:
         self._recent_complete_units = recent_complete_units
         self._compaction_lifecycle = compaction_lifecycle
         self._evidence = evidence
+        self._replay_instructions = replay_instructions
+        self._replay_repair_context = replay_repair_context
 
     async def prepare(self, run: Run, step: Step) -> PreparedContext:
         async with self._unit_of_work() as uow:
@@ -138,6 +142,12 @@ class ContextManager:
         if repository is not None:
             instruction_texts.append(repository.text)
             instruction_digests["repository"] = repository.digest
+        if self._replay_instructions is not None:
+            instruction_texts = list(self._replay_instructions)
+            instruction_digests = {
+                str(index): _digest_text(text)
+                for index, text in enumerate(instruction_texts)
+            }
 
         compacted_prefix = (
             []
@@ -180,6 +190,66 @@ class ContextManager:
                     ),
                 )
             ]
+        if self._replay_repair_context is not None:
+            repair_context = list(self._replay_repair_context)
+        if self._evidence is not None:
+            try:
+                # Protected projection of inputs, not an editable selection result
+                # and not a request submitted to the model.
+                inputs = tuple(
+                    ModelMessage(ModelRole.SYSTEM, (ModelPart("text", text),))
+                    for text in instruction_texts
+                ) + tuple(
+                    ModelMessage(
+                        ModelRole(message.role.value),
+                        tuple(
+                            _model_part(part, calls, results) for part in message.parts
+                        ),
+                    )
+                    for message in messages
+                )
+                await self._evidence.capture_request(
+                    run.task_id,
+                    run.id,
+                    0,
+                    PreparedModelRequest(
+                        run.id,
+                        step.id,
+                        self._model,
+                        inputs,
+                        self._tools,
+                        self._max_output_tokens,
+                    ),
+                    kind="context_inputs",
+                    source_key=(
+                        f"{step.id}:"
+                        f"{latest_compaction.id if latest_compaction else 'initial'}:"
+                        + _digest_text("\0".join(instruction_texts))
+                    ),
+                    step_id=step.id,
+                    context={
+                        "required_instructions": instruction_texts,
+                        "repair_context": repair_context,
+                        "settings": run.settings_snapshot,
+                        "input_limit": self._input_limit,
+                        "output_reserve": self._output_reserve,
+                        "threshold": self._threshold,
+                        "recent_complete_units": self._recent_complete_units,
+                        "estimator_version": getattr(
+                            self._estimator, "version", "custom"
+                        ),
+                        "message_ids": [str(message.id) for message in messages],
+                        "source_sequences": [
+                            message.conversation_sequence for message in messages
+                        ],
+                        "prior_compaction": latest_compaction,
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "Context input evidence unavailable",
+                    extra={"run_id": str(run.id), "step_id": str(step.id)},
+                )
         model_messages = selection.assemble_visible_messages(
             messages,
             calls,

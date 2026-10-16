@@ -495,11 +495,45 @@ class TrialService:
         except ArtifactNotFound:
             # The real driver emits unsupported for missing context inputs.
             return payload
+        input_captures = [
+            value
+            for value in captures
+            if isinstance(value, dict) and value.get("kind") == "context_inputs"
+        ]
+        if len(input_captures) > 1:
+            raise ValueError("Context inputs are ambiguous")
+        if input_captures:
+            captures = input_captures
         messages = []
+        input_capture_seen = False
         for value in captures:
             if not isinstance(value, dict):
                 continue
             context = value.get("context", {})
+            if value.get("kind") == "context_inputs":
+                source_ids = value.get("source_ids", {})
+                if (
+                    input_capture_seen
+                    or source_ids.get("run_id") != str(case.incident_ids["run"])
+                    or (
+                        case.incident_ids.get("step") is not None
+                        and source_ids.get("step_id") != str(case.incident_ids["step"])
+                    )
+                ):
+                    raise ValueError(
+                        "Context inputs are ambiguous or from another preparation"
+                    )
+                input_capture_seen = True
+                prior = context.get("prior_compaction")
+                if prior is not None:
+                    from crucible.domain.compaction import Compaction
+
+                    previous = TypeAdapter(Compaction).validate_python(prior)
+                    if previous.task_id != case.incident_ids["task"]:
+                        raise ValueError("Prior compaction belongs to another Task")
+                    payload.update(
+                        prior_compaction=prior, prior_summary=previous.rendered_summary
+                    )
             if isinstance(value.get("messages"), list) and all(
                 isinstance(m, dict) and "conversation_sequence" in m
                 for m in value["messages"]
@@ -583,6 +617,13 @@ class TrialService:
                 or not isinstance(prior.get("prior_summary"), str)
             ):
                 raise ValueError("Prior compaction capture is incomplete")
+            if (
+                input_capture_seen
+                and payload.get("prior_compaction") != prior["prior_compaction"]
+            ):
+                raise ValueError(
+                    "Prior compaction differs from captured context inputs"
+                )
             payload["prior_compaction"], payload["prior_summary"] = (
                 prior["prior_compaction"],
                 prior["prior_summary"],
