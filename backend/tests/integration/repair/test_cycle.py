@@ -38,7 +38,12 @@ async def test_no_change_completes_without_proposal_or_publication(database, tmp
 
 
 async def cycle_environment(
-    database, tmp_path, *, heldout_failure=False, acceptance=None
+    database,
+    tmp_path,
+    *,
+    heldout_failure=False,
+    acceptance=None,
+    editable="backend/src/crucible/context/selection.py",
 ):
     import asyncio
     import json
@@ -69,7 +74,6 @@ async def cycle_environment(
     ) = await role_environment(database, tmp_path, [])
     repair = (await service.list_for_task(task.id))[0]
     root = tmp_path / "source"
-    editable = "backend/src/crucible/context/selection.py"
     (root / editable).parent.mkdir(parents=True)
     (root / editable).write_text("# original\n")
 
@@ -329,10 +333,83 @@ async def test_retry_feedback_never_contains_heldout_trace(database, tmp_path):
     assert (root / editable).read_text() == "# original\n"
     assert "heldout_private_case" not in repr(provider.requests)
     assert "HELDOUT_SENTINEL" not in repr(provider.requests)
-    assert "Evaluation gate failed." in repr(provider.requests)
+    assert "Held-out: Evaluation gate failed." in repr(provider.requests)
+    assert "Held-in: Evaluation gate passed." in repr(provider.requests)
+    assert "Incident: Evaluation gate passed." in repr(provider.requests)
     async with factory() as uow:
         attempts = await uow.repairs.list_attempts(repair.id)
         assert [a.attempt_index for a in attempts if a.role == "proposal"] == [1, 2, 3]
+
+
+@pytest.mark.parametrize("same_content_write", [False, True])
+@pytest.mark.parametrize(
+    "editable",
+    [
+        "backend/src/crucible/context/selection.py",
+        "backend/src/crucible/tools/filesystem.py",
+    ],
+)
+async def test_unchanged_proposals_skip_candidate_evaluation(
+    database, tmp_path, same_content_write, editable
+):
+    env = await cycle_environment(database, tmp_path, editable=editable)
+    service, repair, factory, controller, provider, worker, root, editable, *_ = env
+    diagnosis, review, write, proposal, *_ = provider.outputs
+    if same_content_write:
+        from uuid import uuid4
+
+        from crucible.engine.gateway import CompleteToolCall, ModelStop, ModelStopReason
+
+        def write(_request):
+            return [
+                CompleteToolCall(
+                    uuid4(), "write_file", {"path": editable, "content": "# original\n"}
+                ),
+                ModelStop(ModelStopReason.TOOL_CALLS),
+            ]
+
+        provider.outputs = [
+            diagnosis,
+            review,
+            write,
+            proposal,
+            write,
+            proposal,
+            write,
+            proposal,
+        ]
+    else:
+        provider.outputs = [diagnosis, review, proposal, proposal, proposal]
+    await controller.execute(repair.id)
+    assert (await service.get(repair.id)).outcome_code == "proposal_exhausted"
+    assert not any(job.purpose == "candidate" for job in worker.jobs)
+    assert "No source change" in repr(provider.requests)
+    assert (root / editable).read_text() == "# original\n"
+
+
+async def test_wrong_fix_identity_gets_specific_feedback_without_evaluation(
+    database, tmp_path
+):
+    from uuid import uuid4
+
+    env = await cycle_environment(database, tmp_path)
+    service, repair, factory, controller, provider, worker, *_ = env
+    diagnosis, review, _, proposal, *_ = provider.outputs
+
+    def wrong_identity(request):
+        return {**proposal(request), "fix_id": str(uuid4())}
+
+    provider.outputs = [
+        diagnosis,
+        review,
+        wrong_identity,
+        wrong_identity,
+        wrong_identity,
+    ]
+    await controller.execute(repair.id)
+    assert (await service.get(repair.id)).outcome_code == "proposal_exhausted"
+    assert not any(job.purpose == "candidate" for job in worker.jobs)
+    assert "Proposal fix_id must match" in repr(provider.requests)
 
 
 async def test_reviewer_rejection_uses_one_three_attempt_diagnosis_chain(

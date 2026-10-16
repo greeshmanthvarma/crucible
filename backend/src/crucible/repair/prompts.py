@@ -38,14 +38,25 @@ POLICY = (
 def role_prompt(
     role: str, schema: dict[str, Any], index: Any, inputs: list[Any]
 ) -> str:
+    prompt = {
+        "role": role,
+        "policy": POLICY,
+        "result_schema": schema,
+        "incident_index": index,
+        "inputs": inputs,
+    }
+    if role == "proposal":
+        prompt["role_instructions"] = (
+            "You are the implementation agent, not a plan-only reviewer. "
+            "Apply the code change using the supplied tools in this worktree, "
+            "then inspect workspace_diff before returning the final JSON. "
+            "A description or declared_paths list alone does not implement a fix. "
+            "Copy fix_id exactly from the supplied fix input; do not generate one. "
+            "Make only evidence-grounded changes within the editable surface. "
+            "Do not modify protected code, tests, gates, or expected answers."
+        )
     return json.dumps(
-        {
-            "role": role,
-            "policy": POLICY,
-            "result_schema": schema,
-            "incident_index": index,
-            "inputs": inputs,
-        },
+        prompt,
         default=str,
         ensure_ascii=False,
     )

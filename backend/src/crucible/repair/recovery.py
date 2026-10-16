@@ -189,6 +189,7 @@ class ManagedRepairWorkspace:
             "artifact_id": str(artifact_id),
             "source_digest": source.tree_digest,
             "parent": repair.last_accepted_commit,
+            "changed_paths": sorted(changed),
         }
 
     async def restore(self, repair: RepairRun, snapshot: dict[str, Any]) -> None:

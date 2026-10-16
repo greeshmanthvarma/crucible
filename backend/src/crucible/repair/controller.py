@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
 
@@ -21,6 +22,7 @@ from crucible.domain.repair import (
 )
 from crucible.repair.cases import ApprovedCase, seal_case
 from crucible.repair.events import append_repair_event
+from crucible.repair.fingerprints import capture_source_identity
 from crucible.repair.identity import canonical_json, digest
 from crucible.repair.incident_context import IncidentContext
 from crucible.repair.roles import (
@@ -966,6 +968,9 @@ class RepairController:
                     )
                     await uow.commit()
                 try:
+                    before = await capture_source_identity(
+                        Path(repair.worktree_path or "")
+                    )
                     proposal, proposal_id = await self._role(
                         repair, "proposal", fix.id, index, (visible,)
                     )
@@ -973,7 +978,10 @@ class RepairController:
                         not isinstance(proposal, CandidateProposal)
                         or proposal.fix_id != fix.id
                     ):
-                        raise RoleOutputError("Proposal fix identity differs")
+                        raise RoleOutputError(
+                            "Proposal fix_id must match the supplied fix_id exactly; "
+                            "copy it from the current fix input, do not generate one."
+                        )
                     if self.recovery is None:
                         raise RepairInfrastructureError(
                             "Workspace recovery is unavailable"
@@ -981,6 +989,14 @@ class RepairController:
                     snapshot = await self.recovery.snapshot(
                         repair, proposal.declared_paths
                     )
+                    if (
+                        snapshot["source_digest"] == before.tree_digest
+                        or snapshot.get("changed_paths") == []
+                    ):
+                        raise RoleOutputError(
+                            "No source change: implement the fix using editable tools "
+                            "before returning proposal metadata."
+                        )
                     state["candidate_snapshot"] = snapshot
                     state["proposal"] = str(proposal_id)
                     repair = await self._checkpoint(
@@ -1069,14 +1085,17 @@ class RepairController:
                         await self._checkpoint(repair, state)
                         break
                     state["proposal_feedback"] = [
-                        gates[0].public_feedback(),
-                        gates[1].public_feedback(),
-                        gates[2].public_feedback(held_out=True),
-                        *[gate.public_feedback() for gate in gates[3:]],
+                        "Incident: " + gates[0].public_feedback(),
+                        "Held-in: " + gates[1].public_feedback(),
+                        "Held-out: " + gates[2].public_feedback(held_out=True),
+                        *[
+                            "Regression: " + gate.public_feedback()
+                            for gate in gates[3:]
+                        ],
                     ]
-                except RoleOutputError:
+                except RoleOutputError as error:
                     state["proposal_feedback"] = [
-                        "Return a valid proposal using editable paths only."
+                        str(self.incident.safe(str(error)))[:1000]
                     ]
                 except (
                     RoleInfrastructureError,

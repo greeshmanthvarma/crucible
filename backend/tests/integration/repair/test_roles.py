@@ -144,6 +144,17 @@ def test_validation_feedback_redacts_unknown_field_names():
     assert "PRIVATE_SENTINEL" not in str(error.value)
 
 
+def test_proposal_instructions_require_implementation_not_just_metadata():
+    from crucible.repair.prompts import role_prompt
+
+    prompt = json.loads(role_prompt("proposal", {}, {}, []))
+    assert (
+        "Apply the code change using the supplied tools" in prompt["role_instructions"]
+    )
+    assert "fix_id" in prompt["role_instructions"]
+    assert "role_instructions" not in json.loads(role_prompt("diagnosis", {}, {}, []))
+
+
 class Provider:
     def __init__(self, outputs):
         self.outputs = list(outputs)
