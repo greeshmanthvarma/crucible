@@ -16,6 +16,7 @@ remains an error, rather than fabricating a grading report or a test failure.
 """
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -49,7 +50,14 @@ class OutputBudget:
                 # Account before the upstream helper can append to its buffer.
                 yield chunk
         finally:
-            source.close()
+            try:
+                source.close()
+            except OSError as error:
+                # Docker may shut down an already-disconnected socket at EOF.
+                # Do not turn successful reads or an output-limit verdict into
+                # an unrelated cleanup failure; other OS errors stay visible.
+                if error.errno != errno.ENOTCONN:
+                    raise
 
 
 class BoundedAPI:

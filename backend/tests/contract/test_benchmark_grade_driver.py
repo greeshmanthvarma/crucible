@@ -1,5 +1,6 @@
 """Driver policy contracts; no Docker, evaluator install, or task data required."""
 
+import errno
 import importlib.util
 import json
 import sys
@@ -7,6 +8,49 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+
+
+@pytest.mark.parametrize("overflow", [False, True])
+def test_disconnected_cleanup_preserves_output_verdict(overflow):
+    script = Path(__file__).parents[2] / "scripts/swebench_grade_driver.py"
+    spec = importlib.util.spec_from_file_location("benchmark_driver_close", script)
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+
+    class DisconnectedStream:
+        def __iter__(self):
+            yield b"test-output"
+
+        def close(self):
+            raise OSError(errno.ENOTCONN, "Socket is not connected")
+
+    budget = driver.OutputBudget(1 if overflow else 11)
+    if overflow:
+        with pytest.raises(driver.OutputLimitExceeded, match="grading_output_limit"):
+            list(budget.stream(DisconnectedStream()))
+        assert budget.exceeded
+    else:
+        assert list(budget.stream(DisconnectedStream())) == [b"test-output"]
+        assert not budget.exceeded
+
+
+def test_unexpected_stream_close_error_is_not_suppressed():
+    script = Path(__file__).parents[2] / "scripts/swebench_grade_driver.py"
+    spec = importlib.util.spec_from_file_location(
+        "benchmark_driver_close_error", script
+    )
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+
+    class BrokenStream:
+        def __iter__(self):
+            return iter(())
+
+        def close(self):
+            raise OSError(errno.EIO, "unexpected cleanup failure")
+
+    with pytest.raises(OSError, match="unexpected cleanup failure"):
+        list(driver.OutputBudget(100).stream(BrokenStream()))
 
 
 @pytest.mark.parametrize(
