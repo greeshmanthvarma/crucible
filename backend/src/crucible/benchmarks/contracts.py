@@ -46,3 +46,29 @@ class SolutionPatch:
     sha256: str
     base_commit: str
     byte_count: int
+
+
+class GraderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    driver_python: Path
+    driver_source: Path
+    driver_commit: Commit
+    driver_digest: Sha256
+    timeout_seconds: Annotated[int, Field(gt=0)]
+    memory_bytes: Annotated[int, Field(gt=0)]
+    cpus: Annotated[int, Field(gt=0)]
+    output_limit_bytes: Annotated[int, Field(gt=0)]
+    network: Literal["none"]
+
+
+@dataclass(frozen=True)
+class GradeResult:
+    verdict: Literal["pass", "fail", "error"]
+    code: str
+    evaluation_id: str
+    resolved: bool | None
+    patch_sha256: str
+    report_path: Path | None
+    log_path: Path
+    driver_commit: str
+    elapsed_seconds: float
