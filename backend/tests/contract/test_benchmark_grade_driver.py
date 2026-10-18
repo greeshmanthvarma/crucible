@@ -9,8 +9,29 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 
+@pytest.mark.parametrize(
+    ("stream_sizes", "catch_error", "limited"),
+    [
+        ((), True, False),
+        ((64,), True, False),
+        ((100,), True, True),
+        ((32, 33), True, True),
+        ((100,), False, True),
+    ],
+    ids=[
+        "no-output",
+        "exact-limit",
+        "overflow-caught",
+        "shared-budget",
+        "overflow-raised",
+    ],
+)
 def test_driver_enforces_docker_policy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_sizes: tuple[int, ...],
+    catch_error: bool,
+    limited: bool,
 ) -> None:
     script = Path(__file__).parents[2] / "scripts/swebench_grade_driver.py"
     spec = importlib.util.spec_from_file_location("benchmark_driver", script)
@@ -64,7 +85,20 @@ def test_driver_enforces_docker_policy(
     request_path.write_text(json.dumps(request))
     seen = {}
 
+    sizes = iter(stream_sizes)
+
+    def chunks():
+        try:
+            for _ in range(next(sizes)):
+                seen["chunks"] = seen.get("chunks", 0) + 1
+                yield b"x" * 1024
+        finally:
+            seen["stream_closed"] = True
+
     class Container:
+        client = SimpleNamespace(
+            api=SimpleNamespace(exec_start=lambda *a, **kw: chunks())
+        )
         attrs = {
             "HostConfig": {
                 "Memory": 1024,
@@ -98,8 +132,21 @@ def test_driver_enforces_docker_policy(
 
     def run_instance(spec, prediction, client, run_id, **kwargs):
         assert kwargs["skip_patch"] is True
-        client.containers.create(image=request["image"], cap_add=["SYS_ADMIN"])
-        return "case", {"case": {"resolved": False}}
+        container = client.containers.create(
+            image=request["image"], cap_add=["SYS_ADMIN"]
+        )
+        # Reproduce the upstream accumulator and its exception-catching behavior.
+        collected = bytearray()
+        try:
+            for _ in stream_sizes:
+                for chunk in container.client.api.exec_start("exec", stream=True):
+                    collected.extend(chunk)
+        except Exception:
+            if not catch_error:
+                raise
+        finally:
+            seen["collected"] = len(collected)
+        return "case", {"case": {"resolved": True}}
 
     official.run_instance = run_instance
     utils = ModuleType("swebench.harness.utils")
@@ -125,3 +172,20 @@ def test_driver_enforces_docker_policy(
     assert seen["platform"] == "linux/amd64"
     assert seen["cap_add"] == []
     assert seen["removed"] is True
+
+    if limited:
+        assert seen["chunks"] == 65
+        assert seen["collected"] == 65536
+        assert seen["stream_closed"] is True
+        assert json.loads((output / "result.json").read_text())["classification"] == (
+            "grading_output_limit"
+        )
+        assert not (output / "official-report.json").exists()
+    else:
+        assert json.loads((output / "result.json").read_text())["classification"] == (
+            "official_report"
+        )
+        assert (output / "official-report.json").exists()
+        if stream_sizes:
+            assert seen["collected"] == 65536
+            assert seen["stream_closed"] is True

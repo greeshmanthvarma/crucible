@@ -8,7 +8,9 @@ patch_successfully_applied, patch_is_None, infra_failure, tests_status}}.
 
 The injected Docker client enforces pinned pre-staged images, architecture,
 network, memory, CPU and ownership. Pull/build/removal of unrelated resources
-are unsupported. No inference module or dataset acquisition is invoked.
+are unsupported. Test output is byte-counted before upstream accumulation,
+with one allowance shared across streams. No inference module or dataset
+acquisition is invoked.
 A failed patch application produces no complete upstream report and therefore
 remains an error, rather than fabricating a grading report or a test failure.
 """
@@ -20,9 +22,66 @@ import os
 import resource
 import signal
 import sys
+import threading
 from pathlib import Path
 
 PIN = "02e7a74ffd0b707aab73d203fe87bdc7c76afc8e"
+
+
+class OutputLimitExceeded(RuntimeError):
+    """Docker output exceeded the evaluation's shared byte allowance."""
+
+
+class OutputBudget:
+    def __init__(self, limit):
+        self.remaining = limit
+        self.exceeded = False
+        self.lock = threading.Lock()
+
+    def stream(self, source):
+        try:
+            for chunk in source:
+                with self.lock:
+                    if self.exceeded or len(chunk) > self.remaining:
+                        self.exceeded = True
+                        raise OutputLimitExceeded("grading_output_limit")
+                    self.remaining -= len(chunk)
+                # Account before the upstream helper can append to its buffer.
+                yield chunk
+        finally:
+            source.close()
+
+
+class BoundedAPI:
+    def __init__(self, api, budget):
+        self.api = api
+        self.budget = budget
+
+    def __getattr__(self, name):
+        return getattr(self.api, name)
+
+    def exec_start(self, *args, **kwargs):
+        if not kwargs.get("stream"):
+            raise ValueError("evaluator exec_start must stream output")
+        return self.budget.stream(self.api.exec_start(*args, **kwargs))
+
+
+class BoundedContainer:
+    def __init__(self, container, budget):
+        self.container = container
+        self.client = BoundedClient(container.client, budget)
+
+    def __getattr__(self, name):
+        return getattr(self.container, name)
+
+
+class BoundedClient:
+    def __init__(self, client, budget):
+        self.client = client
+        self.api = BoundedAPI(client.api, budget)
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
 
 
 def main() -> int:
@@ -71,6 +130,7 @@ def main() -> int:
         raise ValueError("unstaged multimodal assets unsupported")
     client = docker.from_env(timeout=min(30, config["timeout_seconds"]))
     owned = []
+    budget = OutputBudget(cap)
     identity = request["evaluation_id"]
     labels = {
         "crucible.benchmark.evaluation": identity,
@@ -119,7 +179,7 @@ def main() -> int:
                 or host["NetworkMode"] != "none"
             ):
                 raise ValueError("Docker resource policy not enforced")
-            return container
+            return BoundedContainer(container, budget)
 
     class Client:
         images = Images()
@@ -154,7 +214,9 @@ def main() -> int:
             timeout=config["timeout_seconds"],
             skip_patch=not prediction["model_patch"],
         )
-        if value is not None:
+        if budget.exceeded:
+            envelope["classification"] = "grading_output_limit"
+        elif value is not None:
             instance_id, report = value
             if instance_id != request["case_id"]:
                 raise ValueError("official case identity mismatch")
@@ -164,6 +226,8 @@ def main() -> int:
                 classification="official_report",
                 report_digest=hashlib.sha256(path.read_bytes()).hexdigest(),
             )
+    except OutputLimitExceeded:
+        envelope["classification"] = "grading_output_limit"
     finally:
         for container in owned:
             try:
