@@ -126,3 +126,20 @@ class TrialResult:
     grade: GradeResult | None
     status: Literal["complete", "error", "interrupted"]
     error_code: str | None
+
+
+class ModelSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    model_id: Annotated[str, Field(min_length=1)]
+    input_limit: Annotated[int, Field(gt=0)]
+    output_reserve: Annotated[int, Field(gt=0)]
+    provider_defaults: Literal["unspecified"]
+
+    @field_validator("model_id")
+    @classmethod
+    def real_model(cls, value: str) -> str:
+        if value in {"fake", "deterministic"}:
+            raise ValueError(
+                "production benchmark commands require an explicit real model"
+            )
+        return value

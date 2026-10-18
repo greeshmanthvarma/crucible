@@ -8,12 +8,12 @@ import signal
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Literal
 from uuid import uuid4
 
 from alembic import command
 from alembic.config import Config
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from crucible.application.approval_service import public_command_spec
 from crucible.application.container import ApplicationContainer
@@ -25,6 +25,7 @@ from crucible.benchmarks.admission import (
 from crucible.benchmarks.contracts import (
     BenchmarkCase,
     GraderConfig,
+    ModelSettings,
     TrialIdentity,
     TrialLimits,
     TrialResult,
@@ -38,23 +39,6 @@ from crucible.domain.evals import EvalBudgets
 from crucible.evals.runner import ApprovalChoice
 from crucible.models.responses_gateway import LiteLLMResponsesGateway
 from crucible.repair.identity import capture_runtime_identity, digest
-
-
-class ModelSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-    model_id: Annotated[str, Field(min_length=1)]
-    input_limit: Annotated[int, Field(gt=0)]
-    output_reserve: Annotated[int, Field(gt=0)]
-    provider_defaults: Literal["unspecified"]
-
-    @field_validator("model_id")
-    @classmethod
-    def real_model(cls, value: str) -> str:
-        if value in {"fake", "deterministic"}:
-            raise ValueError(
-                "production benchmark commands require an explicit real model"
-            )
-        return value
 
 
 class TrialConfig(BaseModel):
