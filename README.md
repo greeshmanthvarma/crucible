@@ -364,3 +364,98 @@ verified PR evidence. Do not seed a defect or change evaluation gates to obtain 
 success. If no supported improvement is found, record that result. The user
 reviews/merges the PR and restarts the updated harness. CI uses fake providers;
 paid provider calls and real publication are separate user-invoked work.
+
+## Protected benchmark foundation
+
+The benchmark adapter captures Crucible's actual repository solution patch and
+runs a separately installed, pinned official SWE-bench evaluator. Solver completion,
+solver termination, and independent grading are recorded separately. Budget exhaustion
+can still produce a passing patch; provider or integrity errors cannot.
+
+This foundation supports one current-baseline, non-suite calibration at a time.
+It does not implement mining, promotion, experiment batches, publication, or resume.
+The proposed 18 cases and 12 reserves are not admitted or frozen. The earlier Astropy
+x86 image smoke check does not establish grader viability. No real case admission or
+real-model calibration has been demonstrated by the mocked tests.
+
+Commands (run from `backend`):
+
+```bash
+uv run crucible benchmark admit --config /protected/admit.json --output /controller/admission-run
+uv run crucible benchmark trial --config /protected/trial.json --output /controller/trial-run
+uv run crucible benchmark show /controller/trial-run
+```
+
+Each external operation requires separate operator authorization for that concrete
+operation and its limits. Preparing configuration or running ordinary tests does not
+authorize paid calls, reference acquisition, image downloads, or real grading.
+Keep task records, hidden tests, reference patches, admission records and reports in
+controller-only storage outside solver fixtures/workspaces. Git ignore rules are not
+access control. Reference patches must be supplied by trusted tooling under separate
+authorization, never acquired or included in model prompts by this workflow.
+
+Admission JSON requires `schema_version: 1`,
+`authorization: "empty-and-reference-grading"`, absolute `case_manifest`, `grader`,
+absolute `reference_patch`, and `reference_sha256`. Its admission record is written to
+`OUTPUT/admission/admission.json`. Empty grading must produce an official failure and
+reference grading an official pass; an infrastructure error stops admission.
+
+Trial JSON requires `schema_version: 1`,
+`authorization: "one-baseline-calibration"`, `approval_mode: "interactive"`, absolute
+`case_manifest`, `grader`, absolute `admission_record`, absolute `data_dir`, `identity`,
+`limits`, and `model`. Unknown fields reject, including API keys and deterministic
+production modes. `model` requires `model_id`, positive `input_limit` and
+`output_reserve`, and `provider_defaults: "unspecified"`; provider credentials remain
+in the existing environment. Limits require positive `max_steps`, `max_tool_calls`,
+`max_model_tokens`, `max_active_seconds`, and `wall_timeout_seconds`. The existing trusted gateway ledger covers both solving and compaction requests,
+records reported versus estimated usage, and stops further requests after provider
+failure. Token reservations use the existing estimator; they are not a verified
+billing or dollar ceiling. There are no implicit spending defaults. Existing command approvals remain interactive.
+
+Identity requires a fresh `trial_id`, `case_digest`, `harness_commit`,
+`harness_tree_digest`, `model_config_digest`, `limits_digest`, and `repeat_index`
+(0–2). Use `benchmarks.manifests.case_digest` for the case,
+`repair.identity.capture_runtime_identity` for the current commit/source digest,
+and `repair.identity.digest` for the exact model configuration and limits. The
+running checkout must be clean and match that identity. These hashes do not turn
+unadmitted corpus drafts into a measured suite.
+
+Grader configuration requires absolute resolved `driver_python` and `driver_source`,
+`driver_commit`, `driver_digest`, positive `timeout_seconds`, `memory_bytes`, `cpus`,
+`output_limit_bytes`, and `network: "none"`. The binding is pinned to official
+SWE-bench revision `02e7a74ffd0b707aab73d203fe87bdc7c76afc8e`; `driver_digest` uses
+`benchmarks.manifests.fixture_digest`. Keep the interpreter environment outside its
+clean source checkout; untracked/ignored importable files reject. Its protected task
+record must match that revision's v5 `make_test_spec` input, including the pinned
+image, repository/base identity, test lists, parser and evaluation script. No automatic
+conversion or dataset acquisition occurs. An old task image is not assumed compatible
+with this evaluator. Stage images separately; pulls and multimodal asset downloads
+are refused. On systems needing a nondefault Docker socket, configure `DOCKER_HOST`
+explicitly. The application lockfile does not install SWE-bench.
+
+Benchmark commands use portable source clones mounted at `/testbed`, the admitted
+platform, image-provided dependency PATH and default image user, read-only container
+root, no network, dropped capabilities, and no host Docker socket. Only the solver
+workspace, its read-only Git metadata submount, and ordinary task volumes are mounted.
+Git status/diff remain available; Git metadata mutations are refused during solving. Ordinary chat sandbox defaults are
+unchanged. Patch collection uses a separate controller-owned base snapshot and rejects
+unsupported binary, symlink or submodule changes.
+
+Evidence retains a sanitized request, append-only stages, solver trace/usage,
+solution patch/digest and independent report references. Results are written atomically.
+Reusing a trial ID/output refuses execution, including after interruption; `show`
+only reads bounded status. Each trial uses a new private runtime database under
+`DATA_DIR/benchmark-runtime/TRIAL_ID`; existing application/lab databases are not
+opened or upgraded. Exit codes are 0 for complete/admitted (a completed trial may
+fail correctness), 2 for invalid input/rejection, 3 for infrastructure error, and 130
+for interruption. Official patch-application failure currently remains an error
+because the pinned evaluator emits no complete authoritative report for it.
+
+External proof is opt-in: admission tests require
+`CRUCIBLE_BENCHMARK_ADMISSION_CONFIG`; a real calibration requires
+`CRUCIBLE_BENCHMARK_REAL_CONFIG` and the `docker`, `real_model`, and
+`benchmark_external` markers. Use only a separately authorized admitted calibration
+case with explicit model/limits. A real trace, captured patch and authoritative report
+constitute plumbing proof whether correctness passes or fails; do not retry until
+solved or report it as an official suite score. Unavailable resource telemetry is
+recorded explicitly instead of inferred.

@@ -45,7 +45,11 @@ def validate_official_report(path: Path, case_id: str) -> tuple[bool | None, str
         ):
             if type(result.get(key)) is not bool:
                 return None, "malformed_official_report"
-        if not result["patch_exists"] or not result["patch_successfully_applied"]:
+        if (
+            result["patch_is_None"]
+            or not result["patch_exists"]
+            or not result["patch_successfully_applied"]
+        ):
             return None, "incomplete_official_report"
         status = result.get("tests_status")
         if not isinstance(status, dict) or set(status) != {
@@ -69,7 +73,10 @@ def validate_official_report(path: Path, case_id: str) -> tuple[bool | None, str
             and not status["FAIL_TO_PASS"]["failure"]
         ):
             return None, "incomplete_official_report"
-        if result["resolved"] and any(group["failure"] for group in status.values()):
+        expected_resolved = not any(
+            status[group]["failure"] for group in ("FAIL_TO_PASS", "PASS_TO_PASS")
+        )
+        if result["resolved"] != expected_resolved:
             return None, "inconsistent_official_report"
         return result["resolved"], "official_report"
     except (ValueError, TypeError, KeyError, AttributeError, OSError):
@@ -78,6 +85,14 @@ def validate_official_report(path: Path, case_id: str) -> tuple[bool | None, str
 
 def validate_driver_source(config: GraderConfig) -> None:
     source = config.driver_source
+    executable = config.driver_python
+    if (
+        not executable.is_absolute()
+        or not executable.is_file()
+        or not os.access(executable, os.X_OK)
+        or any(p.is_symlink() for p in [executable, *executable.parents])
+    ):
+        raise ValueError("invalid external driver interpreter")
     if not source.is_absolute() or any(
         p.is_symlink() for p in [source, *source.parents]
     ):
@@ -168,10 +183,13 @@ class SwebenchGrader:
         request_path.write_text(json.dumps(request, sort_keys=True))
         driver = Path(__file__).parents[3] / "scripts/swebench_grade_driver.py"
         env = {"PATH": os.defpath, "HOME": str(output_dir), "PYTHONNOUSERSITE": "1"}
+        docker_executable = shutil.which("docker")
+        if docker_executable:
+            env["PATH"] += os.pathsep + str(Path(docker_executable).parent)
         if "DOCKER_HOST" in os.environ:
             env["DOCKER_HOST"] = os.environ["DOCKER_HOST"]
-        try:
-            process = await asyncio.create_subprocess_exec(
+        launch = asyncio.create_task(
+            asyncio.create_subprocess_exec(
                 str(config.driver_python),
                 "-B",
                 "-I",
@@ -186,6 +204,25 @@ class SwebenchGrader:
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
             )
+        )
+        try:
+            process = await asyncio.shield(launch)
+        except asyncio.CancelledError:
+            try:
+                started_process = await launch
+                if started_process.returncode is None:
+                    os.killpg(started_process.pid, signal.SIGTERM)
+                    try:
+                        await asyncio.wait_for(started_process.wait(), 5)
+                    except TimeoutError:
+                        os.killpg(started_process.pid, signal.SIGKILL)
+                        await started_process.wait()
+                await self._cleanup_owned(identity, str(trial_id), env)
+            except (OSError, RuntimeError, TimeoutError):
+                log.write_text(
+                    "Grading interrupted; owned cleanup requires inspection.\n"
+                )
+            raise
         except OSError:
             return result("driver_launch_failed")
         assert process.stdout is not None
@@ -217,6 +254,7 @@ class SwebenchGrader:
         monitor_task = asyncio.create_task(monitor())
         wait_task = asyncio.create_task(process.wait())
         code = "driver_process_failed"
+        output_exceeded = False
         resolved_out: bool | None = None
         report_out: Path | None = None
         try:
@@ -263,6 +301,7 @@ class SwebenchGrader:
         except TimeoutError:
             code = "grading_timeout"
         except OverflowError:
+            output_exceeded = True
             code = "grading_output_limit"
         except _GradeFailure as error:
             code = str(error)
@@ -287,6 +326,22 @@ class SwebenchGrader:
             await asyncio.gather(
                 drain_task, monitor_task, wait_task, return_exceptions=True
             )
+            if output_exceeded:
+                marker = b"\n[TRUNCATED: grading output limit]\n"
+                remaining = max(0, config.output_limit_bytes - len(marker))
+                for artifact in sorted(output_dir.rglob("*")):
+                    if (
+                        artifact == request_path
+                        or artifact.is_symlink()
+                        or not artifact.is_file()
+                    ):
+                        continue
+                    with artifact.open("rb") as stream:
+                        retained_bytes = stream.read(remaining)
+                    artifact.write_bytes(retained_bytes)
+                    remaining -= len(retained_bytes)
+                with log.open("ab") as marker_stream:
+                    marker_stream.write(marker[: config.output_limit_bytes])
         return result(code, resolved_out, report_out)
 
     async def _cleanup_owned(

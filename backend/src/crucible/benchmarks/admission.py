@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from pydantic import BaseModel, ConfigDict
+
 from crucible.benchmarks.contracts import (
     BenchmarkCase,
     GraderConfig,
@@ -196,20 +198,9 @@ def validate_admission(path: Path, case: BenchmarkCase, config: GraderConfig) ->
 
 async def run_admission_config(path: Path, output_dir: Path) -> AdmissionResult:
     """Explicit operator opt-in for pre-staged local protected inputs only."""
-    from pydantic import BaseModel, ConfigDict
-
     from crucible.benchmarks.manifests import load_case
 
-    class Config(BaseModel):
-        model_config = ConfigDict(extra="forbid", strict=True)
-        schema_version: Literal[1]
-        authorization: Literal["empty-and-reference-grading"]
-        case_manifest: Path
-        grader: GraderConfig
-        reference_patch: Path
-        reference_sha256: str
-
-    config = Config.model_validate_json(path.read_bytes())
+    config = AdmissionConfig.model_validate_json(path.read_bytes())
     case = load_case(config.case_manifest)
     reference = config.reference_patch
     if not reference.is_absolute() or any(
@@ -221,3 +212,13 @@ async def run_admission_config(path: Path, output_dir: Path) -> AdmissionResult:
         raise ValueError("reference digest mismatch")
     patch = SolutionPatch(reference, digest, case.base_commit, reference.stat().st_size)
     return await admit_case(case, config.grader, patch, output_dir)
+
+
+class AdmissionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    schema_version: Literal[1]
+    authorization: Literal["empty-and-reference-grading"]
+    case_manifest: Path
+    grader: GraderConfig
+    reference_patch: Path
+    reference_sha256: str

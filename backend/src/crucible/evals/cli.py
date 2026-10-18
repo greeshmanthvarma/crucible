@@ -53,6 +53,7 @@ def _positive_int(value: str) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="crucible")
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("benchmark", help="explicit protected benchmark calibration")
     eval_command = commands.add_parser("eval")
     eval_commands = eval_command.add_subparsers(dest="eval_command", required=True)
     run = eval_commands.add_parser("run")
@@ -198,6 +199,10 @@ async def run_cli(
     gateway_factory: Callable[[], ModelGateway] | None = None,
     docker_client: DockerClient | None = None,
 ) -> int:
+    if argv and argv[0] == "benchmark":
+        from crucible.benchmarks.cli import run_cli as run_benchmark_cli
+
+        return await run_benchmark_cli(argv[1:])
     parser = _parser()
     args = parser.parse_args(argv)
     data_dir, database_url = _paths(args.data_dir)
