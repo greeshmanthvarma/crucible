@@ -3,8 +3,9 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Commit = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
@@ -60,6 +61,13 @@ class GraderConfig(BaseModel):
     output_limit_bytes: Annotated[int, Field(gt=0)]
     network: Literal["none"]
 
+    @field_validator("driver_python", "driver_source")
+    @classmethod
+    def absolute_path(cls, value: Path) -> Path:
+        if not value.is_absolute() or ".." in value.parts:
+            raise ValueError("absolute driver paths without parent traversal required")
+        return value
+
 
 @dataclass(frozen=True)
 class GradeResult:
@@ -72,3 +80,49 @@ class GradeResult:
     log_path: Path
     driver_commit: str
     elapsed_seconds: float
+
+
+class TrialLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    max_steps: Annotated[int, Field(gt=0)]
+    max_tool_calls: Annotated[int, Field(gt=0)]
+    max_model_tokens: Annotated[int, Field(gt=0)]
+    max_active_seconds: Annotated[int, Field(gt=0)]
+    wall_timeout_seconds: Annotated[int, Field(gt=0)]
+
+
+class TrialIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    trial_id: UUID
+    case_digest: Sha256
+    harness_commit: Commit
+    harness_tree_digest: Sha256
+    model_config_digest: Sha256
+    limits_digest: Sha256
+    repeat_index: Annotated[int, Field(ge=0, le=2)]
+
+
+@dataclass(frozen=True)
+class SolverResult:
+    termination: Literal[
+        "completed",
+        "budget_exhausted",
+        "cancelled",
+        "provider_error",
+        "infrastructure_error",
+    ]
+    task_id: UUID
+    run_id: UUID
+    workspace: Path
+    trace_path: Path
+    usage_path: Path
+
+
+@dataclass(frozen=True)
+class TrialResult:
+    identity: TrialIdentity
+    solver: SolverResult | None
+    patch: SolutionPatch | None
+    grade: GradeResult | None
+    status: Literal["complete", "error", "interrupted"]
+    error_code: str | None

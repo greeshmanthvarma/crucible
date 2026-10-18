@@ -18,16 +18,18 @@ def collect_solution_patch(
     *,
     base_commit: str,
     max_bytes: int = 8_388_608,
+    base_repository: Path | None = None,
 ) -> SolutionPatch:
     if not re.fullmatch(r"[0-9a-f]{40}", expected_base_tree) or max_bytes <= 0:
         raise ValueError("invalid base tree or patch limit")
-    if workspace.is_symlink() or not (workspace / ".git").is_dir():
+    source_repository = base_repository or workspace
+    if workspace.is_symlink() or not (source_repository / ".git").is_dir():
         raise ValueError("invalid workspace")
     if destination.resolve().is_relative_to(workspace.resolve()):
         raise ValueError("patch destination must be outside workspace")
     if any(p.is_symlink() for p in [destination, *destination.parents]):
         raise ValueError("symlink patch destination")
-    metadata = workspace / ".git"
+    metadata = source_repository / ".git"
     if metadata.is_symlink():
         raise ValueError("symlink Git metadata")
     head = _local_read(metadata, "HEAD").decode().strip()
@@ -64,6 +66,8 @@ def collect_solution_patch(
                 if (Path(directory) / name).is_symlink():
                     raise ValueError("unsupported symlink")
             for name in files:
+                if Path(directory) == workspace and name == ".git":
+                    continue
                 source = Path(directory) / name
                 relative = source.relative_to(workspace)
                 _validate_path(relative.as_posix())

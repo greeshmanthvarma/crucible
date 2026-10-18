@@ -1,3 +1,6 @@
+import asyncio
+import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -24,9 +27,12 @@ class ProvisionedWorkspace:
 
 
 class WorkspaceManager:
-    def __init__(self, git: GitClient, data_dir: Path) -> None:
+    def __init__(
+        self, git: GitClient, data_dir: Path, *, portable: bool = False
+    ) -> None:
         self._git = git
         self._data_dir = data_dir
+        self._portable = portable
 
     def destination_for(self, task_id: UUID, generation: int = 0) -> Path:
         suffix = f"-g{generation}" if generation else ""
@@ -54,15 +60,60 @@ class WorkspaceManager:
                 f"Workspace destination already exists: {plan.workspace_path}"
             )
         plan.workspace_path.parent.mkdir(parents=True, exist_ok=True)
-        await self._git.add_worktree(
-            plan.repository_root, plan.workspace_path, plan.base_revision
-        )
+        if self._portable:
+            await asyncio.to_thread(self._clone_portable, plan)
+        else:
+            await self._git.add_worktree(
+                plan.repository_root, plan.workspace_path, plan.base_revision
+            )
         actual_revision = await self._git.worktree_revision(plan.workspace_path)
         if actual_revision != plan.base_revision:
             raise WorkspaceRevisionMismatch(
                 "Workspace revision does not match the recorded Base Revision"
             )
         return ProvisionedWorkspace(plan.base_revision, plan.workspace_path)
+
+    @staticmethod
+    def _clone_portable(plan: WorkspacePlan) -> None:
+        env = {
+            "PATH": os.defpath,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+        }
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "clone",
+                "--quiet",
+                "--no-hardlinks",
+                "--no-local",
+                "--no-checkout",
+                "--",
+                str(plan.repository_root),
+                str(plan.workspace_path),
+            ],
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(plan.workspace_path),
+                "-c",
+                "core.hooksPath=/dev/null",
+                "checkout",
+                "--quiet",
+                "--detach",
+                plan.base_revision,
+            ],
+            check=True,
+            capture_output=True,
+            env=env,
+        )
 
     async def provision(
         self, repository_root: Path, source_ref: str, task_id: UUID
@@ -72,6 +123,10 @@ class WorkspaceManager:
     async def recover(self, plan: WorkspacePlan) -> ProvisionedWorkspace:
         if not plan.workspace_path.exists():
             return await self.create(plan)
+        if self._portable:
+            raise WorkspaceDestinationExists(
+                "Portable benchmark workspaces cannot be resumed implicitly"
+            )
         if not await self._git.owns_worktree(plan.repository_root, plan.workspace_path):
             raise WorkspaceDestinationExists(
                 "Destination is not a worktree owned by the recorded Repository"

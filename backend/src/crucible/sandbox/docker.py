@@ -3,6 +3,7 @@ import inspect
 import re
 from collections.abc import Callable
 from dataclasses import replace
+from uuid import UUID
 
 from crucible.application.ports import UnitOfWork
 from crucible.domain.clock import Clock
@@ -19,6 +20,7 @@ from crucible.sandbox.protocol import (
     SandboxTermination,
 )
 from crucible.sandbox.resources import (
+    DEPENDENCY_TARGET,
     KIND_LABEL,
     MANAGED_LABEL,
     RESOURCE_LABEL,
@@ -38,11 +40,19 @@ class DockerSandboxBackend:
         clock: Clock,
         *,
         cleanup_grace_seconds: int = 3,
+        repository_environment: tuple[str, str] | None = None,
     ) -> None:
         self._docker = docker
         self._unit_of_work = unit_of_work
         self._clock = clock
         self._cleanup_grace_seconds = cleanup_grace_seconds
+        if repository_environment is not None:
+            image, platform = repository_environment
+            if re.fullmatch(
+                r".+@sha256:[0-9a-f]{64}", image
+            ) is None or platform not in {"linux/amd64", "linux/arm64"}:
+                raise ValueError("invalid repository environment")
+        self.repository_environment = repository_environment
 
     async def execute(
         self, request: SandboxRequest, on_chunk: OutputCallback
@@ -138,6 +148,20 @@ class DockerSandboxBackend:
 
     async def cancel(self, container_id: str) -> None:
         await self._cleanup(container_id)
+
+    async def stop_task_commands(self, task_id: UUID) -> None:
+        """Stop only this task's registered command containers before a snapshot."""
+        async with self._unit_of_work() as uow:
+            resources = await uow.external_resources.list_for_task(task_id)
+        for resource in resources:
+            if (
+                resource.kind.value != "container"
+                or resource.status is ExternalResourceStatus.REMOVED
+            ):
+                continue
+            if not await self._cleanup(resource.external_identity):
+                raise RuntimeError("solver command cleanup failed")
+            await self._mark_status(resource, ExternalResourceStatus.REMOVED)
 
     async def evaluate(
         self, request: EvalSandboxRequest, on_chunk: OutputCallback
@@ -320,6 +344,16 @@ class DockerSandboxBackend:
         self, request: SandboxRequest, labels: dict[str, str]
     ) -> tuple[str, ...]:
         command = request.command
+        target = "/testbed" if self.repository_environment else "/workspace"
+        if self.repository_environment and (
+            command.image != self.repository_environment[0]
+            or command.network is not CommandNetwork.NONE
+        ):
+            raise ValueError("command differs from admitted repository environment")
+        if self.repository_environment and any(
+            mount.target != DEPENDENCY_TARGET for mount in request.mounts
+        ):
+            raise ValueError("unexpected solver resource mount")
         arguments = [
             "create",
             "--name",
@@ -340,6 +374,12 @@ class DockerSandboxBackend:
             "--pids-limit",
             str(command.limits.pids),
         ]
+        if self.repository_environment:
+            user_index = arguments.index("--user")
+            del arguments[user_index : user_index + 2]
+            arguments.extend(
+                ("--platform", self.repository_environment[1], "--pull=never")
+            )
         for key, value in sorted(labels.items()):
             arguments.extend(("--label", f"{key}={value}"))
         environment = {
@@ -349,22 +389,46 @@ class DockerSandboxBackend:
             "CRUCIBLE_TASK_ID": str(request.task_id),
             **command.environment,
         }
+        if self.repository_environment:
+            environment.pop("PATH")
+            environment.update(
+                {
+                    "GIT_OPTIONAL_LOCKS": "0",
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "safe.directory",
+                    "GIT_CONFIG_VALUE_0": target,
+                }
+            )
         for key, value in sorted(environment.items()):
             arguments.extend(("--env", f"{key}={value}"))
         arguments.extend(
             (
                 "--mount",
-                f"type=bind,src={request.workspace_path},dst=/workspace",
+                f"type=bind,src={request.workspace_path},dst={target}",
             )
         )
+        if self.repository_environment:
+            metadata = request.workspace_path / ".git"
+            if metadata.is_symlink() or not metadata.is_dir():
+                raise ValueError("benchmark commands require portable Git metadata")
+            arguments.extend(
+                ("--mount", f"type=bind,src={metadata},dst={target}/.git,readonly")
+            )
         for mount in request.mounts:
-            option = f"type=volume,src={mount.external_identity},dst={mount.target}"
+            mount_target = (
+                f"{target}/node_modules"
+                if self.repository_environment
+                else mount.target
+            )
+            option = f"type=volume,src={mount.external_identity},dst={mount_target}"
             if mount.read_only:
                 option += ",readonly"
             arguments.extend(("--mount", option))
-        workdir = "/workspace"
+        workdir = target
         if command.cwd != ".":
-            workdir = f"/workspace/{command.cwd}"
+            workdir = f"{target}/{command.cwd}"
         arguments.extend(
             (
                 "--workdir",

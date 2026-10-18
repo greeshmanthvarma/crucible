@@ -91,6 +91,9 @@ class ApplicationContainer:
     context_manager: ContextManager
     tool_dispatcher: ToolDispatcher
     command_sandbox: SandboxBackend
+    execution_budgets: EvalBudgets | None = None
+    execution_context_limits: tuple[int, int] | None = None
+    execution_gateway: ModelGateway | None = None
 
     @classmethod
     async def create(
@@ -104,7 +107,12 @@ class ApplicationContainer:
         run_budgets: EvalBudgets | None = None,
         context_limits: tuple[int, int] | None = None,
         worker_job: WorkerJob | None = None,
+        sandbox_environment: tuple[str, str] | None = None,
     ) -> "ApplicationContainer":
+        if worker_job is not None and sandbox_environment is not None:
+            raise ValueError(
+                "repository environments cannot use the repair worker protocol"
+            )
         database = await Database.create(database_url)
         await _verify_current_revision(database)
 
@@ -116,7 +124,9 @@ class ApplicationContainer:
         notifier = TaskEventNotifier()
         approval_broker = InMemoryApprovalBroker()
         journal = RunJournal(unit_of_work, clock, notifier)
-        workspaces = WorkspaceManager(git, data_dir)
+        workspaces = WorkspaceManager(
+            git, data_dir, portable=sandbox_environment is not None
+        )
         docker = docker_client or SubprocessDockerClient()
         resource_manager = TaskResourceManager(docker, unit_of_work, clock)
         approval_service = ApprovalService(
@@ -151,7 +161,9 @@ class ApplicationContainer:
             secret_values=secret_values,
             runtime_identity=runtime_identity,
         )
-        sandbox_backend = DockerSandboxBackend(docker, unit_of_work, clock)
+        sandbox_backend = DockerSandboxBackend(
+            docker, unit_of_work, clock, repository_environment=sandbox_environment
+        )
         command_resources = resource_manager
         command_sandbox: SandboxBackend = sandbox_backend
         command_authority = CommandAuthority(
@@ -547,6 +559,9 @@ class ApplicationContainer:
             context_manager=context_manager,
             tool_dispatcher=dispatcher,
             command_sandbox=command_sandbox,
+            execution_budgets=run_budgets,
+            execution_context_limits=context_limits,
+            execution_gateway=gateway,
         )
 
     async def start(self) -> None:
