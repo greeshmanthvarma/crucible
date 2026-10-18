@@ -33,6 +33,7 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [
+    "benchmark_external: requires explicit authorized protected benchmark configuration",
     "docker: requires a reachable Docker daemon and configured test image",
     "real_model: requires explicit opt-in and configured model credentials",
 ]

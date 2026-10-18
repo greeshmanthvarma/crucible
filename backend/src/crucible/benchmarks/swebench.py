@@ -76,6 +76,21 @@ def validate_official_report(path: Path, case_id: str) -> tuple[bool | None, str
         return None, "malformed_official_report"
 
 
+def validate_driver_source(config: GraderConfig) -> None:
+    source = config.driver_source
+    if not source.is_absolute() or any(
+        p.is_symlink() for p in [source, *source.parents]
+    ):
+        raise ValueError("invalid driver source path")
+    if (
+        config.driver_commit != PINNED_COMMIT
+        or _git(source, "rev-parse", "HEAD").decode().strip() != config.driver_commit
+        or fixture_digest(source) != config.driver_digest
+        or _git(source, "status", "--porcelain", "--untracked-files=all", "--ignored")
+    ):
+        raise ValueError("driver integrity failure")
+
+
 class _GradeFailure(ValueError):
     pass
 
@@ -131,21 +146,7 @@ class SwebenchGrader:
                 or patch.base_commit != case.base_commit
             ):
                 return result("patch_integrity_failure")
-            if (
-                config.driver_commit != PINNED_COMMIT
-                or _git(config.driver_source, "rev-parse", "HEAD").decode().strip()
-                != config.driver_commit
-                or fixture_digest(config.driver_source) != config.driver_digest
-            ):
-                return result("driver_integrity_failure")
-            if _git(
-                config.driver_source,
-                "status",
-                "--porcelain",
-                "--untracked-files=all",
-                "--ignored",
-            ):
-                return result("driver_integrity_failure")
+            validate_driver_source(config)
         except (OSError, ValueError, subprocess.CalledProcessError):
             return result("grading_preflight_failure")
         request = {
