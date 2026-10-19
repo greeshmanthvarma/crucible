@@ -27,7 +27,7 @@ def trial_key(
             worker=manifest.worker_image,
             platform=manifest.worker_platform,
             relay=manifest.relay_image,
-            protocol=1,
+            protocol=manifest.worker_protocol_version or 1,
             grader=grader_policy_digest(manifest.grader),
             model=manifest.model,
             limits=manifest.trial_limits,

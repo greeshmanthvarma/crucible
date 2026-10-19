@@ -16,10 +16,22 @@ from crucible.improvement.contracts import (
     UsageAmounts,
 )
 from crucible.improvement.manifest import ManifestDrift, manifest_digest
+from crucible.improvement.roles import RoleExecution, SelectionDecision
+from crucible.repair.identity import digest
 
 Status = Literal["ready", "running", "stopping", "interrupted", "error", "closed"]
 Stage = Literal[
-    "admission", "baseline", "awaiting_search", "candidate_checks", "candidate_trials"
+    "admission",
+    "baseline",
+    "awaiting_search",
+    "candidate_checks",
+    "candidate_trials",
+    "mining",
+    "proposal",
+    "promotion",
+    "final_evaluation",
+    "report",
+    "finished",
 ]
 
 
@@ -46,6 +58,88 @@ class ExperimentRecord:
     stage: Stage
     revision: int
     stop_requested: bool
+
+
+@dataclass(frozen=True)
+class RoundRecord:
+    id: UUID
+    experiment_id: UUID
+    ordinal: int
+    baseline_snapshot_id: UUID
+    baseline_commit: str
+    status: str
+    mining_attempts: int
+    candidate_snapshot_id: UUID | None
+    decision_ref: str | None
+    decision_digest: str | None
+
+
+@dataclass(frozen=True)
+class RoleRecord:
+    execution: RoleExecution
+    attempt: int
+
+
+@dataclass(frozen=True)
+class PromotionRecord:
+    id: UUID
+    experiment_id: UUID
+    round_id: UUID
+    expected_parent: str
+    candidate_snapshot_id: UUID
+    expected_tree: str
+    patch_digest: str
+    decision_digest: str
+    state: Literal["intent", "committed", "complete", "uncertain"]
+    commit_sha: str | None
+
+
+@dataclass(frozen=True)
+class SearchSeal:
+    experiment_id: UUID
+    initial_snapshot_id: UUID
+    selected_final_snapshot_id: UUID
+    selected_final_commit: str
+    accepted_lineage_digest: str
+    search_history_digest: str
+    stop_reason: str
+    created_at: str
+
+
+_SEARCH_SCHEMA = (
+    """CREATE TABLE experiment_rounds (
+    id TEXT PRIMARY KEY, experiment TEXT NOT NULL REFERENCES experiment_runs(id),
+    ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 3),
+    baseline_snapshot TEXT NOT NULL REFERENCES experiment_snapshots(id),
+    baseline_commit TEXT NOT NULL, status TEXT NOT NULL,
+    mining_attempts INTEGER NOT NULL DEFAULT 0 CHECK(mining_attempts BETWEEN 0 AND 2),
+    candidate_snapshot TEXT REFERENCES experiment_snapshots(id),
+    decision_ref TEXT, decision_digest TEXT, UNIQUE(experiment,ordinal))""",
+    """CREATE TABLE experiment_roles (
+    id TEXT PRIMARY KEY, round TEXT NOT NULL REFERENCES experiment_rounds(id),
+    kind TEXT NOT NULL, attempt INTEGER NOT NULL CHECK(attempt BETWEEN 0 AND 1),
+    execution_json TEXT NOT NULL, UNIQUE(round,kind,attempt))""",
+    """CREATE TABLE experiment_promotions (
+    id TEXT PRIMARY KEY, experiment TEXT NOT NULL REFERENCES experiment_runs(id),
+    round TEXT NOT NULL UNIQUE REFERENCES experiment_rounds(id),
+    expected_parent TEXT NOT NULL,
+    candidate_snapshot TEXT NOT NULL REFERENCES experiment_snapshots(id),
+    expected_tree TEXT NOT NULL, patch_digest TEXT NOT NULL,
+    decision_digest TEXT NOT NULL,
+    state TEXT NOT NULL, commit_sha TEXT)""",
+    """CREATE TABLE experiment_search_seals (
+    experiment TEXT PRIMARY KEY REFERENCES experiment_runs(id),
+    initial_snapshot TEXT NOT NULL REFERENCES experiment_snapshots(id),
+    selected_final_snapshot TEXT NOT NULL REFERENCES experiment_snapshots(id),
+    selected_final_commit TEXT NOT NULL, accepted_lineage_digest TEXT NOT NULL,
+    search_history_digest TEXT NOT NULL, stop_reason TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
+    """CREATE TABLE experiment_publications (
+    experiment TEXT PRIMARY KEY REFERENCES experiment_runs(id),
+    seal_digest TEXT NOT NULL, report_digest TEXT NOT NULL, branch TEXT NOT NULL,
+    expected_head TEXT NOT NULL, base_branch TEXT NOT NULL, remote_url TEXT NOT NULL,
+    pr_url TEXT, pr_number INTEGER, status TEXT NOT NULL, last_error TEXT)""",
+)
 
 
 _SCHEMA = (
@@ -134,7 +228,12 @@ class ExperimentStore:
                     for sql in _SCHEMA:
                         await conn.execute(text(sql))
                     await conn.execute(text("PRAGMA user_version=1"))
-                elif version != 1:
+                    version = 1
+                if version == 1:
+                    for sql in _SEARCH_SCHEMA:
+                        await conn.execute(text(sql))
+                    await conn.execute(text("PRAGMA user_version=2"))
+                elif version != 2:
                     raise ValueError("unsupported experiment schema version")
             path.chmod(0o600)
             return store
@@ -298,6 +397,12 @@ VALUES
             "awaiting_search",
             "candidate_checks",
             "candidate_trials",
+            "mining",
+            "proposal",
+            "promotion",
+            "final_evaluation",
+            "report",
+            "finished",
         ):
             raise ValueError("unknown state")
         async with self._transaction() as conn:
@@ -518,7 +623,17 @@ revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
         intent: dict[str, object],
         labels: dict[str, str],
     ) -> UUID:
-        if kind not in ("worktree", "network", "relay", "worker", "command", "grading"):
+        if kind not in (
+            "worktree",
+            "network",
+            "relay",
+            "worker",
+            "command",
+            "grading",
+            "role",
+            "promotion",
+            "publication",
+        ):
             raise ValueError("unknown effect kind")
         encoded = json.dumps(intent, sort_keys=True, allow_nan=False)
         if len(encoded.encode()) > 65536:
@@ -1088,3 +1203,340 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 )
             ).scalar_one()
             return str(value) if value is not None else None
+
+    async def _search_revision(
+        self, conn: AsyncConnection, id: UUID, revision: int
+    ) -> ExperimentRecord:
+        record = await self._get(conn, id)
+        sealed = (
+            await conn.execute(
+                text(
+                    "SELECT experiment FROM experiment_search_seals WHERE "
+                    "experiment=:id"
+                ),
+                {"id": str(id)},
+            )
+        ).first()
+        if record.manifest.schema_version != 2:
+            raise RevisionConflict("historical experiment requires a new v2 identity")
+        if (
+            record.revision != revision
+            or record.stop_requested
+            or record.status not in ("ready", "running")
+            or sealed
+        ):
+            raise RevisionConflict("stale, stopped or sealed search")
+        return record
+
+    async def _search_event(
+        self, conn: AsyncConnection, id: UUID, event: str, payload: dict[str, object]
+    ) -> None:
+        await conn.execute(
+            text(
+                "UPDATE experiment_runs SET "
+                "revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"
+            ),
+            {"id": str(id)},
+        )
+        await self._event(conn, id, event, payload)
+
+    async def rounds(self, id: UUID) -> tuple[RoundRecord, ...]:
+        async with self.engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_rounds WHERE experiment=:id "
+                            "ORDER BY ordinal"
+                        ),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            return tuple(
+                RoundRecord(
+                    UUID(r["id"]),
+                    UUID(r["experiment"]),
+                    r["ordinal"],
+                    UUID(r["baseline_snapshot"]),
+                    r["baseline_commit"],
+                    r["status"],
+                    r["mining_attempts"],
+                    UUID(r["candidate_snapshot"]) if r["candidate_snapshot"] else None,
+                    r["decision_ref"],
+                    r["decision_digest"],
+                )
+                for r in rows
+            )
+
+    async def begin_round(
+        self, experiment_id: UUID, baseline_snapshot: UUID, expected_revision: int
+    ) -> RoundRecord:
+        async with self._transaction() as conn:
+            run = await self._search_revision(conn, experiment_id, expected_revision)
+            snapshot = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_snapshots WHERE id=:sid AND "
+                            "experiment=:id AND status='verified'"
+                        ),
+                        {"sid": str(baseline_snapshot), "id": str(experiment_id)},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            if (
+                snapshot["parent_commit"] != run.last_accepted_commit
+                or snapshot["kind"] != "baseline"
+                or snapshot["source_digest"] != run.manifest.initial_source_digest
+            ):
+                raise RevisionConflict("round baseline is not accepted")
+            previous = (
+                await conn.execute(
+                    text(
+                        "SELECT ordinal,status FROM experiment_rounds WHERE "
+                        "experiment=:id ORDER BY ordinal DESC LIMIT 1"
+                    ),
+                    {"id": str(experiment_id)},
+                )
+            ).first()
+            if previous and previous.status not in ("decided", "interrupted"):
+                raise RevisionConflict("previous round unfinished")
+            ordinal = previous.ordinal + 1 if previous else 1
+            if ordinal > 3:
+                raise RevisionConflict("round limit exhausted")
+            rid = uuid4()
+            await conn.execute(
+                text(
+                    "INSERT INTO "
+                    "experiment_rounds(id,experiment,ordinal,baseline_snapshot,"
+                    "baseline_commit,status) VALUES "
+                    "(:rid,:id,:ordinal,:sid,:commit,'mining')"
+                ),
+                {
+                    "rid": str(rid),
+                    "id": str(experiment_id),
+                    "ordinal": ordinal,
+                    "sid": str(baseline_snapshot),
+                    "commit": run.last_accepted_commit,
+                },
+            )
+            await self._search_event(
+                conn,
+                experiment_id,
+                "round_started",
+                {"round_id": str(rid), "ordinal": ordinal},
+            )
+            return RoundRecord(
+                rid,
+                experiment_id,
+                ordinal,
+                baseline_snapshot,
+                run.last_accepted_commit,
+                "mining",
+                0,
+                None,
+                None,
+                None,
+            )
+
+    async def save_role(
+        self, execution: RoleExecution, attempt: int, expected_revision: int
+    ) -> RoleRecord:
+        execution = RoleExecution.model_validate_json(execution.model_dump_json())
+        if (
+            attempt not in (0, 1)
+            or (execution.kind != "format_correction" and attempt != 0)
+            or (execution.kind == "format_correction" and attempt != 1)
+        ):
+            raise ValueError("invalid role attempt")
+        async with self._transaction() as conn:
+            await self._search_revision(
+                conn, execution.experiment_id, expected_revision
+            )
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_rounds WHERE id=:rid AND "
+                            "experiment=:id"
+                        ),
+                        {
+                            "rid": str(execution.round_id),
+                            "id": str(execution.experiment_id),
+                        },
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            snapshot = (
+                await conn.execute(
+                    text(
+                        "SELECT source_digest FROM experiment_snapshots WHERE id=:sid"
+                    ),
+                    {"sid": row["baseline_snapshot"]},
+                )
+            ).scalar_one()
+            if (
+                execution.accepted_snapshot_id != UUID(row["baseline_snapshot"])
+                or execution.source_digest != snapshot
+                or row["status"] in ("decided", "interrupted", "error")
+            ):
+                raise RevisionConflict("role baseline or round changed")
+            existing = (
+                await conn.execute(
+                    text("SELECT execution_json FROM experiment_roles WHERE id=:id"),
+                    {"id": str(execution.role_id)},
+                )
+            ).scalar_one_or_none()
+            if existing:
+                old = RoleExecution.model_validate_json(existing)
+                if old.status not in ("pending", "running") or old.model_dump(
+                    exclude={
+                        "status",
+                        "output_digest",
+                        "output_ref",
+                        "termination",
+                        "usage_ref",
+                        "error_code",
+                    }
+                ) != execution.model_dump(
+                    exclude={
+                        "status",
+                        "output_digest",
+                        "output_ref",
+                        "termination",
+                        "usage_ref",
+                        "error_code",
+                    }
+                ):
+                    raise RevisionConflict(
+                        "role completion immutable or identity changed"
+                    )
+                await conn.execute(
+                    text(
+                        "UPDATE experiment_roles SET execution_json=:data WHERE id=:id"
+                    ),
+                    {"id": str(execution.role_id), "data": execution.model_dump_json()},
+                )
+            else:
+                await conn.execute(
+                    text(
+                        "INSERT INTO "
+                        "experiment_roles(id,round,kind,attempt,execution_json) "
+                        "VALUES (:id,:rid,:kind,:attempt,:data)"
+                    ),
+                    {
+                        "id": str(execution.role_id),
+                        "rid": str(execution.round_id),
+                        "kind": execution.kind,
+                        "attempt": attempt,
+                        "data": execution.model_dump_json(),
+                    },
+                )
+                if execution.kind in ("mining", "format_correction"):
+                    await conn.execute(
+                        text(
+                            "UPDATE experiment_rounds SET "
+                            "mining_attempts=mining_attempts+1 WHERE id=:id"
+                        ),
+                        {"id": str(execution.round_id)},
+                    )
+            await self._search_event(
+                conn,
+                execution.experiment_id,
+                "role_saved",
+                {"role_id": str(execution.role_id), "status": execution.status},
+            )
+        return RoleRecord(execution, attempt)
+
+    async def roles(self, round_id: UUID) -> tuple[RoleRecord, ...]:
+        async with self.engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT execution_json,attempt FROM experiment_roles WHERE "
+                        "round=:id ORDER BY rowid"
+                    ),
+                    {"id": str(round_id)},
+                )
+            ).all()
+            return tuple(
+                RoleRecord(
+                    RoleExecution.model_validate_json(r.execution_json), r.attempt
+                )
+                for r in rows
+            )
+
+    async def record_decision(
+        self, round_id: UUID, decision: SelectionDecision, expected_revision: int
+    ) -> None:
+        decision = SelectionDecision.model_validate_json(decision.model_dump_json())
+        async with self._transaction() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT experiment,status,baseline_snapshot FROM "
+                        "experiment_rounds WHERE id=:id"
+                    ),
+                    {"id": str(round_id)},
+                )
+            ).one()
+            id = UUID(row.experiment)
+            await self._search_revision(conn, id, expected_revision)
+            if row.status in ("decided", "interrupted"):
+                raise RevisionConflict("round decision immutable")
+            snapshot = (
+                await conn.execute(
+                    text(
+                        "SELECT source_digest,export_digest FROM experiment_snapshots "
+                        "WHERE id=:id"
+                    ),
+                    {"id": row.baseline_snapshot},
+                )
+            ).one()
+            if (decision.baseline_source_digest, decision.baseline_export_digest) != (
+                snapshot.source_digest,
+                snapshot.export_digest,
+            ):
+                raise RevisionConflict("decision baseline mismatch")
+            encoded = decision.model_dump_json()
+            await conn.execute(
+                text(
+                    "UPDATE experiment_rounds SET "
+                    "status='decided',decision_ref=:data,decision_digest=:digest "
+                    "WHERE id=:id"
+                ),
+                {"data": encoded, "digest": digest(decision), "id": str(round_id)},
+            )
+            await self._search_event(
+                conn,
+                id,
+                "decision_recorded",
+                {"round_id": str(round_id), "digest": digest(decision)},
+            )
+
+    async def decisions(self, experiment_id: UUID) -> tuple[SelectionDecision, ...]:
+        async with self.engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT decision_ref,decision_digest FROM experiment_rounds "
+                        "WHERE experiment=:id AND decision_ref IS NOT NULL ORDER BY "
+                        "ordinal"
+                    ),
+                    {"id": str(experiment_id)},
+                )
+            ).all()
+            results = []
+            for row in rows:
+                decision = SelectionDecision.model_validate_json(row.decision_ref)
+                if digest(decision) != row.decision_digest:
+                    raise ValueError("decision digest drift")
+                results.append(decision)
+            return tuple(results)

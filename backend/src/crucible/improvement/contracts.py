@@ -70,7 +70,10 @@ class UsageAmounts(Contract):
 
 
 class ExperimentManifest(Contract):
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
+    worker_protocol_version: Literal[2] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     experiment_id: UUID
     initial_commit: Commit
     initial_source_digest: Sha256
@@ -96,6 +99,8 @@ class ExperimentManifest(Contract):
 
     @model_validator(mode="after")
     def frozen_policy(self) -> Self:
+        if (self.schema_version == 2) != (self.worker_protocol_version == 2):
+            raise ValueError("manifest and worker protocol versions disagree")
         if {c.split for c in self.cases} != {
             "development",
             "selection-validation",

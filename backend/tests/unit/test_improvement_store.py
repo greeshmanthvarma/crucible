@@ -88,7 +88,7 @@ async def test_unknown_schema_rejected(tmp_path):
 
     path = tmp_path / "experiments.sqlite3"
     with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA user_version=2")
+        conn.execute("PRAGMA user_version=3")
     with pytest.raises(ValueError, match="schema"):
         await ExperimentStore.open(path)
 
