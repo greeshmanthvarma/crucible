@@ -269,6 +269,7 @@ _SOLVER_FILES = frozenset(
         "improvement/contracts.py",
         "improvement/worker_protocol.py",
         "improvement/worker.py",
+        "improvement/check_probe.py",
         "improvement/worker_commands.py",
         "improvement/worker_gateway.py",
     }
@@ -285,3 +286,31 @@ def solver_runtime_path(name: str) -> bool:
     return relative in _SOLVER_FILES or any(
         relative.startswith(p + "/") for p in _SOLVER_PACKAGES
     )
+
+
+def verify_harness_export(root: Path, snapshot: HarnessSnapshot) -> None:
+    safe_path(root)
+    files: dict[str, tuple[int, bytes]] = {}
+    total = 0
+    for path in root.rglob("*"):
+        safe_path(path)
+        if path.is_dir():
+            continue
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE:
+                raise ScopeRejected("unsupported export file")
+            data = stream.read(MAX_FILE + 1)
+        total += len(data)
+        name = path.relative_to(root).as_posix()
+        if (
+            len(data) > MAX_FILE
+            or total > MAX_EXPORT
+            or len(files) >= MAX_FILES
+            or not solver_runtime_path(name)
+        ):
+            raise ScopeRejected("unsupported or oversized export")
+        files[name] = (0o100755 if info.st_mode & 0o111 else 0o100644, data)
+    if _digest(files) != snapshot.export_digest:
+        raise ScopeRejected("immutable export drift")

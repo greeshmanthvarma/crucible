@@ -19,6 +19,7 @@ def collect_solution_patch(
     base_commit: str,
     max_bytes: int = 8_388_608,
     base_repository: Path | None = None,
+    snapshot_limits: tuple[int, int, int] | None = None,
 ) -> SolutionPatch:
     if not re.fullmatch(r"[0-9a-f]{40}", expected_base_tree) or max_bytes <= 0:
         raise ValueError("invalid base tree or patch limit")
@@ -59,9 +60,13 @@ def collect_solution_patch(
         if _git(root, "write-tree").decode().strip() != expected_base_tree:
             raise ValueError("base tree integrity failure")
         # Copy only regular supported files; the source index and config are never used.
+        snapshot_bytes = snapshot_count = 0
         for directory, directories, files in os.walk(workspace, followlinks=False):
             if Path(directory) == workspace:
                 directories[:] = [name for name in directories if name != ".git"]
+            snapshot_count += len(directories) + len(files)
+            if snapshot_limits and snapshot_count > snapshot_limits[2]:
+                raise ValueError("workspace file count exceeds snapshot limit")
             for name in directories:
                 if (Path(directory) / name).is_symlink():
                     raise ValueError("unsupported symlink")
@@ -75,7 +80,23 @@ def collect_solution_patch(
                     raise ValueError("unsupported symlink or special file")
                 output = root / relative
                 output.parent.mkdir(parents=True, exist_ok=True)
-                output.write_bytes(source.read_bytes())
+                if snapshot_limits:
+                    descriptor = os.open(
+                        source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                    )
+                    with os.fdopen(descriptor, "rb") as stream:
+                        if os.fstat(stream.fileno()).st_size > snapshot_limits[0]:
+                            raise ValueError("workspace file exceeds snapshot limit")
+                        content = stream.read(snapshot_limits[0] + 1)
+                    snapshot_bytes += len(content)
+                    if (
+                        len(content) > snapshot_limits[0]
+                        or snapshot_bytes > snapshot_limits[1]
+                    ):
+                        raise ValueError("workspace bytes exceed snapshot limit")
+                    output.write_bytes(content)
+                else:
+                    output.write_bytes(source.read_bytes())
                 output.chmod(0o755 if source.stat().st_mode & 0o111 else 0o644)
         untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
         names = set(entries) | {

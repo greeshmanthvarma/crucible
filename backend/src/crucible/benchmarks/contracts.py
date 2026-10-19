@@ -107,6 +107,7 @@ class SolverResult:
     termination: Literal[
         "completed",
         "budget_exhausted",
+        "behavior_error",
         "cancelled",
         "provider_error",
         "infrastructure_error",

@@ -642,3 +642,132 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 {"trial_id": str(trial_id), "generation": generation},
             )
             return trial_id
+
+    async def snapshot(self, id: UUID, snapshot_id: UUID) -> dict[str, object]:
+        async with self.engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_snapshots WHERE id=:sid "
+                            "AND experiment=:id"
+                        ),
+                        {"sid": str(snapshot_id), "id": str(id)},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            return dict(row)
+
+    async def trials(self, id: UUID) -> tuple[dict[str, object], ...]:
+        async with self.engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_trials WHERE "
+                            "experiment=:id ORDER BY rowid"
+                        ),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            return tuple(dict(row) for row in rows)
+
+    async def trial_state(
+        self,
+        trial: UUID,
+        status: str,
+        *,
+        artifact: str | None = None,
+        verdict: str | None = None,
+        termination: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        if status not in (
+            "starting",
+            "solving",
+            "snapshotting",
+            "grading",
+            "complete",
+            "error",
+            "interrupted",
+        ):
+            raise ValueError("invalid trial status")
+        async with self._transaction() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT experiment,status FROM experiment_trials "
+                        "WHERE id=:trial"
+                    ),
+                    {"trial": str(trial)},
+                )
+            ).one()
+            if row.status in ("complete", "error", "interrupted"):
+                raise RevisionConflict("terminal trial cannot be overwritten")
+            if status == "complete" and (
+                not artifact or verdict not in ("pass", "fail")
+            ):
+                raise ValueError("complete trial requires authoritative result")
+            await conn.execute(
+                text("""UPDATE experiment_trials SET status=:status,
+                artifact_ref=:artifact,grade_verdict=:verdict,solver_termination=:termination,
+                error_code=:error WHERE id=:trial"""),
+                dict(
+                    trial=str(trial),
+                    status=status,
+                    artifact=artifact,
+                    verdict=verdict,
+                    termination=termination,
+                    error=error,
+                ),
+            )
+            await self._event(
+                conn, UUID(row.experiment), "trial_" + status, {"trial_id": str(trial)}
+            )
+
+    async def record_event(
+        self, id: UUID, event: str, payload: dict[str, object]
+    ) -> None:
+        async with self._transaction() as conn:
+            await self._get(conn, id)
+            await self._event(conn, id, event, payload)
+
+    async def events(self, id: UUID, event: str) -> tuple[dict[str, object], ...]:
+        async with self.engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT payload_json FROM experiment_events WHERE "
+                        "experiment=:id AND type=:event ORDER BY sequence"
+                    ),
+                    {"id": str(id), "event": event},
+                )
+            ).all()
+            return tuple(json.loads(row.payload_json) for row in rows)
+
+    async def fail_run(self, id: UUID, code: str, *, interrupted: bool = False) -> None:
+        async with self._transaction() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE experiment_runs SET status=:status, "
+                    "stop_requested=1, error_code=:code, "
+                    "revision=revision+1 WHERE id=:id AND "
+                    "status!='closed'"
+                ),
+                {
+                    "id": str(id),
+                    "status": "interrupted" if interrupted else "error",
+                    "code": code,
+                },
+            )
+            await self._event(
+                conn,
+                id,
+                "execution_stopped",
+                {"code": code, "interrupted": interrupted},
+            )

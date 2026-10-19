@@ -33,7 +33,12 @@ from crucible.tools.registry import default_registry
 
 
 def create_worker_engine(
-    database: Database, job: WorkerJob, gateway: ModelGateway, token: str
+    database: Database,
+    job: WorkerJob,
+    gateway: ModelGateway,
+    token: str,
+    *,
+    reduced_model_budget: int | None = None,
 ) -> tuple[RunEngine, Callable[[], UnitOfWork]]:
     # This function is reached only inside the worker. No host identity relaxation.
     if Path("/job/request.json").read_bytes() != job.model_dump_json().encode():
@@ -75,6 +80,11 @@ def create_worker_engine(
             model=job.model.model_id,
         ),
     )
+    if (
+        reduced_model_budget is not None
+        and not 0 < reduced_model_budget <= job.limits.max_model_tokens
+    ):
+        raise ValueError("deterministic probe may only reduce model budget")
     engine = RunEngine(
         uow,
         clock,
@@ -84,7 +94,7 @@ def create_worker_engine(
         dispatcher=ToolDispatcher(registry, uow, clock, journal=journal),
         max_steps=job.limits.max_steps,
         max_tool_calls=job.limits.max_tool_calls,
-        max_model_tokens=job.limits.max_model_tokens,
+        max_model_tokens=reduced_model_budget or job.limits.max_model_tokens,
         max_active_seconds=job.limits.max_active_seconds,
     )
     return engine, uow

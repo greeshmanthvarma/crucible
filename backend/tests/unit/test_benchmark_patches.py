@@ -211,3 +211,26 @@ def test_symlinked_git_directory_rejected(
     (root / ".git").symlink_to(tmp_path / "metadata", target_is_directory=True)
     with pytest.raises(ValueError, match="symlink"):
         collect_solution_patch(root, tree, tmp_path / "p.diff", base_commit=commit)
+
+
+def test_candidate_sparse_file_rejected_before_host_read(workspace, tmp_path):
+    workspace, _, _ = workspace
+    path = workspace / "large.py"
+    with path.open("wb") as stream:
+        stream.truncate(1024**3)
+    import subprocess
+
+    tree = subprocess.check_output(
+        ["git", "-C", str(workspace), "rev-parse", "HEAD^{tree}"], text=True
+    ).strip()
+    commit = subprocess.check_output(
+        ["git", "-C", str(workspace), "rev-parse", "HEAD"], text=True
+    ).strip()
+    with pytest.raises(ValueError, match="snapshot limit"):
+        collect_solution_patch(
+            workspace,
+            tree,
+            tmp_path / "p.diff",
+            base_commit=commit,
+            snapshot_limits=(1024 * 1024, 2 * 1024 * 1024, 1000),
+        )

@@ -2,9 +2,11 @@
 
 import asyncio
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from uuid import uuid5
+from uuid import UUID, uuid5
 
+from crucible.application.ports import UnitOfWork
 from crucible.application.worker_container import create_worker_engine
 from crucible.domain.clock import SystemClock
 from crucible.domain.conversation import (
@@ -25,6 +27,53 @@ from crucible.repair.gateway import WorkerCredential
 from crucible.repair.identity import canonical_json
 from crucible.storage.database import Database
 from crucible.storage.models import metadata
+
+
+async def seed_solver_task(
+    job: WorkerJob, uow_factory: Callable[[], UnitOfWork]
+) -> UUID:
+    clock = SystemClock()
+    settings = RepositorySettings(
+        sandbox_image=job.solver_case.image,
+    )
+    repository = Repository(new_id(), Path("/workspace"), clock.now(), settings)
+    task_id, run_id = uuid5(job.job_id, "task"), uuid5(job.job_id, "run")
+    task = Task.provisioning(
+        task_id=task_id,
+        repository_id=repository.id,
+        source_ref="solver-base",
+        base_revision=job.solver_case.base_commit,
+        workspace_path=Path("/workspace"),
+        clock=clock,
+    )
+    task = task.activate(workspace_path=Path("/workspace"), clock=clock)
+    run = Run.queued(
+        run_id=run_id,
+        task_id=task_id,
+        triggering_message_id=None,
+        created_at=clock.now(),
+        settings_snapshot=settings,
+    )
+    message = Message(
+        new_id(),
+        task_id,
+        run_id,
+        None,
+        0,
+        MessageRole.USER,
+        MessageStatus.COMPLETED,
+        (MessagePart(new_id(), 1, MessagePartKind.TEXT, job.solver_case.prompt),),
+        clock.now(),
+        clock.now(),
+    )
+    async with uow_factory() as uow:
+        await uow.repositories.add_if_absent(repository)
+        await uow.tasks.add(task)
+        await uow.runs.add(run)
+        await uow.messages.add(message)
+        await uow.runs.set_triggering_message(run_id, message.id)
+        await uow.commit()
+    return run_id
 
 
 async def main() -> None:
@@ -56,47 +105,8 @@ async def main() -> None:
         engine, uow_factory = create_worker_engine(
             database, job, CapturingGateway(), token
         )
-        clock = SystemClock()
-        settings = RepositorySettings(
-            sandbox_image=job.solver_case.image,
-        )
-        repository = Repository(new_id(), Path("/workspace"), clock.now(), settings)
-        task_id, run_id = uuid5(job.job_id, "task"), uuid5(job.job_id, "run")
-        task = Task.provisioning(
-            task_id=task_id,
-            repository_id=repository.id,
-            source_ref="solver-base",
-            base_revision=job.solver_case.base_commit,
-            workspace_path=Path("/workspace"),
-            clock=clock,
-        )
-        task = task.activate(workspace_path=Path("/workspace"), clock=clock)
-        run = Run.queued(
-            run_id=run_id,
-            task_id=task_id,
-            triggering_message_id=None,
-            created_at=clock.now(),
-            settings_snapshot=settings,
-        )
-        message = Message(
-            new_id(),
-            task_id,
-            run_id,
-            None,
-            0,
-            MessageRole.USER,
-            MessageStatus.COMPLETED,
-            (MessagePart(new_id(), 1, MessagePartKind.TEXT, job.solver_case.prompt),),
-            clock.now(),
-            clock.now(),
-        )
-        async with uow_factory() as uow:
-            await uow.repositories.add_if_absent(repository)
-            await uow.tasks.add(task)
-            await uow.runs.add(run)
-            await uow.messages.add(message)
-            await uow.runs.set_triggering_message(run_id, message.id)
-            await uow.commit()
+        run_id = await seed_solver_task(job, uow_factory)
+        task_id = uuid5(job.job_id, "task")
         async with asyncio.timeout(job.wall_deadline_seconds):
             await engine.execute(run_id)
         async with uow_factory() as uow:
@@ -107,6 +117,11 @@ async def main() -> None:
             termination = "completed"
         elif terminal and terminal.outcome_code == "budget_exhausted":
             termination = "budget_exhausted"
+        elif terminal and terminal.outcome_code in (
+            "coding_behavior_invalid",
+            "context_limit",
+        ):
+            termination = "behavior_error"
         if provider_failed:
             termination = "provider_error"
         trace = canonical_json(messages)

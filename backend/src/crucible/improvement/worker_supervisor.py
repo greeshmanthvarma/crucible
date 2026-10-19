@@ -533,7 +533,7 @@ class WorkerSupervisor:
                     if monitor in done:
                         await monitor
                         raise ValueError("worker stopped by protected controller")
-                    code, _ = await attach
+                    code, stdout_chunks = await attach
                 finally:
                     attach.cancel()
                     monitor.cancel()
@@ -554,6 +554,7 @@ class WorkerSupervisor:
             await self.store.settle_usage(
                 reservation,
                 UsageAmounts(
+                    output_bytes=sum(len(c.data) for c in stdout_chunks),
                     active_seconds=int(active_elapsed + 0.999),
                     worker_wall_seconds=int(elapsed + 0.999),
                 ),
