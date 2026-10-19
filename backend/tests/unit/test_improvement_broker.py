@@ -88,6 +88,7 @@ async def test_parallel_requests_cannot_exceed_reservation(tmp_path):
     from uuid import uuid4, uuid5
 
     from crucible.engine.gateway import (
+        ModelError,
         ModelMessage,
         ModelPart,
         ModelRole,
@@ -96,7 +97,6 @@ async def test_parallel_requests_cannot_exceed_reservation(tmp_path):
         ModelUsage,
         PreparedModelRequest,
     )
-    from crucible.improvement.store import BudgetDenied
 
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -139,13 +139,15 @@ async def test_parallel_requests_cannot_exceed_reservation(tmp_path):
             request.tools,
             request.max_output_tokens,
         )
-        with pytest.raises(BudgetDenied):
-            _ = [
-                e
-                async for e in broker.model(
-                    second_credential.token, second_job.job_id, second_request
-                )
-            ]
+        events = [
+            e
+            async for e in broker.model(
+                second_credential.token, second_job.job_id, second_request
+            )
+        ]
+        assert events == [
+            ModelError("improvement_budget_exhausted", "Model quota exhausted")
+        ]
         assert upstream.calls == 1
         release.set()
         await first
@@ -448,4 +450,99 @@ async def test_pending_approval_pauses_worker_and_blocks_parallel_model(tmp_path
         await asyncio.gather(
             command, *([model] if model else []), return_exceptions=True
         )
+        await store.close()
+
+
+@pytest.mark.parametrize("quota", ["job", "experiment"])
+async def test_model_quota_denial_reaches_worker_as_run_budget(tmp_path, quota):
+    from uuid import uuid4, uuid5
+
+    import httpx
+
+    from crucible.engine.gateway import (
+        ModelMessage,
+        ModelPart,
+        ModelRole,
+        PreparedModelRequest,
+    )
+    from crucible.engine.run_engine import RunBudgetExceeded
+    from crucible.improvement.broker import broker_app
+    from crucible.improvement.contracts import UsageAmounts
+    from crucible.improvement.worker_gateway import WorkerModelGateway
+
+    class Upstream:
+        async def stream(self, request):
+            raise AssertionError("denied request must not reach provider")
+            yield
+
+    store, broker, job, credential = await setup_broker(tmp_path, Upstream())
+    try:
+        if quota == "experiment":
+            reservation = await store.reserve_usage(
+                job.experiment_id, None, UsageAmounts(tokens=490)
+            )
+            await store.settle_usage(reservation, UsageAmounts(tokens=490))
+        request = PreparedModelRequest(
+            uuid5(job.job_id, "run"),
+            uuid4(),
+            job.model.model_id,
+            (
+                ModelMessage(
+                    ModelRole.USER,
+                    (ModelPart("text", "x" * (10000 if quota == "job" else 100)),),
+                ),
+            ),
+            (),
+            100,
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=broker_app(broker))
+        ) as client:
+            gateway = WorkerModelGateway(credential, job.job_id, client=client)
+            with pytest.raises(RunBudgetExceeded):
+                _ = [event async for event in gateway.stream(request)]
+        assert not await store.unsettled_usage(job.experiment_id)
+        assert (await store.get(job.experiment_id)).status == "ready"
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("denial", ["stop", "uncertain", "provider"])
+async def test_non_quota_failures_are_not_budget_termination(tmp_path, denial):
+    from uuid import uuid4, uuid5
+
+    import httpx
+
+    from crucible.engine.gateway import ModelError, PreparedModelRequest
+    from crucible.improvement.broker import broker_app
+    from crucible.improvement.contracts import UsageAmounts
+    from crucible.improvement.worker_gateway import WorkerModelGateway
+
+    class Upstream:
+        async def stream(self, request):
+            assert denial == "provider"
+            # Even a provider-supplied lookalike code must stay a provider error.
+            yield ModelError("improvement_budget_exhausted", "provider failure")
+
+    store, broker, job, credential = await setup_broker(tmp_path, Upstream())
+    try:
+        if denial == "stop":
+            await store.request_stop(job.experiment_id)
+        elif denial == "uncertain":
+            reservation = await store.reserve_usage(
+                job.experiment_id, None, UsageAmounts(tokens=1)
+            )
+            await store.mark_uncertain(reservation)
+        request = PreparedModelRequest(
+            uuid5(job.job_id, "run"), uuid4(), job.model.model_id, (), (), 10
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=broker_app(broker))
+        ) as client:
+            gateway = WorkerModelGateway(credential, job.job_id, client=client)
+            events = [event async for event in gateway.stream(request)]
+        assert events
+        assert all(isinstance(event, ModelError) for event in events)
+        assert all(event.code != "improvement_budget_exhausted" for event in events)
+    finally:
         await store.close()

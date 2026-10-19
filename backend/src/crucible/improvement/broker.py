@@ -24,7 +24,7 @@ from crucible.engine.gateway import (
     PreparedModelRequest,
 )
 from crucible.improvement.contracts import ExperimentManifest, UsageAmounts
-from crucible.improvement.store import ExperimentStore
+from crucible.improvement.store import ExperimentStore, QuotaExhausted
 from crucible.improvement.worker_protocol import CommandRecord, WorkerJob
 from crucible.repair.gateway import GatewayDenied, ScopedModelGateway, WorkerCredential
 from crucible.repair.identity import canonical_json
@@ -168,17 +168,26 @@ class ImprovementBroker:
             raise GatewayDenied(403, "request outside frozen run/model scope")
         request = replace(request, run_id=uuid5(job_id, "run"))
         assert self.gateway is not None
-        reservation = await self.gateway.reserve(token, job_id, request)
-        # Persist before opening upstream. A global denial spends no model request.
-        ledger = await self.store.reserve_usage(
-            session.job.experiment_id,
-            session.job.trial_id,
-            UsageAmounts(
-                tokens=reservation.tokens,
-                requests=1,
-                output_bytes=session.job.output_limit_bytes,
-            ),
-        )
+        try:
+            reservation = await self.gateway.reserve(token, job_id, request)
+            # Persist before opening upstream. A global denial spends no model request.
+            ledger = await self.store.reserve_usage(
+                session.job.experiment_id,
+                session.job.trial_id,
+                UsageAmounts(
+                    tokens=reservation.tokens,
+                    requests=1,
+                    output_bytes=session.job.output_limit_bytes,
+                ),
+            )
+        except GatewayDenied as error:
+            if error.status_code != 429:
+                raise
+            yield ModelError("improvement_budget_exhausted", "Model quota exhausted")
+            return
+        except QuotaExhausted:
+            yield ModelError("improvement_budget_exhausted", "Model quota exhausted")
+            return
         input_tokens = output_tokens = 0
         saw_input = saw_output = stopped = failed = False
         size = 0

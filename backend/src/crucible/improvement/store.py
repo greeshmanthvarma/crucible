@@ -27,6 +27,10 @@ class BudgetDenied(ValueError):
     pass
 
 
+class QuotaExhausted(BudgetDenied):
+    """A known aggregate limit denied a reservation before any effect."""
+
+
 class RevisionConflict(ValueError):
     pass
 
@@ -382,7 +386,7 @@ revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
                 worker_wall_seconds=record.manifest.budget.max_worker_wall_seconds,
             )
             if any(totals[name] + getattr(request, name) > caps[name] for name in caps):
-                raise BudgetDenied("frozen experiment budget exceeded")
+                raise QuotaExhausted("frozen experiment budget exceeded")
             reservation = uuid4()
             await conn.execute(
                 text("""INSERT INTO experiment_usage

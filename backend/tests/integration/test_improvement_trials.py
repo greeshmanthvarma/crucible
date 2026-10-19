@@ -321,3 +321,77 @@ async def test_candidate_checks_precede_paid_trials(trial_setup):
             manifest.experiment_id, candidate.snapshot_id, "development", 0
         )
     assert worker.calls == grader.calls == 0
+
+
+async def test_host_quota_termination_preserves_patch_for_grading(
+    trial_setup, database, tmp_path
+):
+    """Trusted engine + wire adapter plumbing; candidate Python is never host-loaded."""
+    from dataclasses import replace
+
+    import httpx
+
+    from crucible.engine.gateway import ModelError
+    from crucible.engine.run_engine import RunEngine
+    from crucible.improvement.worker_gateway import WorkerModelGateway
+    from crucible.repair.gateway import WorkerCredential
+    from tests.integration.engine.conftest import FixedClock, queued_run, uow_factory
+
+    runner, _, manifest, snapshot, worker, grader = trial_setup
+    grader.verdict = "pass"
+    original = worker.execute
+    seen_errors = []
+
+    async def execute(job, snapshot, workspace, *, harness_export):
+        execution = await original(
+            job, snapshot, workspace, harness_export=harness_export
+        )
+        submitted = await queued_run(database, tmp_path, "quota-engine")
+        factory = uow_factory(database)
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    content=(
+                        b'{"schema_version":1,"kind":"error",'
+                        b'"code":"improvement_budget_exhausted",'
+                        b'"detail":"Model quota exhausted"}\n'
+                    ),
+                )
+            )
+        ) as client:
+            gateway = WorkerModelGateway(
+                WorkerCredential("token", "http://broker/internal/improvement/model"),
+                job.job_id,
+                client=client,
+            )
+
+            class CapturingGateway:
+                async def stream(self, request):
+                    async for event in gateway.stream(request):
+                        if isinstance(event, ModelError):
+                            seen_errors.append(event)
+                        yield event
+
+            await RunEngine(factory, FixedClock(), CapturingGateway()).execute(
+                submitted.run_id
+            )
+        async with factory() as uow:
+            terminal = await uow.runs.get(submitted.run_id)
+        assert terminal.outcome_code == "budget_exhausted"
+        assert not seen_errors
+        return replace(
+            execution,
+            observation=execution.observation.model_copy(
+                update={"termination": terminal.outcome_code}
+            ),
+        )
+
+    worker.execute = execute
+    result = await runner.run(
+        manifest.experiment_id, snapshot.snapshot_id, "development", 0
+    )
+    assert result.status == "complete"
+    assert result.solver.termination == "budget_exhausted"
+    assert result.grade.verdict == "pass"
+    assert grader.calls == 1

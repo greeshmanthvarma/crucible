@@ -124,11 +124,20 @@ class ProbePort(Protocol):
     ) -> tuple[object, bool]: ...
 
 
+class ProbeStopped(RuntimeError):
+    """Durable operator stop, with cleanup verified before returning."""
+
+
 class DockerProbes:
     def __init__(
         self, store: ExperimentStore, docker: DockerPort, manifest: ExperimentManifest
     ) -> None:
         self.store, self.docker, self.manifest = store, docker, manifest
+
+    async def _ensure_running(self, job: WorkerJob) -> None:
+        record = await self.store.get(job.experiment_id)
+        if record.stop_requested or record.status not in ("ready", "running"):
+            raise ProbeStopped("operator_stopped")
 
     async def probe(
         self,
@@ -139,6 +148,7 @@ class DockerProbes:
         timeout: int,
         limit: int,
     ) -> tuple[object, bool]:
+        await self._ensure_running(job)
         import os
 
         if os.getuid() == 0:
@@ -209,10 +219,22 @@ class DockerProbes:
                 "-I",
                 "/driver.py",
             )
+            await self._ensure_running(job)
             identity = await self.docker.invoke(*args)
             await self.store.effect_state(effect, "active", identity)
-            async with asyncio.timeout(timeout):
-                code, _ = await self.docker.attach(identity, limit)
+            attached = asyncio.create_task(self.docker.attach(identity, limit))
+            try:
+                async with asyncio.timeout(timeout):
+                    while True:
+                        await self._ensure_running(job)
+                        done, _ = await asyncio.wait({attached}, timeout=0.1)
+                        if done:
+                            await self._ensure_running(job)
+                            code, _ = await attached
+                            break
+            finally:
+                attached.cancel()
+                await asyncio.gather(attached, return_exceptions=True)
             await verify_stopped(self.docker, name, job)
             await self.store.effect_state(effect, "stopped")
             elapsed = int(asyncio.get_running_loop().time() - started + 0.999)
@@ -230,14 +252,27 @@ class DockerProbes:
                     workspace / "README.md", 1024
                 ).decode()
             return observation, True
-        except BaseException:
+        except BaseException as error:
+            stopped = False
             try:
                 await verify_stopped(self.docker, name, job)
                 await self.store.effect_state(effect, "stopped")
+                stopped = True
             except BaseException:
                 await self.store.effect_state(effect, "uncertain")
             if not settled:
-                await self.store.mark_uncertain(reservation)
+                if isinstance(error, ProbeStopped) and stopped:
+                    elapsed = int(asyncio.get_running_loop().time() - started + 0.999)
+                    await self.store.settle_usage(
+                        reservation,
+                        UsageAmounts(
+                            active_seconds=elapsed, worker_wall_seconds=elapsed
+                        ),
+                    )
+                else:
+                    await self.store.mark_uncertain(reservation)
+            if isinstance(error, ProbeStopped) and not stopped:
+                raise RuntimeError("probe cleanup uncertain") from error
             raise
 
 
@@ -311,6 +346,10 @@ async def check_candidate(
             )
             if not stopped:
                 raise RuntimeError("probe cleanup uncertain")
+        except ProbeStopped:
+            verdict = "error"
+            reason = "operator_stopped"
+            break
         except Exception:
             verdict = "error"
             reason = "protected_check_infrastructure_error"

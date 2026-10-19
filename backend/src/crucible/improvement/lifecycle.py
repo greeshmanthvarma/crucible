@@ -561,7 +561,13 @@ class ExperimentService:
                 )
                 if result.verdict != "pass":
                     if result.verdict == "error":
-                        await self.store.fail_run(id, "candidate_check_infrastructure")
+                        await self.store.fail_run(
+                            id,
+                            "operator_stopped"
+                            if result.reason == "operator_stopped"
+                            else "candidate_check_infrastructure",
+                            interrupted=result.reason == "operator_stopped",
+                        )
                     response["candidate_checks"] = result.verdict
                     return response
             else:
