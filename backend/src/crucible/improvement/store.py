@@ -223,6 +223,22 @@ experiment_events WHERE experiment=:id"""),
                         {"id": previous.id},
                     )
                 ).scalar_one_or_none()
+                if lock is None:
+                    created = (
+                        await conn.execute(
+                            text(
+                                "SELECT payload_json FROM experiment_events "
+                                "WHERE experiment=:id AND type='created' "
+                                "ORDER BY sequence LIMIT 1"
+                            ),
+                            {"id": previous.id},
+                        )
+                    ).scalar_one_or_none()
+                    lock = (
+                        json.loads(created).get("repository_identity")
+                        if created
+                        else None
+                    )
                 if previous.manifest_hash != hashed or lock != repository_identity:
                     raise ManifestDrift("idempotency identity changed")
                 return await self._get(conn, UUID(previous.id))
@@ -255,7 +271,10 @@ VALUES
                 {"repo": repository_identity, "id": str(manifest.experiment_id)},
             )
             await self._event(
-                conn, manifest.experiment_id, "created", {"manifest_hash": hashed}
+                conn,
+                manifest.experiment_id,
+                "created",
+                {"manifest_hash": hashed, "repository_identity": repository_identity},
             )
             return await self._get(conn, manifest.experiment_id)
 
@@ -320,6 +339,22 @@ revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
             record = await self._get(conn, id)
             if record.stop_requested or record.status not in ("ready", "running"):
                 raise BudgetDenied("experiment is stopped")
+            if trial_id is not None:
+                trial = (
+                    await conn.execute(
+                        text(
+                            "SELECT experiment,status FROM experiment_trials "
+                            "WHERE id=:trial"
+                        ),
+                        {"trial": str(trial_id)},
+                    )
+                ).first()
+                if (
+                    trial is None
+                    or trial.experiment != str(id)
+                    or trial.status in ("complete", "error", "interrupted")
+                ):
+                    raise BudgetDenied("trial generation is no longer active")
             totals = {name: 0 for name in UsageAmounts.model_fields}
             rows = (
                 await conn.execute(
@@ -522,7 +557,7 @@ VALUES (:effect,:id,:trial,:kind,:intent,:labels,'intent')"""),
                     {"id": str(effect_id)},
                 )
             ).one()
-            if row.status == "stopped" and status != "stopped":
+            if row.status == "stopped" and status == "active":
                 raise RevisionConflict("effect already stopped")
             if external_id and row.external_id and row.external_id != external_id:
                 raise RevisionConflict("external effect identity drift")
@@ -771,3 +806,281 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 "execution_stopped",
                 {"code": code, "interrupted": interrupted},
             )
+
+    async def unsettled_usage(self, id: UUID) -> bool:
+        async with self.engine.connect() as conn:
+            return bool(
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT reservation_id FROM experiment_usage "
+                            "WHERE experiment=:id AND status!='settled' LIMIT"
+                            " 1"
+                        ),
+                        {"id": str(id)},
+                    )
+                ).first()
+            )
+
+    async def claim_execution(
+        self,
+        id: UUID,
+        stage: Stage,
+        *,
+        process_id: int | None = None,
+        process_start: str | None = None,
+    ) -> UUID:
+        async with self._transaction() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT owner_execution_id,status,stop_requested FROM"
+                        " experiment_runs WHERE id=:id"
+                    ),
+                    {"id": str(id)},
+                )
+            ).one()
+            if row.owner_execution_id or row.status != "ready" or row.stop_requested:
+                raise RevisionConflict(
+                    "experiment already running or requires explicit recovery"
+                )
+            owner = uuid4()
+            await conn.execute(
+                text(
+                    "UPDATE experiment_runs SET "
+                    "owner_execution_id=:owner,owner_heartbeat_at=CURRENT_TIMESTAMP,status='running',stage=:stage,revision=revision+1"
+                    " WHERE id=:id"
+                ),
+                {"id": str(id), "owner": str(owner), "stage": stage},
+            )
+            await self._event(
+                conn,
+                id,
+                "execution_claimed",
+                {
+                    "owner": str(owner),
+                    "pid": process_id,
+                    "process_start": process_start,
+                },
+            )
+            return owner
+
+    async def release_execution(self, id: UUID, owner: UUID, stage: Stage) -> None:
+        async with self._transaction() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT owner_execution_id,status FROM "
+                        "experiment_runs WHERE id=:id"
+                    ),
+                    {"id": str(id)},
+                )
+            ).one()
+            if row.owner_execution_id != str(owner):
+                raise RevisionConflict("execution ownership changed")
+            await conn.execute(
+                text(
+                    "UPDATE experiment_runs SET "
+                    "owner_execution_id=NULL,owner_heartbeat_at=NULL,status=CASE"
+                    " WHEN status='running' THEN 'ready' ELSE status "
+                    "END,stage=:stage,revision=revision+1 WHERE id=:id"
+                ),
+                {"id": str(id), "stage": stage},
+            )
+            await self._event(conn, id, "execution_released", {"owner": str(owner)})
+
+    async def heartbeat(self, id: UUID, owner: UUID) -> None:
+        async with self._transaction() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE experiment_runs SET "
+                    "owner_heartbeat_at=CURRENT_TIMESTAMP WHERE id=:id AND "
+                    "owner_execution_id=:owner"
+                ),
+                {"id": str(id), "owner": str(owner)},
+            )
+
+    async def recover_ready(self, id: UUID, owner: UUID) -> None:
+        async with self._transaction() as conn:
+            await self._require_owner(conn, id, owner)
+            unresolved = (
+                await conn.execute(
+                    text(
+                        "SELECT id FROM experiment_effects WHERE "
+                        "experiment=:id AND status!='stopped' LIMIT 1"
+                    ),
+                    {"id": str(id)},
+                )
+            ).first()
+            usage = (
+                await conn.execute(
+                    text(
+                        "SELECT reservation_id FROM experiment_usage WHERE "
+                        "experiment=:id AND status!='settled' LIMIT 1"
+                    ),
+                    {"id": str(id)},
+                )
+            ).first()
+            if unresolved or usage:
+                raise RevisionConflict("effects or usage require recovery")
+            await conn.execute(
+                text(
+                    "UPDATE experiment_runs SET "
+                    "owner_execution_id=NULL,owner_heartbeat_at=NULL,status='ready',stop_requested=0,error_code=NULL,revision=revision+1"
+                    " WHERE id=:id AND status!='closed'"
+                ),
+                {"id": str(id)},
+            )
+            await self._event(conn, id, "explicit_resume", {})
+
+    async def _require_owner(
+        self, conn: AsyncConnection, id: UUID, owner: UUID
+    ) -> None:
+        actual = (
+            await conn.execute(
+                text("SELECT owner_execution_id FROM experiment_runs WHERE id=:id"),
+                {"id": str(id)},
+            )
+        ).scalar_one()
+        if actual != str(owner):
+            raise RevisionConflict("recovery ownership changed")
+
+    async def claim_recovery(
+        self,
+        id: UUID,
+        revision: int,
+        previous_owner: str | None,
+        process_id: int,
+        process_start: str | None,
+    ) -> UUID:
+        async with self._transaction() as conn:
+            record = await self._get(conn, id)
+            actual = (
+                await conn.execute(
+                    text("SELECT owner_execution_id FROM experiment_runs WHERE id=:id"),
+                    {"id": str(id)},
+                )
+            ).scalar_one()
+            if (
+                record.revision != revision
+                or actual != previous_owner
+                or record.status != "stopping"
+            ):
+                raise RevisionConflict("recovery state changed")
+            owner = uuid4()
+            await conn.execute(
+                text(
+                    "UPDATE experiment_runs SET "
+                    "owner_execution_id=:owner,revision=revision+1 "
+                    "WHERE id=:id"
+                ),
+                {"id": str(id), "owner": str(owner)},
+            )
+            await self._event(
+                conn,
+                id,
+                "execution_claimed",
+                {
+                    "owner": str(owner),
+                    "pid": process_id,
+                    "process_start": process_start,
+                },
+            )
+            return owner
+
+    async def finish_close(self, id: UUID, owner: UUID) -> None:
+        async with self._transaction() as conn:
+            await self._require_owner(conn, id, owner)
+            unresolved = (
+                await conn.execute(
+                    text(
+                        "SELECT id FROM experiment_effects WHERE experiment=:id "
+                        "AND status!='stopped' LIMIT 1"
+                    ),
+                    {"id": str(id)},
+                )
+            ).first()
+            if unresolved:
+                raise RevisionConflict("effects require recovery")
+            await conn.execute(
+                text(
+                    "UPDATE experiment_runs SET status='closed',"
+                    "owner_execution_id=NULL,"
+                    "owner_heartbeat_at=NULL,revision=revision+1 WHERE id=:id"
+                ),
+                {"id": str(id)},
+            )
+            await conn.execute(
+                text("DELETE FROM experiment_repository_lock WHERE experiment_id=:id"),
+                {"id": str(id)},
+            )
+            await self._event(conn, id, "explicit_close", {})
+
+    async def snapshots(self, id: UUID) -> tuple[dict[str, object], ...]:
+        async with self.engine.connect() as conn:
+            return tuple(
+                dict(r)
+                for r in (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_snapshots WHERE "
+                            "experiment=:id ORDER BY rowid"
+                        ),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+
+    async def invalidate_interrupted(self, id: UUID) -> None:
+        async with self._transaction() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE experiment_trials SET "
+                    "status='interrupted',error_code=COALESCE(error_code,'process_interrupted')"
+                    " WHERE experiment=:id AND (status NOT IN "
+                    "('complete','error','interrupted') OR snapshot IN "
+                    "(SELECT id FROM experiment_snapshots WHERE "
+                    "experiment=:id AND kind='candidate'))"
+                ),
+                {"id": str(id)},
+            )
+            await conn.execute(
+                text(
+                    "UPDATE experiment_snapshots SET status='interrupted' "
+                    "WHERE experiment=:id AND kind='candidate'"
+                ),
+                {"id": str(id)},
+            )
+            await self._event(conn, id, "interrupted_candidate_invalidated", {})
+
+    async def reactivate_snapshot(
+        self, id: UUID, snapshot_id: UUID, artifact: str
+    ) -> None:
+        async with self._transaction() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE experiment_snapshots SET "
+                    "status='verified',artifact_ref=:artifact WHERE id=:sid "
+                    "AND experiment=:id AND status='interrupted' AND "
+                    "kind='candidate'"
+                ),
+                {"sid": str(snapshot_id), "id": str(id), "artifact": artifact},
+            )
+            await self._event(
+                conn,
+                id,
+                "explicit_candidate_reintroduced",
+                {"snapshot_id": str(snapshot_id)},
+            )
+
+    async def execution_owner(self, id: UUID) -> str | None:
+        async with self.engine.connect() as conn:
+            value = (
+                await conn.execute(
+                    text("SELECT owner_execution_id FROM experiment_runs WHERE id=:id"),
+                    {"id": str(id)},
+                )
+            ).scalar_one()
+            return str(value) if value is not None else None

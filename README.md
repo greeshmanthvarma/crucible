@@ -459,3 +459,74 @@ case with explicit model/limits. A real trace, captured patch and authoritative 
 constitute plumbing proof whether correctness passes or fails; do not retry until
 solved or report it as an official suite score. Unavailable resource telemetry is
 recorded explicitly instead of inferred.
+
+### Explicit isolated experiment runtime
+
+`crucible improve` provides local baseline/candidate evaluation and recovery. It does
+not mine proposals, promote commits, run final-test cases, publish reports/PRs, or
+advance accepted revisions. Legacy `/repair` and host-only benchmark calibration
+remain available. Candidate Python executes only in disposable Docker workers;
+source inspection and trusted check assertions stay in the controller. Protected
+checks probe candidate behavior through a bounded process protocol, with no trusted
+suite or expected answers mounted into the candidate process.
+
+Use a dedicated private state directory, separate from application/lab data:
+
+```sh
+crucible improve --state-root /absolute/private/experiment-state start \
+  --config /absolute/private/start.json --idempotency-key explicit-unique-key
+crucible improve --state-root /absolute/private/experiment-state status EXPERIMENT_UUID
+crucible improve --state-root /absolute/private/experiment-state baseline EXPERIMENT_UUID
+crucible improve --state-root /absolute/private/experiment-state candidate-evaluate EXPERIMENT_UUID
+crucible improve --state-root /absolute/private/experiment-state stop EXPERIMENT_UUID
+crucible improve --state-root /absolute/private/experiment-state resume EXPERIMENT_UUID
+crucible improve --state-root /absolute/private/experiment-state close EXPERIMENT_UUID
+```
+
+`start.json` has exactly `schema_version: 1`, `manifest_file`, `repository`,
+`registry_root`, and `protected_suite_root`; paths must be absolute. The strict
+`improvement.contracts.ExperimentManifest` defines the separately supplied manifest.
+Every model, limit, aggregate spending budget, admitted case/evaluator identity,
+source/controller/dependency digest, image digest/platform, command policy and suite
+digest must be explicit. The private registry uses schema 1 with `pending_slots`
+and `cases` mapping IDs to `case_manifest`, `admission_record`, and `retired` fields.
+The suite directory contains a schema-1 `suite.json` with `test_ids` exactly
+`["guidance", "trajectory", "budget", "workspace"]`, `timeout_seconds`, and
+`output_bytes`. Preserve and hash the entire protected suite directory.
+
+Start requires a clean, current `main`, matching loaded controller source, read-only
+remote freshness/PR admission, and exclusive repository ownership. It freezes state
+and prepares a retained `codex/improve/UUID` worktree; it makes no model requests.
+Edit only the six frozen editable paths in that worktree before explicitly requesting
+candidate evaluation. Candidate checks must pass before paid trial dispatch. Both
+baseline and candidate run three repeats for each development/selection-validation
+case, using the same isolated path and independent protected grading. Worker success
+claims never determine correctness. Explicit repeated evaluation may reuse only
+complete, compatible, artifact-verified observations in this experiment.
+
+Interactive command approval requires terminal input and pauses the worker before
+waiting. `preauthorized-disposable` mode additionally requires the start flag
+`--authorize-disposable-commands`. This authorization covers bounded commands in the
+admitted task environment only. No mode permits command network access or arbitrary
+host paths. Worker/relay images must already exist at their pinned digests; the
+runtime never builds or pulls images. The internal Docker bridge must support and
+verify isolated gateway mode. Provider credentials remain in the host broker.
+
+Stop/signals retain interruption evidence and reconcile exact owned effects. Resume
+checks frozen inputs and ownership, archives controller-checkpointed interrupted
+candidate edits, restores the accepted baseline, and returns ready without dispatch.
+Unexpected edits are preserved and block restoration. Unfinished/uncertain spending
+blocks resume; quotas are never reset. Close stops owned effects and releases locks
+while retaining worktrees, branches, artifacts and spending records. Recovery never
+silently repeats a trial. Exit codes are 0 for successful operations (including a
+completed correctness failure), 2 for invalid/conflicting state, 3 for infrastructure
+or recovery errors, and 130 for interruption.
+
+Current verification uses temporary Git/SQLite and scripted Docker/model effects;
+these are plumbing checks, not real isolation or improvement evidence. Before any
+paid comparison, separately authorize and perform a tiny real Docker boundary proof,
+then one explicit retired-calibration baseline/candidate comparison with all outcomes
+retained. Image preparation, complete corpus admission (including the pending
+replacement), explicit budget approval, and a fresh post-refactor baseline remain
+operator gates. Do not freeze the incomplete corpus or reuse older host calibration
+as an isolated baseline. No real experiment is launched by the test suite by default.

@@ -54,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="crucible")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("benchmark", help="explicit protected benchmark calibration")
+    commands.add_parser("improve", help="explicit isolated improvement experiments")
     eval_command = commands.add_parser("eval")
     eval_commands = eval_command.add_subparsers(dest="eval_command", required=True)
     run = eval_commands.add_parser("run")
@@ -199,6 +200,10 @@ async def run_cli(
     gateway_factory: Callable[[], ModelGateway] | None = None,
     docker_client: DockerClient | None = None,
 ) -> int:
+    if argv and argv[0] == "improve":
+        from crucible.improvement.cli import run_cli as run_improvement_cli
+
+        return await run_improvement_cli(argv[1:])
     if argv and argv[0] == "benchmark":
         from crucible.benchmarks.cli import run_cli as run_benchmark_cli
 

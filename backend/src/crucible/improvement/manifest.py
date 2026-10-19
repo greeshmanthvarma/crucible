@@ -51,8 +51,13 @@ def manifest_digest(manifest: ExperimentManifest) -> str:
     ).hexdigest()
 
 
-def freeze_manifest(config: Path, registry_root: Path) -> ExperimentManifest:
-    manifest = ExperimentManifest.model_validate_json(read_bounded(config))
+def freeze_manifest(
+    config: Path, registry_root: Path, *, authorize_disposable_commands: bool = False
+) -> ExperimentManifest:
+    payload = json.loads(read_bounded(config))
+    if authorize_disposable_commands:
+        payload["disposable_commands_authorized"] = True
+    manifest = ExperimentManifest.model_validate_json(json.dumps(payload))
     registry = CaseRegistry.model_validate_json(
         read_bounded(registry_root / "registry.json")
     )
