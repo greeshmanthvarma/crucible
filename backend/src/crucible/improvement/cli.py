@@ -27,6 +27,7 @@ def parser() -> argparse.ArgumentParser:
     for operation in (
         "status",
         "baseline",
+        "search",
         "candidate-evaluate",
         "stop",
         "resume",
@@ -69,6 +70,7 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
             action = {
                 "status": service.status,
                 "baseline": service.baseline,
+                "search": service.search,
                 "candidate-evaluate": service.evaluate_candidate,
                 "stop": service.stop,
                 "resume": service.resume,
@@ -76,7 +78,12 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
             }[args.operation]
             output = await action(args.id)
         print(json.dumps(output, sort_keys=True))
-        return 3 if output.get("status") == "error" else 0
+        return (
+            3
+            if output.get("status") == "error"
+            or output.get("reason") in ("infrastructure_error", "budget_limit")
+            else 0
+        )
     except asyncio.CancelledError:
         if hasattr(args, "id"):
             try:

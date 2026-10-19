@@ -431,6 +431,9 @@ class RoleRunner:
             execution = execution.model_copy(
                 update={"termination": result.observation.termination}
             )
+            execution = execution.model_copy(
+                update={"termination": result.observation.termination}
+            )
             current = await self.store.get(run.id)
             if current.stop_requested or result.observation.termination not in (
                 "completed",
@@ -655,6 +658,23 @@ class RoleRunner:
             directory / "candidate",
             EDITABLE_PATHS,
         )
+        for existing in await self.store.snapshots(execution.experiment_id):
+            if (existing["source_digest"], existing["export_digest"]) == (
+                snapshot.source_digest,
+                snapshot.export_digest,
+            ):
+                from crucible.improvement.contracts import HarnessSnapshot
+                from crucible.improvement.source import verify_harness_export
+                from crucible.improvement.trials import owned_artifact
+
+                if existing["status"] != "verified":
+                    raise ValueError("candidate content requires explicit recovery")
+                artifact = owned_artifact(self.root, str(existing["artifact_ref"]))
+                canonical = HarnessSnapshot.model_validate_json(
+                    read_regular_artifact(artifact, 65536)
+                )
+                verify_harness_export(artifact.parent / "harness", canonical)
+                return canonical
         await self.store.register_snapshot(
             execution.experiment_id,
             snapshot,

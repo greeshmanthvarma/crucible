@@ -9,6 +9,7 @@ import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -503,6 +504,78 @@ class ExperimentService:
             return (await answer).strip().lower() == b"y"
         finally:
             loop.remove_reader(0)
+
+    async def search(self, id: UUID) -> dict[str, object]:
+        record = await self.store.require_search_open(id)
+        config = await self._validate(record)
+        owner = await self.store.claim_execution(
+            id,
+            "mining",
+            process_id=os.getpid(),
+            process_start=await self._process_start(os.getpid()),
+        )
+
+        async def heartbeat() -> None:
+            while True:
+                await self.store.heartbeat(id, owner)
+                await asyncio.sleep(2)
+
+        pulse = asyncio.create_task(heartbeat())
+        try:
+            await self._repository_lock(config, id)
+            paths = ExperimentPaths(
+                root=self.root,
+                registry_root=config.registry_root,
+                repository=config.repository,
+            )
+            owned = await self._worktree(config, record)
+            with TemporaryDirectory(
+                prefix="crucible-development-view-"
+            ) as view_directory:
+                return await self._search_runtime(
+                    id, record, config, paths, owned, Path(view_directory)
+                )
+        finally:
+            pulse.cancel()
+            await asyncio.gather(pulse, return_exceptions=True)
+            await self.store.release_execution(id, owner, "awaiting_search")
+
+    async def _search_runtime(
+        self,
+        id: UUID,
+        record: ExperimentRecord,
+        config: StartConfig,
+        paths: ExperimentPaths,
+        owned: OwnedWorktree,
+        view_directory: Path,
+    ) -> dict[str, object]:
+        from crucible.improvement.evidence_views import DevelopmentViewBuilder
+        from crucible.improvement.promotion import PromotionService
+        from crucible.improvement.roles import RoleRunner
+        from crucible.improvement.search import LocalSearchExecution, SearchController
+
+        async with self._runtime(record.manifest) as supervisor:
+            views = DevelopmentViewBuilder(self.store, self.root)
+            execution = LocalSearchExecution(
+                self.store,
+                paths,
+                config.protected_suite_root,
+                RoleRunner(self.store, self.root, supervisor, views),
+                IsolatedTrialRunner(
+                    self.store,
+                    paths,
+                    supervisor,
+                    SwebenchGrader(record.manifest.grader),
+                    config.protected_suite_root,
+                ),
+                views,
+                PromotionService(self.store, paths, config.protected_suite_root),
+                owned,
+                DockerProbes(self.store, self.docker, record.manifest),
+                view_directory,
+            )
+            outcome = await SearchController(self.store, execution).run(id)
+            return outcome.model_dump(mode="json")
 
     async def baseline(self, id: UUID) -> dict[str, object]:
         return await self._evaluate(id, False)

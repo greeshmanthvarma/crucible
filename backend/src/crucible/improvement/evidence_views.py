@@ -127,7 +127,7 @@ class DevelopmentViewBuilder:
             if case.split == "development"
         }
         selected = {}
-        for trial in await self.store.trials(experiment_id):
+        for trial in await self.store.selected_trials(experiment_id):
             if (
                 trial["snapshot"] == str(baseline_snapshot_id)
                 and trial["case_id"] in development

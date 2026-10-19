@@ -96,7 +96,7 @@ def owned_artifact(root: Path, reference: str) -> Path:
 async def reusable_trial(
     store: ExperimentStore, experiment_id: UUID, key: str, *, root: Path
 ) -> TrialResult | None:
-    for row in await store.trials(experiment_id):
+    for row in await store.selected_trials(experiment_id):
         if row["key"] != key or row["status"] != "complete":
             continue
         reference = json.loads(str(row["artifact_ref"]))
@@ -225,6 +225,10 @@ class IsolatedTrialRunner:
         )
         if cached:
             return cached
+        if manifest.schema_version == 2:
+            await self.store.require_trial_retry(
+                experiment_id, snapshot_id, case_id, repeat_index, key
+            )
         start = await self.store.reserve_usage(
             experiment_id, None, UsageAmounts(trial_starts=1), kind="worker"
         )
@@ -613,7 +617,7 @@ async def build_evaluation_set(
     required = tuple(c for c in run.manifest.cases if c.split != "final-test")
     refs = {c.case_id: c for c in required}
     selected = {}
-    for row in await store.trials(experiment_id):
+    for row in await store.selected_trials(experiment_id):
         if row["snapshot"] == str(snapshot_id) and row["case_id"] in refs:
             key = str(row["case_id"]), int(str(row["repeat_index"]))
             if key in selected:

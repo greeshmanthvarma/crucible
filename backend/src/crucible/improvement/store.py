@@ -797,6 +797,48 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                     generation=generation,
                 ),
             )
+            if generation and record.manifest.schema_version == 2:
+                previous = (
+                    await conn.execute(
+                        text(
+                            "SELECT id,key,status FROM experiment_trials WHERE "
+                            "experiment=:id AND snapshot=:sid AND case_id=:case AND "
+                            "repeat_index=:repeat AND generation=:generation"
+                        ),
+                        {
+                            "id": str(id),
+                            "sid": str(snapshot_id),
+                            "case": case_id,
+                            "repeat": repeat_index,
+                            "generation": generation - 1,
+                        },
+                    )
+                ).one()
+                resume = (
+                    await conn.execute(
+                        text(
+                            "SELECT payload_json FROM experiment_events WHERE "
+                            "experiment=:id AND type='explicit_resume' ORDER BY "
+                            "sequence DESC LIMIT 1"
+                        ),
+                        {"id": str(id)},
+                    )
+                ).scalar_one_or_none()
+                if (
+                    resume
+                    and previous.id in json.loads(resume).get("retry_trial_ids", [])
+                    and previous.status in ("error", "interrupted")
+                    and previous.key == key
+                ):
+                    await self._event(
+                        conn,
+                        id,
+                        "trial_superseded",
+                        {
+                            "original_trial_id": previous.id,
+                            "replacement_trial_id": str(trial_id),
+                        },
+                    )
             await self._event(
                 conn,
                 id,
@@ -1058,7 +1100,36 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 ),
                 {"id": str(id)},
             )
-            await self._event(conn, id, "explicit_resume", {})
+            accepted = (
+                await self._accepted_snapshot_id(conn, await self._get(conn, id))
+                if (await self._get(conn, id)).manifest.schema_version == 2
+                else None
+            )
+            retry_ids = []
+            if accepted:
+                rows = (
+                    (
+                        await conn.execute(
+                            text(
+                                "SELECT id FROM experiment_trials t WHERE "
+                                "experiment=:id AND snapshot=:sid AND status IN "
+                                "('error','interrupted') AND NOT EXISTS (SELECT 1 "
+                                "FROM experiment_trials n WHERE "
+                                "n.experiment=t.experiment AND n.snapshot=t.snapshot "
+                                "AND n.case_id=t.case_id AND "
+                                "n.repeat_index=t.repeat_index AND "
+                                "n.generation>t.generation)"
+                            ),
+                            {"id": str(id), "sid": str(accepted)},
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                retry_ids = list(rows)
+            await self._event(
+                conn, id, "explicit_resume", {"retry_trial_ids": retry_ids}
+            )
 
     async def _require_owner(
         self, conn: AsyncConnection, id: UUID, owner: UUID
@@ -1803,3 +1874,67 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
         async with self.engine.connect() as conn:
             run = await self._get(conn, id)
             return await self._accepted_snapshot_id(conn, run)
+
+    async def interrupt_round(self, round_id: UUID) -> None:
+        """Consume a proposal opportunity after explicit reconciliation."""
+        round = await self.round(round_id)
+        async with self._transaction() as conn:
+            run = await self._get(conn, round.experiment_id)
+            await self._search_revision(conn, run.id, run.revision)
+            if round.status in ("decided", "interrupted"):
+                return
+            await conn.execute(
+                text("UPDATE experiment_rounds SET status='interrupted' WHERE id=:id"),
+                {"id": str(round_id)},
+            )
+            await self._search_event(
+                conn, run.id, "round_interrupted", {"round_id": str(round_id)}
+            )
+
+    async def selected_trials(self, id: UUID) -> tuple[dict[str, object], ...]:
+        """Supersede only failed attempts explicitly authorized by recovery."""
+        rows = await self.trials(id)
+        by_id = {str(r["id"]): r for r in rows}
+        removed: set[str] = set()
+        for event in await self.events(id, "trial_superseded"):
+            old_id, new_id = (
+                str(event["original_trial_id"]),
+                str(event["replacement_trial_id"]),
+            )
+            old, new = by_id[old_id], by_id[new_id]
+            if (
+                old_id in removed
+                or old["status"] not in ("error", "interrupted")
+                or any(
+                    old[k] != new[k]
+                    for k in ("snapshot", "case_id", "repeat_index", "key")
+                )
+                or int(str(new["generation"])) != int(str(old["generation"])) + 1
+            ):
+                raise RevisionConflict("invalid trial supersession")
+            removed.add(old_id)
+        return tuple(r for r in rows if str(r["id"]) not in removed)
+
+    async def require_trial_retry(
+        self, id: UUID, snapshot: UUID, case: str, repeat: int, key: str
+    ) -> None:
+        rows = [
+            r
+            for r in await self.selected_trials(id)
+            if r["snapshot"] == str(snapshot)
+            and r["case_id"] == case
+            and r["repeat_index"] == repeat
+        ]
+        if not rows:
+            return
+        resumes = await self.events(id, "explicit_resume")
+        authorized = resumes[-1].get("retry_trial_ids", []) if resumes else []
+        if (
+            len(rows) != 1
+            or rows[0]["status"] not in ("error", "interrupted")
+            or rows[0]["key"] != key
+            or not resumes
+            or not isinstance(authorized, list)
+            or rows[0]["id"] not in authorized
+        ):
+            raise RevisionConflict("trial retry requires explicit compatible recovery")

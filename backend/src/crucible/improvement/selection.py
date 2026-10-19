@@ -31,7 +31,7 @@ class EvaluationSet(Contract):
     trials: Annotated[tuple[ScoredTrial, ...], Field(max_length=12288)]
 
 
-def _counts(evaluation: EvaluationSet) -> dict[str, int] | None:
+def selection_counts(evaluation: EvaluationSet) -> dict[str, int] | None:
     required = {case.case_id: case for case in evaluation.required_cases}
     if len(required) != len(evaluation.required_cases) or {
         case.split for case in required.values()
@@ -97,7 +97,10 @@ def decide_candidate(
             "reject",
             "scope_rejected" if "scope" in checks.reason else "boundary_rejected",
         )
-    baseline_counts, candidate_counts = _counts(baseline), _counts(candidate)
+    baseline_counts, candidate_counts = (
+        selection_counts(baseline),
+        selection_counts(candidate),
+    )
     if (
         baseline_counts is None
         or candidate_counts is None
