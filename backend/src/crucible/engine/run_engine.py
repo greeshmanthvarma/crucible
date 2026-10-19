@@ -5,6 +5,7 @@ from uuid import UUID
 from crucible.application.ports import EventNotifier, UnitOfWork
 from crucible.application.validation_service import ValidationService
 from crucible.context.manager import (
+    CodingBehaviorInvalid,
     ContextLimitExceeded,
     ContextManager,
     SimpleTokenEstimator,
@@ -24,6 +25,7 @@ from crucible.domain.run import Run
 from crucible.domain.steps import Step
 from crucible.domain.validation import CompletionProposal, ValidationStatus
 from crucible.engine.active_time import ActiveTimeBudget
+from crucible.engine.coding_behavior import BehaviorObservation, ToolObservation
 from crucible.engine.gateway import (
     CompleteToolCall,
     ModelError,
@@ -137,6 +139,11 @@ class RunEngine:
                     )
                 used_calls += step_calls
                 used_tokens += step_tokens
+            except CodingBehaviorInvalid as error:
+                await self._persist_failure(
+                    run_id, error, code="coding_behavior_invalid"
+                )
+                return True
             except ContextLimitExceeded as error:
                 await self._persist_failure(run_id, error, code="context_limit")
                 return True
@@ -188,7 +195,36 @@ class RunEngine:
         if task is None:
             raise ValueError(f"Task not found: {run.task_id}")
 
-        prepared = await self._context_manager.prepare(run, step)
+        async with self._unit_of_work() as uow:
+            observations = []
+            for prior_step in await uow.steps.list_for_run(run.id):
+                names = {
+                    c.id: c.name
+                    for c in await uow.tool_calls.list_for_step(prior_step.id)
+                }
+                for result in await uow.tool_results.list_for_step(prior_step.id):
+                    observations.append(
+                        ToolObservation(
+                            names.get(result.tool_call_id, "unknown"),
+                            result.status.value,
+                            result.error_code,
+                        )
+                    )
+            completion_proposed = bool(
+                await uow.validation_attempts.list_for_run(run.id)
+            )
+        observation = BehaviorObservation(
+            step_sequence,
+            max(0, self._max_steps - step_sequence),
+            call_budget,
+            token_budget,
+            active_time.remaining_seconds,
+            tuple(observations[-8:]),
+            completion_proposed,
+        )
+        prepared = await self._context_manager.prepare(
+            run, step, observation=observation
+        )
         active_step = step.activate_model(self._clock.now())
         await self._record_step(active_step, EventType.STEP_MODEL_ACTIVE)
 

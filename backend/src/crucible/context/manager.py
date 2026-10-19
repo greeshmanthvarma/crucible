@@ -28,6 +28,8 @@ from crucible.domain.ids import new_id
 from crucible.domain.run import Run
 from crucible.domain.steps import Step
 from crucible.domain.validation import ValidationStatus
+from crucible.engine import coding_behavior
+from crucible.engine.coding_behavior import BehaviorObservation
 from crucible.engine.gateway import (
     ModelMessage,
     ModelPart,
@@ -39,6 +41,22 @@ from crucible.engine.journal import EventSpec, JournalMutation, RunJournal
 from crucible.repair.evidence import EvidenceRecorder
 
 logger = logging.getLogger(__name__)
+
+
+class CodingBehaviorInvalid(ValueError):
+    pass
+
+
+def validated_advice(value: object) -> str:
+    if not isinstance(value, str):
+        raise CodingBehaviorInvalid("coding_behavior_invalid")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeError as error:
+        raise CodingBehaviorInvalid("coding_behavior_invalid") from error
+    if size > 8192:
+        raise CodingBehaviorInvalid("coding_behavior_invalid")
+    return value
 
 
 class ContextLimitExceeded(Exception):
@@ -104,7 +122,9 @@ class ContextManager:
         self._replay_instructions = replay_instructions
         self._replay_repair_context = replay_repair_context
 
-    async def prepare(self, run: Run, step: Step) -> PreparedContext:
+    async def prepare(
+        self, run: Run, step: Step, *, observation: BehaviorObservation | None = None
+    ) -> PreparedContext:
         async with self._unit_of_work() as uow:
             task = await uow.tasks.get(run.task_id)
             messages = await uow.messages.list_for_task(run.task_id)
@@ -148,6 +168,17 @@ class ContextManager:
                 str(index): _digest_text(text)
                 for index, text in enumerate(instruction_texts)
             }
+
+        advice = [validated_advice(coding_behavior.coding_guidance())]
+        if observation is not None:
+            advice.append(validated_advice(coding_behavior.step_guidance(observation)))
+        for index, text in enumerate(advice):
+            if text:
+                supplemental = "Supplemental coding advice:\n" + text
+                instruction_texts.append(supplemental)
+                instruction_digests[f"coding_advice_{index}"] = _digest_text(
+                    supplemental
+                )
 
         compacted_prefix = (
             []
@@ -322,7 +353,7 @@ class ContextManager:
                             f"Compaction failed and context estimate {estimate} "
                             f"exceeds limit {absolute_capacity}: {error}"
                         ) from error
-                    return await self.prepare(run, step)
+                    return await self.prepare(run, step, observation=observation)
                 raise CompactionNeeded(boundary, estimate, capacity)
             raise ContextLimitExceeded(
                 f"Prepared context estimate {estimate} exceeds capacity {capacity}"

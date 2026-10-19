@@ -14,6 +14,13 @@ class ActiveTimeBudget:
         self._active_since: float | None = None
         self._paused = False
 
+    @property
+    def remaining_seconds(self) -> float:
+        elapsed = 0.0
+        if not self._paused and self._active_since is not None:
+            elapsed = max(0.0, asyncio.get_running_loop().time() - self._active_since)
+        return max(0.0, self._remaining - elapsed)
+
     @asynccontextmanager
     async def track(self) -> AsyncIterator[None]:
         loop = asyncio.get_running_loop()

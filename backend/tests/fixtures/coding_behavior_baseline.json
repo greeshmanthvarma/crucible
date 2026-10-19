@@ -1,0 +1,211 @@
+[
+  {
+    "model": "fake",
+    "messages": [
+      {
+        "role": "system",
+        "parts": [
+          {
+            "kind": "text",
+            "text_content": "Follow harness safety and execution policy.",
+            "tool_call_id": null,
+            "tool_name": null,
+            "arguments": null,
+            "provider_correlation_id": null
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "parts": [
+          {
+            "kind": "text",
+            "text_content": "Use only the structured tools supplied by the harness.",
+            "tool_call_id": null,
+            "tool_name": null,
+            "arguments": null,
+            "provider_correlation_id": null
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "parts": [
+          {
+            "kind": "text",
+            "text_content": "Keep repository rules.",
+            "tool_call_id": null,
+            "tool_name": null,
+            "arguments": null,
+            "provider_correlation_id": null
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "parts": [
+          {
+            "kind": "text",
+            "text_content": "Explain the change",
+            "tool_call_id": null,
+            "tool_name": null,
+            "arguments": null,
+            "provider_correlation_id": null
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "list_files",
+        "description": "List stable workspace-relative file paths.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "default": ".",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "title": "ListFilesArguments",
+          "type": "object"
+        },
+        "schema_version": 1
+      },
+      {
+        "name": "search_files",
+        "description": "Search workspace text with ripgrep.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "query": {
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Query",
+              "type": "string"
+            },
+            "path": {
+              "default": ".",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "SearchFilesArguments",
+          "type": "object"
+        },
+        "schema_version": 1
+      },
+      {
+        "name": "read_file",
+        "description": "Read a bounded UTF-8 workspace file range.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "title": "Path",
+              "type": "string"
+            },
+            "start_line": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Start Line",
+              "type": "integer"
+            },
+            "end_line": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "End Line"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "title": "ReadFileArguments",
+          "type": "object"
+        },
+        "schema_version": 1
+      },
+      {
+        "name": "workspace_status",
+        "description": "Inspect Git workspace status.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {},
+          "title": "WorkspaceStatusArguments",
+          "type": "object"
+        },
+        "schema_version": 1
+      },
+      {
+        "name": "workspace_diff",
+        "description": "Inspect the current Git workspace diff.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {},
+          "title": "WorkspaceDiffArguments",
+          "type": "object"
+        },
+        "schema_version": 1
+      },
+      {
+        "name": "apply_patch",
+        "description": "Apply a standard unified diff inside the workspace. Include --- a/path, +++ b/path, and numbered @@ -old +new @@ hunk headers. The *** Begin Patch / *** Update File format is not supported.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "patch": {
+              "maxLength": 1000000,
+              "minLength": 1,
+              "title": "Patch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "patch"
+          ],
+          "title": "ApplyPatchArguments",
+          "type": "object"
+        },
+        "schema_version": 1
+      },
+      {
+        "name": "write_file",
+        "description": "Atomically write complete UTF-8 content inside the workspace.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "title": "Path",
+              "type": "string"
+            },
+            "content": {
+              "maxLength": 1000000,
+              "title": "Content",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ],
+          "title": "WriteFileArguments",
+          "type": "object"
+        },
+        "schema_version": 1
+      }
+    ],
+    "max_output_tokens": 1024
+  }
+]
