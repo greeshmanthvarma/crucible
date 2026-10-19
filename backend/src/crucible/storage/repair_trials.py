@@ -9,7 +9,7 @@ from uuid import UUID
 from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from crucible.repair.trials import TrialEvidence, TrialJob
+from crucible.repair.trial_contracts import TrialEvidence, TrialJob
 from crucible.storage import models
 
 if TYPE_CHECKING:

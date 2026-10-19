@@ -48,3 +48,6 @@ select = ["E", "F", "I"]
 python_version = "3.13"
 strict = true
 files = ["src/crucible"]
+
+[tool.ruff.lint.isort]
+known-third-party = ["docker", "swebench"]

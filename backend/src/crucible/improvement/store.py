@@ -10,7 +10,11 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
-from crucible.improvement.contracts import ExperimentManifest, UsageAmounts
+from crucible.improvement.contracts import (
+    ExperimentManifest,
+    HarnessSnapshot,
+    UsageAmounts,
+)
 from crucible.improvement.manifest import ManifestDrift, manifest_digest
 
 Status = Literal["ready", "running", "stopping", "interrupted", "error", "closed"]
@@ -234,9 +238,10 @@ experiment_events WHERE experiment=:id"""),
                 raise RevisionConflict("repository already owned")
             await conn.execute(
                 text("""INSERT INTO experiment_runs
-(id,manifest_json,manifest_hash,initial_commit,last_accepted_commit,status
-,stage,revision,idempotency_key)
-VALUES (:id,:manifest,:hash,:commit,:commit,'ready','admission',0,:key)"""),
+(id,manifest_json,manifest_hash,initial_commit,
+last_accepted_commit,status,stage,revision,idempotency_key)
+VALUES
+(:id,:manifest,:hash,:commit,:commit,'ready','admission',0,:key)"""),
                 {
                     "id": str(manifest.experiment_id),
                     "manifest": manifest.model_dump_json(),
@@ -430,3 +435,210 @@ revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
                 )
                 await self._event(conn, id, "stop_requested", {})
             return await self._get(conn, id)
+
+    async def mark_uncertain(self, reservation_id: UUID) -> None:
+        async with self._transaction() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT experiment,status FROM experiment_usage WHERE "
+                        "reservation_id=:id"
+                    ),
+                    {"id": str(reservation_id)},
+                )
+            ).one()
+            if row.status == "settled":
+                raise RevisionConflict("settled usage cannot become uncertain")
+            await conn.execute(
+                text(
+                    "UPDATE experiment_usage SET status='uncertain' WHERE "
+                    "reservation_id=:id"
+                ),
+                {"id": str(reservation_id)},
+            )
+            await conn.execute(
+                text(
+                    "UPDATE experiment_runs SET "
+                    "status='error',stop_requested=1,revision=revision+1 "
+                    "WHERE id=:id"
+                ),
+                {"id": row.experiment},
+            )
+            await self._event(
+                conn,
+                UUID(row.experiment),
+                "usage_uncertain",
+                {"reservation_id": str(reservation_id)},
+            )
+
+    async def begin_effect(
+        self,
+        id: UUID,
+        trial: UUID | None,
+        kind: str,
+        intent: dict[str, object],
+        labels: dict[str, str],
+    ) -> UUID:
+        if kind not in ("worktree", "network", "relay", "worker", "command", "grading"):
+            raise ValueError("unknown effect kind")
+        encoded = json.dumps(intent, sort_keys=True, allow_nan=False)
+        if len(encoded.encode()) > 65536:
+            raise ValueError("oversized effect intent")
+        async with self._transaction() as conn:
+            record = await self._get(conn, id)
+            if record.stop_requested or record.status not in ("ready", "running"):
+                raise RevisionConflict("experiment stopped before external effect")
+            effect = uuid4()
+            await conn.execute(
+                text("""INSERT INTO experiment_effects
+(id,experiment,trial,kind,intent_json,ownership_labels_json,status)
+VALUES (:effect,:id,:trial,:kind,:intent,:labels,'intent')"""),
+                dict(
+                    effect=str(effect),
+                    id=str(id),
+                    trial=str(trial) if trial else None,
+                    kind=kind,
+                    intent=encoded,
+                    labels=json.dumps(labels, sort_keys=True),
+                ),
+            )
+            await self._event(
+                conn, id, "effect_intent", {"effect_id": str(effect), "kind": kind}
+            )
+            return effect
+
+    async def effect_state(
+        self, effect_id: UUID, status: str, external_id: str | None = None
+    ) -> None:
+        if status not in ("active", "stopped", "uncertain"):
+            raise ValueError("invalid effect state")
+        async with self._transaction() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT experiment,status,external_id FROM "
+                        "experiment_effects WHERE id=:id"
+                    ),
+                    {"id": str(effect_id)},
+                )
+            ).one()
+            if row.status == "stopped" and status != "stopped":
+                raise RevisionConflict("effect already stopped")
+            if external_id and row.external_id and row.external_id != external_id:
+                raise RevisionConflict("external effect identity drift")
+            await conn.execute(
+                text("""UPDATE experiment_effects SET status=:status,
+external_id=COALESCE(external_id,:external),
+updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
+                {"id": str(effect_id), "status": status, "external": external_id},
+            )
+            await self._event(
+                conn,
+                UUID(row.experiment),
+                "effect_" + status,
+                {"effect_id": str(effect_id)},
+            )
+
+    async def effects(self, id: UUID) -> tuple[dict[str, object], ...]:
+        async with self.engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        text("SELECT * FROM experiment_effects WHERE experiment=:id"),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            return tuple(dict(row) for row in rows)
+
+    async def register_snapshot(
+        self, id: UUID, snapshot: "HarnessSnapshot", artifact_ref: str
+    ) -> None:
+        from crucible.improvement.contracts import HarnessSnapshot
+
+        snapshot = HarnessSnapshot.model_validate_json(snapshot.model_dump_json())
+        async with self._transaction() as conn:
+            await self._get(conn, id)
+            await conn.execute(
+                text("""INSERT INTO experiment_snapshots
+(id,experiment,parent_commit,kind,source_digest,
+export_digest,patch_digest,artifact_ref,status)
+VALUES
+(:sid,:id,:parent,:kind,:source,:export,:patch,:artifact,'verified')"""),
+                dict(
+                    sid=str(snapshot.snapshot_id),
+                    id=str(id),
+                    parent=snapshot.parent_commit,
+                    kind=snapshot.kind,
+                    source=snapshot.source_digest,
+                    export=snapshot.export_digest,
+                    patch=snapshot.patch_digest,
+                    artifact=artifact_ref,
+                ),
+            )
+            await self._event(
+                conn,
+                id,
+                "snapshot_verified",
+                {"snapshot_id": str(snapshot.snapshot_id)},
+            )
+
+    async def create_trial(
+        self, id: UUID, snapshot_id: UUID, case_id: str, repeat_index: int, key: str
+    ) -> UUID:
+        async with self._transaction() as conn:
+            record = await self._get(conn, id)
+            if record.stop_requested or record.status not in ("ready", "running"):
+                raise RevisionConflict("experiment not ready for trial")
+            if repeat_index not in range(3) or case_id not in {
+                c.case_id for c in record.manifest.cases if c.split != "final-test"
+            }:
+                raise ValueError("trial outside selection schedule")
+            snapshot = (
+                await conn.execute(
+                    text(
+                        "SELECT id FROM experiment_snapshots WHERE id=:sid AND "
+                        "experiment=:id AND status='verified'"
+                    ),
+                    {"sid": str(snapshot_id), "id": str(id)},
+                )
+            ).first()
+            if not snapshot:
+                raise ValueError("snapshot outside experiment")
+            generation = (
+                await conn.execute(
+                    text("""SELECT COALESCE(MAX(generation),-1)+1 FROM experiment_trials
+WHERE experiment=:id AND snapshot=:sid AND case_id=:case AND
+repeat_index=:repeat"""),
+                    dict(
+                        id=str(id),
+                        sid=str(snapshot_id),
+                        case=case_id,
+                        repeat=repeat_index,
+                    ),
+                )
+            ).scalar_one()
+            trial_id = uuid4()
+            await conn.execute(
+                text("""INSERT INTO experiment_trials
+(id,experiment,snapshot,case_id,repeat_index,key,status,generation)
+VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
+                dict(
+                    trial=str(trial_id),
+                    id=str(id),
+                    sid=str(snapshot_id),
+                    case=case_id,
+                    repeat=repeat_index,
+                    key=key,
+                    generation=generation,
+                ),
+            )
+            await self._event(
+                conn,
+                id,
+                "trial_created",
+                {"trial_id": str(trial_id), "generation": generation},
+            )
+            return trial_id

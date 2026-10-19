@@ -20,7 +20,7 @@ from crucible.domain.repair import (
     RepairStage,
     RepairStatus,
 )
-from crucible.repair.trials import TrialJob
+from crucible.repair.trial_contracts import TrialJob
 from crucible.storage import models
 from crucible.storage.repair_trials import SqlAlchemyTrialStore
 
