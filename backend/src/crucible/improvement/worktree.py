@@ -44,6 +44,36 @@ class OwnedWorktree:
             raise ScopeRejected("worktree ownership drift")
         return await asyncio.to_thread(inspect_source, self.path, self.initial_commit)
 
+    async def reconcile_proposal_transfer(self) -> None:
+        """Explicit recovery recognizes only journaled partial controller writes."""
+        import hashlib
+
+        from crucible.benchmarks.evidence import atomic_json
+        from crucible.improvement.worker_supervisor import read_regular_artifact
+
+        path = self.root / "proposal-transfer.json"
+        if not path.exists():
+            return
+        journal = json.loads(read_regular_artifact(path, 2 * 1024 * 1024))
+        if journal["state"] != "intent":
+            return
+        inspection = await self.inspect()
+        before, after = journal["before"], journal["after"]
+        if not set(after) <= set(EDITABLE_PATHS):
+            raise ScopeRejected("invalid proposal transfer journal")
+        current = {
+            name: [mode, hashlib.sha256(raw).hexdigest()]
+            for name, (mode, raw) in inspection.files.items()
+        }
+        for name in set(before) | set(current) | set(after):
+            allowed = [before.get(name)]
+            if name in after:
+                allowed.append(after[name])
+            if current.get(name) not in allowed:
+                raise ScopeRejected("unexpected edit during proposal transfer", (name,))
+        await self.checkpoint_owned_edits()
+        atomic_json(path, {**journal, "state": "reconciled"})
+
     async def checkpoint_owned_edits(self) -> str:
         inspection = await self.inspect()
         # Only called after controller-directed proposal/checkpoint, never on resume.

@@ -319,7 +319,8 @@ class IsolatedTrialRunner:
                 shutil.copytree, solver_case.workspace / ".git", base / ".git"
             )
             job = WorkerJob(
-                schema_version=1,
+                schema_version=manifest.schema_version,
+                job_kind="trial" if manifest.schema_version == 2 else None,
                 job_id=job_id,
                 experiment_id=experiment_id,
                 trial_id=trial,
@@ -341,7 +342,7 @@ class IsolatedTrialRunner:
                     manifest.command_policy.max_output_bytes_per_call, 8 * 1024 * 1024
                 ),
                 wall_deadline_seconds=manifest.trial_limits.wall_timeout_seconds,
-                protocol_version=1,
+                protocol_version=manifest.worker_protocol_version or 1,
             )
             initial_files = [
                 p

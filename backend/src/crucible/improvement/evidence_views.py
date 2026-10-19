@@ -42,9 +42,41 @@ class DevelopmentViewBuilder:
     def __init__(self, store: ExperimentStore, root: Path) -> None:
         safe_path(root)
         self.store, self.root = store, root
+        self._roots: dict[UUID, Path] = {}
+        self._files: dict[UUID, dict[str, str]] = {}
         self._views: dict[
             UUID, tuple[DevelopmentView, dict[EvidenceRef, tuple[Path, str]]]
         ] = {}
+
+    def export_root(self, view: DevelopmentView) -> Path:
+        registered, _ = self._views[view.view_id]
+        if registered != view:
+            raise ValueError("development view identity drift")
+        root = self._roots[view.view_id]
+        if (
+            hashlib.sha256(
+                read_regular_artifact(root / "index.json", MAX_ARTIFACT)
+            ).hexdigest()
+            != view.index_digest
+        ):
+            raise ValueError("development index digest drift")
+        expected = self._files[view.view_id]
+        actual = {
+            p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()
+        }
+        if actual != set(expected):
+            raise ValueError("development view file registry drift")
+        for name, sha in expected.items():
+            if (
+                hashlib.sha256(
+                    read_regular_artifact(root / name, MAX_ARTIFACT)
+                ).hexdigest()
+                != sha
+            ):
+                raise ValueError("development view file digest drift")
+        for ref in view.evidence_refs:
+            self.resolve_evidence(view, ref)
+        return root
 
     def resolve_evidence(self, view: DevelopmentView, ref: EvidenceRef) -> Path:
         registered, refs = self._views[view.view_id]
@@ -252,4 +284,12 @@ class DevelopmentViewBuilder:
             prior_decisions_digest=hashlib.sha256(prior).hexdigest(),
         )
         self._views[view.view_id] = (view, refs)
+        self._roots[view.view_id] = output_dir
+        self._files[view.view_id] = {
+            p.relative_to(output_dir).as_posix(): hashlib.sha256(
+                p.read_bytes()
+            ).hexdigest()
+            for p in output_dir.rglob("*")
+            if p.is_file()
+        }
         return view

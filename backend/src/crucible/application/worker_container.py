@@ -22,7 +22,7 @@ from crucible.improvement.worker_commands import (
     WorkerCommands,
     WorkerResources,
 )
-from crucible.improvement.worker_protocol import WorkerJob
+from crucible.improvement.worker_protocol import RoleJob, WorkerRequest
 from crucible.sandbox.resources import TaskResourceManager
 from crucible.storage.database import Database
 from crucible.storage.unit_of_work import SqlAlchemyUnitOfWork
@@ -34,14 +34,16 @@ from crucible.tools.registry import default_registry
 
 def create_worker_engine(
     database: Database,
-    job: WorkerJob,
+    job: WorkerRequest,
     gateway: ModelGateway,
     token: str,
     *,
     reduced_model_budget: int | None = None,
+    state_root: Path = Path("/state"),
+    job_path: Path = Path("/job/request.json"),
 ) -> tuple[RunEngine, Callable[[], UnitOfWork]]:
     # This function is reached only inside the worker. No host identity relaxation.
-    if Path("/job/request.json").read_bytes() != job.model_dump_json().encode():
+    if job_path.read_bytes() != job.model_dump_json().encode():
         raise ValueError("worker requires immutable mounted job")
 
     def uow() -> UnitOfWork:
@@ -51,7 +53,7 @@ def create_worker_engine(
     journal = RunJournal(uow, clock)
     approval = ApprovalService(uow, clock, InMemoryApprovalBroker())
     artifacts = ArtifactService(
-        LocalArtifactStore(Path("/state/artifacts"), clock), uow
+        LocalArtifactStore(state_root / "artifacts", clock), uow
     )
     command = ExecuteCommandTool(
         cast(CommandAuthority, WorkerAuthority(approval, clock, job.job_id)),
@@ -60,7 +62,12 @@ def create_worker_engine(
         artifacts,
         journal=journal,
     )
-    registry = default_registry(cast(Tool, command))
+    if isinstance(job, RoleJob):
+        from crucible.improvement.role_worker import role_registry
+
+        registry = role_registry(job.job_kind, cast(Tool, command))
+    else:
+        registry = default_registry(cast(Tool, command))
     context = ContextManager(
         uow,
         clock,

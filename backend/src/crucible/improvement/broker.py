@@ -25,7 +25,13 @@ from crucible.engine.gateway import (
 )
 from crucible.improvement.contracts import ExperimentManifest, UsageAmounts
 from crucible.improvement.store import ExperimentStore, QuotaExhausted
-from crucible.improvement.worker_protocol import CommandRecord, WorkerJob
+from crucible.improvement.worker_protocol import (
+    CommandRecord,
+    RoleJob,
+    WorkerRequest,
+    job_environment,
+    validate_job_manifest,
+)
 from crucible.repair.gateway import GatewayDenied, ScopedModelGateway, WorkerCredential
 from crucible.repair.identity import canonical_json
 from crucible.repair.worker_protocol import WireRequest, decode_request, encode_event
@@ -45,7 +51,7 @@ class WorkspaceBinding:
 class CommandExecutor(Protocol):
     async def execute(
         self,
-        job: WorkerJob,
+        job: WorkerRequest,
         binding: WorkspaceBinding,
         command_id: UUID,
         spec: CommandSpec,
@@ -55,7 +61,7 @@ class CommandExecutor(Protocol):
 
 @dataclass
 class JobSession:
-    job: WorkerJob
+    job: WorkerRequest
     manifest: ExperimentManifest
     binding: WorkspaceBinding
     token_hash: str = field(repr=False)
@@ -72,7 +78,7 @@ class JobSession:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
-Approval = Callable[[WorkerJob, CommandSpec], Awaitable[bool]]
+Approval = Callable[[WorkerRequest, CommandSpec], Awaitable[bool]]
 
 
 class ImprovementBroker:
@@ -94,13 +100,12 @@ class ImprovementBroker:
 
     def issue(
         self,
-        job: WorkerJob,
+        job: WorkerRequest,
         manifest: ExperimentManifest,
         workspace_binding: WorkspaceBinding,
     ) -> WorkerCredential:
-        if (workspace_binding.image, workspace_binding.platform) != (
-            job.solver_case.image,
-            job.solver_case.platform,
+        if (workspace_binding.image, workspace_binding.platform) != job_environment(
+            job, manifest
         ):
             raise ValueError("workspace environment is not bound to admitted task")
         if (
@@ -108,12 +113,7 @@ class ImprovementBroker:
             or workspace_binding.path.is_symlink()
         ):
             raise ValueError("invalid workspace binding")
-        if (
-            job.experiment_id != manifest.experiment_id
-            or job.model != manifest.model
-            or job.limits != manifest.trial_limits
-        ):
-            raise ValueError("job manifest identity mismatch")
+        validate_job_manifest(job, manifest)
         if job.job_id in self.sessions or self.gateway is None:
             raise ValueError("job already issued or model gateway unavailable")
         credential = self.gateway.issue(
@@ -179,6 +179,7 @@ class ImprovementBroker:
                     requests=1,
                     output_bytes=session.job.output_limit_bytes,
                 ),
+                job_id=session.job.job_id,
             )
         except GatewayDenied as error:
             if error.status_code != 429:
@@ -226,6 +227,8 @@ class ImprovementBroker:
         self, token: str, job_id: UUID, command_id: UUID, spec: CommandSpec
     ) -> bytes:
         session = self._authorize(token, job_id)
+        if isinstance(session.job, RoleJob) and session.job.job_kind != "proposal":
+            raise GatewayDenied(403, "mining commands forbidden")
         async with session.lock:
             existing = session.commands.get(command_id)
             if (
@@ -324,6 +327,7 @@ class ImprovementBroker:
             job.trial_id,
             UsageAmounts(output_bytes=spec.limits.output_bytes),
             kind="command",
+            job_id=job.job_id,
         )
         try:
             chunks, outcome = await self.commands.execute(

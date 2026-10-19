@@ -769,6 +769,7 @@ class ExperimentService:
             await self._repository_lock(config, id)
             await self._reconcile(id)
             worktree = await self._worktree(config, record)
+            await worktree.reconcile_proposal_transfer()
             inspection = await worktree.inspect()
             if inspection.changed_paths:
                 await worktree.archive_interrupted(uuid4())

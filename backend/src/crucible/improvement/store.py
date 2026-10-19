@@ -442,6 +442,7 @@ revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
         request: UsageAmounts,
         *,
         kind: Literal["model", "command", "worker"] = "model",
+        job_id: UUID | None = None,
     ) -> UUID:
         request = UsageAmounts.model_validate_json(request.model_dump_json())
         async with self._transaction() as conn:
@@ -506,7 +507,13 @@ revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
                 },
             )
             await self._event(
-                conn, id, "usage_reserved", {"reservation_id": str(reservation)}
+                conn,
+                id,
+                "usage_reserved",
+                {
+                    "reservation_id": str(reservation),
+                    **({"job_id": str(job_id)} if job_id else {}),
+                },
             )
             return reservation
 
@@ -1355,9 +1362,17 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
         ):
             raise ValueError("invalid role attempt")
         async with self._transaction() as conn:
-            await self._search_revision(
-                conn, execution.experiment_id, expected_revision
-            )
+            if execution.status in ("error", "interrupted"):
+                run = await self._get(conn, execution.experiment_id)
+                if (
+                    run.revision != expected_revision
+                    or run.manifest.schema_version != 2
+                ):
+                    raise RevisionConflict("stale role interruption")
+            else:
+                await self._search_revision(
+                    conn, execution.experiment_id, expected_revision
+                )
             row = (
                 (
                     await conn.execute(
@@ -1540,3 +1555,18 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                     raise ValueError("decision digest drift")
                 results.append(decision)
             return tuple(results)
+
+    async def round(self, round_id: UUID) -> RoundRecord:
+        async with self.engine.connect() as conn:
+            experiment = (
+                await conn.execute(
+                    text("SELECT experiment FROM experiment_rounds WHERE id=:id"),
+                    {"id": str(round_id)},
+                )
+            ).scalar_one()
+        return next(r for r in await self.rounds(UUID(experiment)) if r.id == round_id)
+
+    async def require_search_open(self, id: UUID) -> ExperimentRecord:
+        async with self._transaction() as conn:
+            run = await self._get(conn, id)
+            return await self._search_revision(conn, id, run.revision)

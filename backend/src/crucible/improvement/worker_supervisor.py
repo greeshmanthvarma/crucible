@@ -7,7 +7,7 @@ import signal
 import stat
 import time
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, overload
 from uuid import UUID
 
 from crucible.domain.clock import SystemClock
@@ -22,7 +22,12 @@ from crucible.improvement.source import _digest, safe_path
 from crucible.improvement.store import ExperimentStore
 from crucible.improvement.worker_protocol import (
     IsolatedExecution,
+    IsolatedRoleExecution,
+    RoleJob,
     WorkerJob,
+    WorkerRequest,
+    job_environment,
+    read_role_observation,
     read_worker_observation,
 )
 from crucible.sandbox.protocol import (
@@ -126,15 +131,19 @@ class DockerRuntime:
         )
 
 
-def labels(job: WorkerJob) -> dict[str, str]:
+def labels(job: WorkerRequest) -> dict[str, str]:
     return {
         LABEL: str(job.job_id),
         "crucible.improvement.experiment": str(job.experiment_id),
-        "crucible.improvement.trial": str(job.trial_id),
+        **(
+            {"crucible.improvement.trial": str(job.trial_id)}
+            if isinstance(job, WorkerJob)
+            else {"crucible.improvement.role": str(job.role_id)}
+        ),
     }
 
 
-def label_args(job: WorkerJob) -> list[str]:
+def label_args(job: WorkerRequest) -> list[str]:
     result: list[str] = []
     for key, value in labels(job).items():
         result.extend(("--label", key + "=" + value))
@@ -151,7 +160,7 @@ def mount(path: Path, target: str, readonly: bool = False) -> tuple[str, str]:
 
 
 def worker_container_arguments(
-    job: WorkerJob,
+    job: WorkerRequest,
     manifest: ExperimentManifest,
     *,
     network: str,
@@ -191,7 +200,11 @@ def worker_container_arguments(
             "HOME=/state",
             *label_args(job),
             *mount(harness, "/harness", True),
-            *mount(workspace, "/workspace"),
+            *mount(
+                workspace,
+                "/workspace",
+                isinstance(job, RoleJob) and job.job_kind != "proposal",
+            ),
             *mount(workspace / ".git", "/workspace/.git", True),
             *mount(state, "/state"),
             *mount(job_root, "/job", True),
@@ -204,7 +217,7 @@ def worker_container_arguments(
     )
 
 
-async def verify_stopped(docker: DockerPort, identity: str, job: WorkerJob) -> None:
+async def verify_stopped(docker: DockerPort, identity: str, job: WorkerRequest) -> None:
     data = json.loads(await docker.invoke("inspect", identity))
     if len(data) != 1 or data[0]["Config"]["Labels"].get(LABEL) != str(job.job_id):
         raise ValueError("ambiguous Docker ownership")
@@ -218,11 +231,11 @@ async def verify_stopped(docker: DockerPort, identity: str, job: WorkerJob) -> N
 class DockerCommands:
     def __init__(self, store: ExperimentStore, docker: DockerPort) -> None:
         self.store, self.docker = store, docker
-        self.active: dict[UUID, list[tuple[UUID, str, WorkerJob]]] = {}
+        self.active: dict[UUID, list[tuple[UUID, str, WorkerRequest]]] = {}
 
     async def execute(
         self,
-        job: WorkerJob,
+        job: WorkerRequest,
         binding: WorkspaceBinding,
         command_id: UUID,
         spec: CommandSpec,
@@ -300,7 +313,7 @@ class DockerCommands:
         finally:
             await self._stop(effect, name, job)
 
-    async def _stop(self, effect: UUID, name: str, job: WorkerJob) -> None:
+    async def _stop(self, effect: UUID, name: str, job: WorkerRequest) -> None:
         try:
             await verify_stopped(self.docker, name, job)
             await self.store.effect_state(effect, "stopped")
@@ -331,7 +344,7 @@ class WorkerSupervisor:
     ) -> None:
         self.store, self.broker, self.docker = store, broker, docker
         self.root, self.manifest, self.broker_origin = root, manifest, broker_origin
-        self.owned: dict[UUID, list[tuple[UUID, str, str, WorkerJob]]] = {}
+        self.owned: dict[UUID, list[tuple[UUID, str, str, WorkerRequest]]] = {}
         self.broker.pause_worker = self.pause_worker
 
     async def pause_worker(self, job_id: UUID, paused: bool) -> None:
@@ -352,7 +365,7 @@ class WorkerSupervisor:
         await self.docker.invoke("pause" if paused else "unpause", name)
 
     async def _effect(
-        self, job: WorkerJob, kind: str, name: str, args: tuple[str, ...]
+        self, job: WorkerRequest, kind: str, name: str, args: tuple[str, ...]
     ) -> str:
         effect = await self.store.begin_effect(
             job.experiment_id, job.trial_id, kind, {"name": name}, labels(job)
@@ -362,6 +375,7 @@ class WorkerSupervisor:
         await self.store.effect_state(effect, "active", identity)
         return identity
 
+    @overload
     async def execute(
         self,
         job: WorkerJob,
@@ -369,7 +383,26 @@ class WorkerSupervisor:
         solver_export: Path,
         *,
         harness_export: Path,
-    ) -> IsolatedExecution:
+    ) -> IsolatedExecution: ...
+
+    @overload
+    async def execute(
+        self,
+        job: RoleJob,
+        snapshot: HarnessSnapshot,
+        solver_export: Path,
+        *,
+        harness_export: Path,
+    ) -> IsolatedRoleExecution: ...
+
+    async def execute(
+        self,
+        job: WorkerRequest,
+        snapshot: HarnessSnapshot,
+        solver_export: Path,
+        *,
+        harness_export: Path,
+    ) -> IsolatedExecution | IsolatedRoleExecution:
         if (job.experiment_id, job.harness_digest, job.export_digest) != (
             self.manifest.experiment_id,
             snapshot.source_digest,
@@ -413,9 +446,7 @@ class WorkerSupervisor:
         credential = self.broker.issue(
             job,
             self.manifest,
-            WorkspaceBinding(
-                solver_export, job.solver_case.image, job.solver_case.platform
-            ),
+            WorkspaceBinding(solver_export, *job_environment(job, self.manifest)),
         )
         driver = root / "launch.py"
         driver.write_text(
@@ -433,6 +464,7 @@ class WorkerSupervisor:
                 output_bytes=job.output_limit_bytes,
             ),
             kind="worker",
+            job_id=job.job_id,
         )
         network = "improvement-network-" + str(job.job_id)
         relay = "improvement-relay-" + str(job.job_id)
@@ -549,7 +581,11 @@ class WorkerSupervisor:
             await self.stop(job.job_id)
             raw = state / "observation.json"
             data = read_regular_artifact(raw, 1_048_576)
-            observation = read_worker_observation(data, job)
+            observation = (
+                read_worker_observation(data, job)
+                if isinstance(job, WorkerJob)
+                else read_role_observation(data, job)
+            )
             elapsed = time.monotonic() - started
             await self.store.settle_usage(
                 reservation,
@@ -560,8 +596,13 @@ class WorkerSupervisor:
                 ),
             )
             assert self.broker.gateway is not None
-            return IsolatedExecution(
-                observation,
+            execution_type = (
+                IsolatedExecution
+                if isinstance(job, WorkerJob)
+                else IsolatedRoleExecution
+            )
+            return execution_type(
+                observation,  # type: ignore[arg-type]
                 solver_export,
                 state,
                 self.broker.gateway.usage(job.job_id),
@@ -576,7 +617,7 @@ class WorkerSupervisor:
                 await self.store.mark_uncertain(reservation)
             raise
 
-    async def _monitor(self, job: WorkerJob, started: float) -> None:
+    async def _monitor(self, job: WorkerRequest, started: float) -> None:
         while True:
             record = await self.store.get(job.experiment_id)
             elapsed = (

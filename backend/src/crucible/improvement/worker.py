@@ -22,7 +22,12 @@ from crucible.domain.run import Run, RunStatus
 from crucible.domain.task import Task
 from crucible.engine.gateway import ModelError, PreparedModelRequest
 from crucible.improvement.worker_gateway import WorkerModelGateway
-from crucible.improvement.worker_protocol import WorkerJob, WorkerObservation
+from crucible.improvement.worker_protocol import (
+    RoleJob,
+    WorkerJob,
+    WorkerObservation,
+    read_worker_job,
+)
 from crucible.repair.gateway import WorkerCredential
 from crucible.repair.identity import canonical_json
 from crucible.storage.database import Database
@@ -32,17 +37,33 @@ from crucible.storage.models import metadata
 async def seed_solver_task(
     job: WorkerJob, uow_factory: Callable[[], UnitOfWork]
 ) -> UUID:
+    return await seed_task(
+        job.job_id,
+        job.solver_case.prompt,
+        job.solver_case.base_commit,
+        job.solver_case.image,
+        uow_factory,
+    )
+
+
+async def seed_task(
+    job_id: UUID,
+    prompt: str,
+    base_revision: str,
+    image: str,
+    uow_factory: Callable[[], UnitOfWork],
+) -> UUID:
     clock = SystemClock()
     settings = RepositorySettings(
-        sandbox_image=job.solver_case.image,
+        sandbox_image=image,
     )
     repository = Repository(new_id(), Path("/workspace"), clock.now(), settings)
-    task_id, run_id = uuid5(job.job_id, "task"), uuid5(job.job_id, "run")
+    task_id, run_id = uuid5(job_id, "task"), uuid5(job_id, "run")
     task = Task.provisioning(
         task_id=task_id,
         repository_id=repository.id,
         source_ref="solver-base",
-        base_revision=job.solver_case.base_commit,
+        base_revision=base_revision,
         workspace_path=Path("/workspace"),
         clock=clock,
     )
@@ -62,7 +83,7 @@ async def seed_solver_task(
         0,
         MessageRole.USER,
         MessageStatus.COMPLETED,
-        (MessagePart(new_id(), 1, MessagePartKind.TEXT, job.solver_case.prompt),),
+        (MessagePart(new_id(), 1, MessagePartKind.TEXT, prompt),),
         clock.now(),
         clock.now(),
     )
@@ -80,10 +101,15 @@ async def main() -> None:
     raw = Path("/job/request.json").read_bytes()
     if len(raw) > 2 * 1024 * 1024:
         raise ValueError("job exceeds cap")
-    job = WorkerJob.model_validate_json(raw)
+    job = read_worker_job(raw)
     token = sys.stdin.readline(256).strip()
     if not token:
         raise ValueError("missing scoped credential")
+    if isinstance(job, RoleJob):
+        from crucible.improvement.role_worker import run_role_worker
+
+        await run_role_worker(job, token)
+        return
     gateway = WorkerModelGateway(
         WorkerCredential(token, "http://relay:8080/internal/improvement/model"),
         job.job_id,
@@ -131,7 +157,7 @@ async def main() -> None:
         Path("/state/usage.json").write_bytes(b'{"authority":"host-broker"}')
         observation = WorkerObservation.model_validate(
             dict(
-                schema_version=1,
+                schema_version=job.schema_version,
                 job_id=job.job_id,
                 trial_id=job.trial_id,
                 export_digest=job.export_digest,

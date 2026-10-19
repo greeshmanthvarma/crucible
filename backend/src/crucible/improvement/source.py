@@ -269,6 +269,7 @@ _SOLVER_FILES = frozenset(
         "improvement/contracts.py",
         "improvement/worker_protocol.py",
         "improvement/worker.py",
+        "improvement/role_worker.py",
         "improvement/check_probe.py",
         "improvement/worker_commands.py",
         "improvement/worker_gateway.py",
@@ -314,3 +315,33 @@ def verify_harness_export(root: Path, snapshot: HarnessSnapshot) -> None:
         files[name] = (0o100755 if info.st_mode & 0o111 else 0o100644, data)
     if _digest(files) != snapshot.export_digest:
         raise ScopeRejected("immutable export drift")
+
+
+def atomic_source_file(
+    path: Path, value: tuple[int, bytes] | None, staging: Path
+) -> None:
+    """Replace whole owned files; interrupted writes stay in private staging."""
+    safe_path(path)
+    safe_path(staging)
+    if value is None:
+        path.unlink()
+    else:
+        staging.mkdir(parents=True, exist_ok=True, mode=0o700)
+        mode, raw = value
+        descriptor, temporary = tempfile.mkstemp(prefix="transfer-", dir=staging)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o755 if mode == 0o100755 else 0o644)
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    for directory in (path.parent, staging):
+        if directory.exists():
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
