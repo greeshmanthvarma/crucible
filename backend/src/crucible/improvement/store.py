@@ -8,6 +8,7 @@ from typing import AsyncIterator, Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from crucible.improvement.contracts import (
@@ -1168,14 +1169,18 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                     " WHERE experiment=:id AND (status NOT IN "
                     "('complete','error','interrupted') OR snapshot IN "
                     "(SELECT id FROM experiment_snapshots WHERE "
-                    "experiment=:id AND kind='candidate'))"
+                    "experiment=:id AND kind='candidate' AND id NOT IN "
+                    "(SELECT candidate_snapshot FROM experiment_promotions "
+                    "WHERE experiment=:id)))"
                 ),
                 {"id": str(id)},
             )
             await conn.execute(
                 text(
                     "UPDATE experiment_snapshots SET status='interrupted' "
-                    "WHERE experiment=:id AND kind='candidate'"
+                    "WHERE experiment=:id AND kind='candidate' AND id NOT IN "
+                    "(SELECT candidate_snapshot FROM experiment_promotions "
+                    "WHERE experiment=:id)"
                 ),
                 {"id": str(id)},
             )
@@ -1296,11 +1301,7 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 .mappings()
                 .one()
             )
-            if (
-                snapshot["parent_commit"] != run.last_accepted_commit
-                or snapshot["kind"] != "baseline"
-                or snapshot["source_digest"] != run.manifest.initial_source_digest
-            ):
+            if UUID(str(snapshot["id"])) != await self._accepted_snapshot_id(conn, run):
                 raise RevisionConflict("round baseline is not accepted")
             previous = (
                 await conn.execute(
@@ -1520,14 +1521,35 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 snapshot.export_digest,
             ):
                 raise RevisionConflict("decision baseline mismatch")
+            candidate_id = (
+                await conn.execute(
+                    text(
+                        "SELECT id FROM experiment_snapshots WHERE "
+                        "experiment=:experiment AND source_digest=:source "
+                        "AND export_digest=:export AND status='verified'"
+                    ),
+                    {
+                        "experiment": str(id),
+                        "source": decision.candidate_source_digest,
+                        "export": decision.candidate_export_digest,
+                    },
+                )
+            ).scalar_one_or_none()
+            if decision.verdict == "promote" and candidate_id is None:
+                raise RevisionConflict("promotion candidate snapshot unavailable")
             encoded = decision.model_dump_json()
             await conn.execute(
                 text(
                     "UPDATE experiment_rounds SET "
-                    "status='decided',decision_ref=:data,decision_digest=:digest "
-                    "WHERE id=:id"
+                    "status='decided',decision_ref=:data,decision_digest=:digest,"
+                    "candidate_snapshot=:candidate WHERE id=:id"
                 ),
-                {"data": encoded, "digest": digest(decision), "id": str(round_id)},
+                {
+                    "data": encoded,
+                    "digest": digest(decision),
+                    "id": str(round_id),
+                    "candidate": candidate_id,
+                },
             )
             await self._search_event(
                 conn,
@@ -1570,3 +1592,214 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
         async with self._transaction() as conn:
             run = await self._get(conn, id)
             return await self._search_revision(conn, id, run.revision)
+
+    @staticmethod
+    def _promotion_record(row: RowMapping) -> PromotionRecord:
+        return PromotionRecord(
+            UUID(row["id"]),
+            UUID(row["experiment"]),
+            UUID(row["round"]),
+            row["expected_parent"],
+            UUID(row["candidate_snapshot"]),
+            row["expected_tree"],
+            row["patch_digest"],
+            row["decision_digest"],
+            row["state"],
+            row["commit_sha"],
+        )
+
+    async def promotions(self, id: UUID) -> tuple[PromotionRecord, ...]:
+        async with self.engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_promotions WHERE "
+                            "experiment=:id ORDER BY rowid"
+                        ),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            return tuple(self._promotion_record(r) for r in rows)
+
+    async def promotion(self, id: UUID) -> PromotionRecord:
+        async with self.engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text("SELECT * FROM experiment_promotions WHERE id=:id"),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            return self._promotion_record(row)
+
+    async def prepare_promotion(
+        self,
+        round_id: UUID,
+        candidate_id: UUID,
+        tree: str,
+        patch_digest: str,
+        decision_digest: str,
+        timestamp: str,
+    ) -> PromotionRecord:
+        round = await self.round(round_id)
+        async with self._transaction() as conn:
+            run = await self._get(conn, round.experiment_id)
+            await self._search_revision(conn, run.id, run.revision)
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT decision_digest, status FROM experiment_rounds "
+                        "WHERE id=:id"
+                    ),
+                    {"id": str(round_id)},
+                )
+            ).one()
+            if (
+                row.status != "decided"
+                or row.decision_digest != decision_digest
+                or run.last_accepted_commit != round.baseline_commit
+            ):
+                raise RevisionConflict("promotion decision or parent drift")
+            existing = (
+                (
+                    await conn.execute(
+                        text("SELECT * FROM experiment_promotions WHERE round=:id"),
+                        {"id": str(round_id)},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if existing:
+                record = self._promotion_record(existing)
+                if (
+                    record.candidate_snapshot_id,
+                    record.expected_tree,
+                    record.patch_digest,
+                    record.decision_digest,
+                ) != (candidate_id, tree, patch_digest, decision_digest):
+                    raise RevisionConflict("promotion intent drift")
+                return record
+            id = uuid4()
+            await conn.execute(
+                text(
+                    "INSERT INTO experiment_promotions(id, experiment, round, "
+                    "expected_parent, candidate_snapshot, expected_tree, "
+                    "patch_digest, decision_digest, state) VALUES (:id, "
+                    ":experiment, :round, :parent, :candidate, :tree, :patch, "
+                    ":decision, 'intent')"
+                ),
+                {
+                    "id": str(id),
+                    "experiment": str(run.id),
+                    "round": str(round_id),
+                    "parent": round.baseline_commit,
+                    "candidate": str(candidate_id),
+                    "tree": tree,
+                    "patch": patch_digest,
+                    "decision": decision_digest,
+                },
+            )
+            await self._search_event(
+                conn,
+                run.id,
+                "promotion_intent",
+                {"promotion_id": str(id), "timestamp": timestamp},
+            )
+        return await self.promotion(id)
+
+    async def complete_promotion(self, id: UUID, commit: str) -> PromotionRecord:
+        import re
+
+        if not re.fullmatch(r"[0-9a-f]{40}", commit):
+            raise ValueError("invalid accepted commit")
+        async with self._transaction() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text("SELECT * FROM experiment_promotions WHERE id=:id"),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            record = self._promotion_record(row)
+            if record.state == "complete":
+                if record.commit_sha != commit:
+                    raise RevisionConflict("accepted commit changed")
+                return record
+            run = await self._get(conn, record.experiment_id)
+            if run.last_accepted_commit != record.expected_parent:
+                raise RevisionConflict("accepted parent changed")
+            await conn.execute(
+                text(
+                    "UPDATE experiment_promotions SET state='complete', "
+                    "commit_sha=:commit WHERE id=:id"
+                ),
+                {"id": str(id), "commit": commit},
+            )
+            await conn.execute(
+                text(
+                    "UPDATE experiment_runs SET last_accepted_commit=:commit, "
+                    "revision=revision+1 WHERE id=:id"
+                ),
+                {"id": str(run.id), "commit": commit},
+            )
+            await self._event(
+                conn,
+                run.id,
+                "promotion_complete",
+                {
+                    "promotion_id": str(id),
+                    "commit": commit,
+                    "accepted_snapshot_id": str(record.candidate_snapshot_id),
+                },
+            )
+        return await self.promotion(id)
+
+    async def _accepted_snapshot_id(
+        self, conn: AsyncConnection, run: ExperimentRecord
+    ) -> UUID:
+        promoted = (
+            await conn.execute(
+                text(
+                    "SELECT candidate_snapshot FROM experiment_promotions "
+                    "WHERE experiment=:id AND state='complete' AND commit_sha=:commit"
+                ),
+                {"id": str(run.id), "commit": run.last_accepted_commit},
+            )
+        ).scalar_one_or_none()
+        if promoted:
+            return UUID(promoted)
+        if run.last_accepted_commit != run.initial_commit:
+            raise RevisionConflict("accepted lineage incomplete")
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT id FROM experiment_snapshots WHERE experiment=:id "
+                    "AND kind='baseline' AND source_digest=:source AND "
+                    "parent_commit=:parent AND status='verified'"
+                ),
+                {
+                    "id": str(run.id),
+                    "source": run.manifest.initial_source_digest,
+                    "parent": run.initial_commit,
+                },
+            )
+        ).all()
+        if len(rows) != 1:
+            raise RevisionConflict("accepted initial snapshot identity incomplete")
+        return UUID(rows[0].id)
+
+    async def accepted_snapshot_id(self, id: UUID) -> UUID:
+        async with self.engine.connect() as conn:
+            run = await self._get(conn, id)
+            return await self._accepted_snapshot_id(conn, run)

@@ -549,7 +549,7 @@ class RoleRunner:
             owned_worktree.path != expected_path
             or owned_worktree.branch != "codex/improve/" + str(run.id)
             or owned_worktree.root != self.root / "ownership" / str(run.id)
-            or owned_worktree.initial_commit != run.last_accepted_commit
+            or owned_worktree.parent_commit != run.last_accepted_commit
         ):
             raise ValueError("proposal worktree ownership mismatch")
         directory = self.root / "roles" / str(execution.role_id)
@@ -651,7 +651,7 @@ class RoleRunner:
         atomic_json(intent_path, {**intent, "state": "complete"})
         snapshot = stage_harness(
             owned_worktree.path,
-            owned_worktree.initial_commit,
+            owned_worktree.parent_commit,
             directory / "candidate",
             EDITABLE_PATHS,
         )

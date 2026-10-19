@@ -1,15 +1,18 @@
 """Owned worktree intent and checkpoints; no resets of unknown user edits."""
 
 import asyncio
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
+from crucible.benchmarks.evidence import atomic_json
 from crucible.improvement.contracts import EDITABLE_PATHS
 from crucible.improvement.source import (
     ScopeRejected,
     SourceInspection,
+    atomic_source_file,
     git_bytes,
     inspect_source,
     safe_path,
@@ -24,6 +27,11 @@ class OwnedWorktree:
     initial_commit: str
     branch: str
     root: Path
+    accepted_commit: str | None = None
+
+    @property
+    def parent_commit(self) -> str:
+        return self.accepted_commit or self.initial_commit
 
     async def inspect(self) -> SourceInspection:
         branch = (
@@ -40,15 +48,29 @@ class OwnedWorktree:
             .decode()
             .strip()
         )
-        if branch != self.branch or parent != self.initial_commit:
+        if branch != self.branch or parent != self.parent_commit:
             raise ScopeRejected("worktree ownership drift")
-        return await asyncio.to_thread(inspect_source, self.path, self.initial_commit)
+        changed = (
+            (
+                await asyncio.to_thread(
+                    git_bytes,
+                    self.path,
+                    "diff",
+                    "--name-only",
+                    self.initial_commit,
+                    self.parent_commit,
+                    "--",
+                )
+            )
+            .decode()
+            .splitlines()
+        )
+        if any(name not in EDITABLE_PATHS for name in changed):
+            raise ScopeRejected("accepted commit changed protected source")
+        return await asyncio.to_thread(inspect_source, self.path, self.parent_commit)
 
     async def reconcile_proposal_transfer(self) -> None:
         """Explicit recovery recognizes only journaled partial controller writes."""
-        import hashlib
-
-        from crucible.benchmarks.evidence import atomic_json
         from crucible.improvement.worker_supervisor import read_regular_artifact
 
         path = self.root / "proposal-transfer.json"
@@ -77,8 +99,8 @@ class OwnedWorktree:
     async def checkpoint_owned_edits(self) -> str:
         inspection = await self.inspect()
         # Only called after controller-directed proposal/checkpoint, never on resume.
-        (self.root / "owned.json").write_bytes(
-            canonical_json({"source_digest": inspection.source_digest})
+        atomic_json(
+            self.root / "owned.json", {"source_digest": inspection.source_digest}
         )
         return inspection.source_digest
 
@@ -89,7 +111,7 @@ class OwnedWorktree:
             raise ScopeRejected("unexpected user edits require recovery")
         output = self.root / "interrupted" / str(snapshot_id)
         await asyncio.to_thread(
-            stage_harness, self.path, self.initial_commit, output, EDITABLE_PATHS
+            stage_harness, self.path, self.parent_commit, output, EDITABLE_PATHS
         )
         return output
 
@@ -114,19 +136,36 @@ class OwnedWorktree:
 
         if _digest(inspection.base_files) != expected_source_digest:
             raise ScopeRejected("expected baseline digest mismatch before restore")
+        journal = {
+            "state": "intent",
+            "before": {
+                name: [mode, hashlib.sha256(raw).hexdigest()]
+                for name, (mode, raw) in inspection.files.items()
+            },
+            "after": {
+                name: [
+                    inspection.base_files[name][0],
+                    hashlib.sha256(inspection.base_files[name][1]).hexdigest(),
+                ]
+                if name in inspection.base_files
+                else None
+                for name in inspection.changed_paths
+            },
+        }
+        atomic_json(self.root / "proposal-transfer.json", journal)
         for name in inspection.changed_paths:
             path = self.path / name
-            if name not in inspection.base_files:
-                path.unlink(missing_ok=True)
-                continue
-            mode, data = inspection.base_files[name]
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-            path.chmod(0o755 if mode == 0o100755 else 0o644)
+            atomic_source_file(
+                path, inspection.base_files.get(name), self.root / "transfer-staging"
+            )
         restored = await self.inspect()
         if restored.source_digest != expected_source_digest:
             raise ScopeRejected("restored baseline digest mismatch")
         await self.checkpoint_owned_edits()
+        atomic_json(
+            self.root / "proposal-transfer.json", {**journal, "state": "complete"}
+        )
 
 
 class ExperimentWorktree:
@@ -135,7 +174,11 @@ class ExperimentWorktree:
         self.root = root
 
     async def create(
-        self, repository: Path, experiment_id: UUID, initial_commit: str
+        self,
+        repository: Path,
+        experiment_id: UUID,
+        initial_commit: str,
+        accepted_commit: str | None = None,
     ) -> OwnedWorktree:
         safe_path(repository)
         root = self.root / "ownership" / str(experiment_id)
@@ -155,8 +198,10 @@ class ExperimentWorktree:
         else:
             with intent_path.open("xb") as target:
                 target.write(canonical_json(intent))
-        owned = OwnedWorktree(path, initial_commit, branch, root)
+        owned = OwnedWorktree(path, initial_commit, branch, root, accepted_commit)
         if not path.exists():
+            if accepted_commit and accepted_commit != initial_commit:
+                raise ScopeRejected("accepted worktree missing; recovery required")
             await asyncio.to_thread(
                 git_bytes,
                 repository,

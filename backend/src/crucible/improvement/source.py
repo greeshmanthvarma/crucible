@@ -24,7 +24,31 @@ class ScopeRejected(ValueError):
         super().__init__(reason + ": " + ", ".join(paths))
 
 
-def git_bytes(root: Path, *args: str, data: bytes | None = None) -> bytes:
+def git_bytes(
+    root: Path,
+    *args: str,
+    data: bytes | None = None,
+    index_file: Path | None = None,
+    commit_date: str | None = None,
+) -> bytes:
+    environment = {
+        "PATH": os.defpath,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+    }
+    if index_file is not None:
+        safe_path(index_file)
+        environment["GIT_INDEX_FILE"] = str(index_file)
+    if commit_date is not None:
+        environment.update(
+            GIT_AUTHOR_NAME="Crucible Experiment",
+            GIT_AUTHOR_EMAIL="crucible@localhost",
+            GIT_COMMITTER_NAME="Crucible Experiment",
+            GIT_COMMITTER_EMAIL="crucible@localhost",
+            GIT_AUTHOR_DATE=commit_date,
+            GIT_COMMITTER_DATE=commit_date,
+        )
+
     return subprocess.check_output(
         [
             "git",
@@ -40,11 +64,7 @@ def git_bytes(root: Path, *args: str, data: bytes | None = None) -> bytes:
             str(root),
             *args,
         ],
-        env={
-            "PATH": os.defpath,
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-        },
+        env=environment,
         stderr=subprocess.PIPE,
         timeout=30,
         input=data,

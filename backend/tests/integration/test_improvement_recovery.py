@@ -292,3 +292,135 @@ async def test_closed_start_remains_idempotent(lifecycle_setup):
     await service.close(manifest.experiment_id)
     assert (await service.start(config, "key", True)).status == "closed"
     assert not (repository / ".git/crucible-improvement-owner.json").exists()
+
+
+@pytest.mark.parametrize("crash_at", ["before_git", "after_git"])
+async def test_resume_reconciles_promotion_before_worktree_inspection(
+    lifecycle_setup, monkeypatch, crash_at
+):
+    import hashlib
+
+    import crucible.improvement.promotion as promotion_module
+    from crucible.benchmarks.evidence import atomic_json
+    from crucible.improvement.checks import CHECK_IDS, CandidateCheckResult
+    from crucible.improvement.contracts import (
+        EDITABLE_PATHS,
+        ExperimentManifest,
+        ExperimentPaths,
+        HarnessSnapshot,
+    )
+    from crucible.improvement.lifecycle import StartConfig
+    from crucible.improvement.promotion import PromotionService
+    from crucible.improvement.selection import decide_candidate
+    from crucible.improvement.source import stage_harness
+    from crucible.improvement.trials import build_evaluation_set, owned_artifact
+    from crucible.improvement.worktree import ExperimentWorktree
+    from crucible.repair.identity import digest
+    from tests.integration.test_improvement_promotion import record_trials
+    from tests.unit.test_improvement_source import git
+
+    service, config_path, _, repository = lifecycle_setup
+    config = StartConfig.model_validate_json(config_path.read_bytes())
+    manifest = ExperimentManifest.model_validate_json(
+        config.manifest_file.read_bytes()
+    ).model_copy(update={"schema_version": 2, "worker_protocol_version": 2})
+    config.manifest_file.write_text(manifest.model_dump_json())
+    run = await service.start(config_path, "key", True)
+    paths = ExperimentPaths(
+        root=service.root, registry_root=config.registry_root, repository=repository
+    )
+    baseline_id = await service.store.accepted_snapshot_id(run.id)
+    row = await service.store.snapshot(run.id, baseline_id)
+    baseline = HarnessSnapshot.model_validate_json(
+        owned_artifact(service.root, str(row["artifact_ref"])).read_bytes()
+    )
+    owned = await ExperimentWorktree(service.root).create(
+        repository, run.id, run.initial_commit
+    )
+    round = await service.store.begin_round(
+        run.id, baseline_id, (await service.store.get(run.id)).revision
+    )
+    (owned.path / EDITABLE_PATHS[0]).write_text("value = 2\n")
+    await owned.checkpoint_owned_edits()
+    candidate = stage_harness(
+        owned.path, run.initial_commit, service.root / "candidate", EDITABLE_PATHS
+    )
+    await service.store.register_snapshot(run.id, candidate, "candidate/snapshot.json")
+    await record_trials(service.store, service.root, run.manifest, baseline, 0)
+    await record_trials(service.store, service.root, run.manifest, candidate, 1)
+    check_root = service.root / "promotion-checks"
+    check_root.mkdir()
+    atomic_json(
+        check_root / "checks.log.json",
+        [{"test_id": id, "verdict": "pass"} for id in CHECK_IDS],
+    )
+    checks = CandidateCheckResult(
+        candidate.source_digest,
+        candidate.export_digest,
+        run.manifest.boundary_suite_digest,
+        digest(
+            [
+                run.manifest.worker_image,
+                run.manifest.worker_platform,
+                run.manifest.dependency_lock_digest,
+                run.manifest.controller_digest,
+            ]
+        ),
+        "pass",
+        "checks_passed",
+        hashlib.sha256((check_root / "checks.log.json").read_bytes()).hexdigest(),
+        True,
+    )
+    atomic_json(check_root / "result.json", checks)
+    await service.store.record_event(
+        run.id,
+        "candidate_checks",
+        {
+            "path": "promotion-checks/result.json",
+            "sha256": hashlib.sha256(
+                (check_root / "result.json").read_bytes()
+            ).hexdigest(),
+        },
+    )
+    before = await build_evaluation_set(service.store, paths, run.id, baseline_id)
+    after = await build_evaluation_set(
+        service.store, paths, run.id, candidate.snapshot_id
+    )
+    decision = decide_candidate(before, after, checks)
+    await service.store.record_decision(
+        round.id, decision, (await service.store.get(run.id)).revision
+    )
+    promotions = PromotionService(service.store, paths, config.protected_suite_root)
+    complete, git_call = service.store.complete_promotion, promotion_module.git_bytes
+
+    async def crash_after(*args, **kwargs):
+        raise RuntimeError("commit ack lost")
+
+    def crash_before(root, *args, **kwargs):
+        if "commit-tree" in args:
+            raise RuntimeError("before commit")
+        return git_call(root, *args, **kwargs)
+
+    if crash_at == "after_git":
+        monkeypatch.setattr(service.store, "complete_promotion", crash_after)
+    else:
+        monkeypatch.setattr(promotion_module, "git_bytes", crash_before)
+    with pytest.raises(RuntimeError):
+        await promotions.promote(round.id, digest(decision))
+    monkeypatch.setattr(service.store, "complete_promotion", complete)
+    monkeypatch.setattr(promotion_module, "git_bytes", git_call)
+    await service.store.fail_run(run.id, "simulated_crash")
+    assert (await service.resume(run.id))["status"] == "ready"
+    if crash_at == "before_git":
+        assert git(owned.path, "rev-parse", "HEAD") == run.initial_commit
+    promoted = await promotions.promote(round.id, digest(decision))
+    assert promoted.state == "complete"
+    assert (
+        await build_evaluation_set(service.store, paths, run.id, candidate.snapshot_id)
+        == after
+    )
+    assert (await service.store.snapshot(run.id, candidate.snapshot_id))[
+        "status"
+    ] == "verified"
+    assert len(await service.store.trials(run.id)) == 12
+    assert git(repository, "rev-parse", "HEAD") == run.initial_commit

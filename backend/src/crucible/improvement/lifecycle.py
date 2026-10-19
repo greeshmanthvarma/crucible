@@ -273,7 +273,10 @@ class ExperimentService:
         self, config: StartConfig, record: ExperimentRecord
     ) -> OwnedWorktree:
         return await ExperimentWorktree(self.root).create(
-            config.repository, record.id, record.initial_commit
+            config.repository,
+            record.id,
+            record.initial_commit,
+            record.last_accepted_commit,
         )
 
     async def _save_snapshot(
@@ -532,7 +535,7 @@ class ExperimentService:
                 snapshot = await asyncio.to_thread(
                     stage_harness,
                     worktree.path,
-                    record.initial_commit,
+                    record.last_accepted_commit,
                     output,
                     EDITABLE_PATHS,
                 )
@@ -571,10 +574,7 @@ class ExperimentService:
                     response["candidate_checks"] = result.verdict
                     return response
             else:
-                snapshots = await self.store.snapshots(id)
-                snapshot_id = UUID(
-                    str(next(s for s in snapshots if s["kind"] == "baseline")["id"])
-                )
+                snapshot_id = await self.store.accepted_snapshot_id(id)
             async with self._runtime(record.manifest) as supervisor:
                 paths = ExperimentPaths(
                     root=self.root,
@@ -768,13 +768,38 @@ class ExperimentService:
         try:
             await self._repository_lock(config, id)
             await self._reconcile(id)
+            from crucible.improvement.promotion import PromotionService
+
+            promotions = PromotionService(
+                self.store,
+                ExperimentPaths(
+                    root=self.root,
+                    registry_root=config.registry_root,
+                    repository=config.repository,
+                ),
+                config.protected_suite_root,
+            )
+            pending_promotion = False
+            for intent in await self.store.promotions(id):
+                if intent.state != "complete":
+                    reconciled = await promotions.reconcile_promotion(
+                        intent.id, allow_commit=False
+                    )
+                    pending_promotion |= reconciled.state != "complete"
+            record = await self.store.get(id)
             worktree = await self._worktree(config, record)
             await worktree.reconcile_proposal_transfer()
             inspection = await worktree.inspect()
-            if inspection.changed_paths:
+            if inspection.changed_paths and not pending_promotion:
                 await worktree.archive_interrupted(uuid4())
                 await worktree.restore_last_accepted(
-                    record.manifest.initial_source_digest
+                    str(
+                        (
+                            await self.store.snapshot(
+                                id, await self.store.accepted_snapshot_id(id)
+                            )
+                        )["source_digest"]
+                    )
                 )
             await self.store.invalidate_interrupted(id)
             await self.store.recover_ready(id, owner)

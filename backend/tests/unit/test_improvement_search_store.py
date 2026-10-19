@@ -140,6 +140,9 @@ async def test_fourth_round_denied_and_decisions_immutable(tmp_path):
             assert round.ordinal == ordinal
             revision = (await store.get(run.id)).revision
             await store.record_decision(round.id, reject(snapshot), revision)
+            assert (await store.rounds(run.id))[
+                -1
+            ].candidate_snapshot_id == snapshot.snapshot_id
             with pytest.raises(RevisionConflict):
                 await store.record_decision(round.id, reject(snapshot), revision)
         with pytest.raises(RevisionConflict, match="limit"):

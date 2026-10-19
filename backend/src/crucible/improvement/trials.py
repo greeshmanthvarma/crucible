@@ -3,10 +3,14 @@
 import asyncio
 import hashlib
 import json
+import math
 import shutil
 import time
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from crucible.improvement.selection import EvaluationSet
 from uuid import UUID, uuid4, uuid5
 
 from pydantic import TypeAdapter
@@ -189,49 +193,14 @@ class IsolatedTrialRunner:
         snapshot: HarnessSnapshot,
         manifest: ExperimentManifest,
     ) -> None:
-        runtime = digest(
-            [
-                manifest.worker_image,
-                manifest.worker_platform,
-                manifest.dependency_lock_digest,
-                manifest.controller_digest,
-            ]
+        await verified_candidate_checks(
+            self.store,
+            self.paths,
+            experiment_id,
+            snapshot,
+            manifest,
+            self.protected_suite_root,
         )
-        if suite_digest(self.protected_suite_root) != manifest.boundary_suite_digest:
-            raise ValueError("protected suite drift")
-        for event in reversed(
-            await self.store.events(experiment_id, "candidate_checks")
-        ):
-            path = owned_artifact(self.paths.root, str(event["path"]))
-            raw = read_regular_artifact(path, 65536)
-            if hashlib.sha256(raw).hexdigest() != event["sha256"]:
-                raise ValueError("check evidence drift")
-            result = TypeAdapter(CandidateCheckResult).validate_json(raw, strict=True)
-            if (
-                result.snapshot_digest,
-                result.export_digest,
-                result.suite_digest,
-                result.runtime_digest,
-            ) == (
-                snapshot.source_digest,
-                snapshot.export_digest,
-                manifest.boundary_suite_digest,
-                runtime,
-            ):
-                if result.verdict == "pass" and result.cleanup_confirmed:
-                    log = read_regular_artifact(
-                        path.parent / "checks.log.json", 1_048_576
-                    )
-                    if hashlib.sha256(log).hexdigest() != result.log_digest:
-                        raise ValueError("check log integrity drift")
-                    rows = json.loads(log)
-                    if sorted(
-                        r["test_id"] for r in rows if r["verdict"] == "pass"
-                    ) != sorted(CHECK_IDS):
-                        raise ValueError("protected check collection incomplete")
-                    return
-                raise ValueError("candidate protected checks did not pass")
-        raise ValueError("matching candidate checks required before paid trial")
 
     async def run(
         self, experiment_id: UUID, snapshot_id: UUID, case_id: str, repeat_index: int
@@ -578,3 +547,193 @@ class IsolatedTrialRunner:
             if result.status != "complete":
                 break
         return tuple(results)
+
+
+async def verified_candidate_checks(
+    store: ExperimentStore,
+    paths: ExperimentPaths,
+    experiment_id: UUID,
+    snapshot: HarnessSnapshot,
+    manifest: ExperimentManifest,
+    protected_suite_root: Path,
+) -> CandidateCheckResult:
+    runtime = digest(
+        [
+            manifest.worker_image,
+            manifest.worker_platform,
+            manifest.dependency_lock_digest,
+            manifest.controller_digest,
+        ]
+    )
+    if suite_digest(protected_suite_root) != manifest.boundary_suite_digest:
+        raise ValueError("protected suite drift")
+    for event in reversed(await store.events(experiment_id, "candidate_checks")):
+        path = owned_artifact(paths.root, str(event["path"]))
+        raw = read_regular_artifact(path, 65536)
+        if hashlib.sha256(raw).hexdigest() != event["sha256"]:
+            raise ValueError("check evidence drift")
+        result = TypeAdapter(CandidateCheckResult).validate_json(raw, strict=True)
+        if (
+            result.snapshot_digest,
+            result.export_digest,
+            result.suite_digest,
+            result.runtime_digest,
+        ) == (
+            snapshot.source_digest,
+            snapshot.export_digest,
+            manifest.boundary_suite_digest,
+            runtime,
+        ):
+            if result.verdict == "pass" and result.cleanup_confirmed:
+                log = read_regular_artifact(path.parent / "checks.log.json", 1_048_576)
+                if hashlib.sha256(log).hexdigest() != result.log_digest:
+                    raise ValueError("check log integrity drift")
+                rows = json.loads(log)
+                if sorted(
+                    r["test_id"] for r in rows if r["verdict"] == "pass"
+                ) != sorted(CHECK_IDS):
+                    raise ValueError("protected check collection incomplete")
+                return result
+            raise ValueError("candidate protected checks did not pass")
+    raise ValueError("matching candidate checks required before paid trial")
+
+
+async def build_evaluation_set(
+    store: ExperimentStore,
+    paths: ExperimentPaths,
+    experiment_id: UUID,
+    snapshot_id: UUID,
+) -> "EvaluationSet":
+    """Read recorded host results, preserving original IDs across accepted lineage."""
+    from crucible.improvement.manifest import manifest_digest
+    from crucible.improvement.selection import EvaluationSet, ScoredTrial
+
+    run = await store.get(experiment_id)
+    snapshot = await store.snapshot(experiment_id, snapshot_id)
+    required = tuple(c for c in run.manifest.cases if c.split != "final-test")
+    refs = {c.case_id: c for c in required}
+    selected = {}
+    for row in await store.trials(experiment_id):
+        if row["snapshot"] == str(snapshot_id) and row["case_id"] in refs:
+            key = str(row["case_id"]), int(str(row["repeat_index"]))
+            if key in selected:
+                raise ValueError(
+                    "ambiguous trial generations require explicit retry policy"
+                )
+            selected[key] = row
+    trials = []
+    for (case_id, repeat), row in sorted(selected.items()):
+        case = refs[case_id]
+        snapshot_contract = HarnessSnapshot.model_validate_json(
+            canonical_json(
+                dict(
+                    snapshot_id=snapshot_id,
+                    parent_commit=snapshot["parent_commit"],
+                    kind=snapshot["kind"],
+                    source_digest=snapshot["source_digest"],
+                    export_digest=snapshot["export_digest"],
+                    patch_digest=snapshot["patch_digest"],
+                )
+            )
+        )
+        if row["key"] != trial_key(run.manifest, snapshot_contract, case, repeat):
+            raise ValueError("trial fingerprint drift")
+        if row["status"] != "complete":
+            trials.append(
+                ScoredTrial(
+                    case_id=case_id,
+                    split=case.split,
+                    repeat_index=repeat,
+                    original_trial_id=UUID(str(row["id"])),
+                    verdict="interrupted"
+                    if row["status"] == "interrupted"
+                    else "error",
+                    evidence_digest=digest([row["id"], row["status"]]),
+                )
+            )
+            continue
+        reference = json.loads(str(row["artifact_ref"]))
+        path = owned_artifact(paths.root, reference["path"])
+        raw = read_regular_artifact(path, 2 * 1024 * 1024)
+        if hashlib.sha256(raw).hexdigest() != reference["sha256"]:
+            raise ValueError("evaluation result digest drift")
+        envelope = json.loads(raw)
+        for name, sha in envelope["artifacts"].items():
+            artifact = read_regular_artifact(
+                owned_artifact(path.parent, name), 8 * 1024 * 1024
+            )
+            if hashlib.sha256(artifact).hexdigest() != sha:
+                raise ValueError("evaluation artifact digest drift")
+        result = TypeAdapter(TrialResult).validate_json(
+            canonical_json(envelope["result"]), strict=True
+        )
+        identity = result.identity
+        if (
+            (
+                str(identity.trial_id),
+                identity.case_digest,
+                identity.harness_commit,
+                identity.harness_tree_digest,
+                identity.model_config_digest,
+                identity.limits_digest,
+                identity.repeat_index,
+            )
+            != (
+                row["id"],
+                case.case_digest,
+                snapshot["parent_commit"],
+                snapshot["source_digest"],
+                digest(run.manifest.model),
+                digest(run.manifest.trial_limits),
+                repeat,
+            )
+            or result.status != "complete"
+            or result.grade is None
+            or result.patch is None
+            or result.solver is None
+            or result.grade.verdict not in ("pass", "fail")
+            or result.grade.verdict != row["grade_verdict"]
+            or result.grade.driver_commit != run.manifest.grader.driver_commit
+            or result.grade.report_path is None
+            or result.grade.patch_sha256 != result.patch.sha256
+            or envelope["artifacts"].get("solution.diff") != result.patch.sha256
+            or result.grade.resolved != (result.grade.verdict == "pass")
+            or not math.isfinite(result.grade.elapsed_seconds)
+            or result.grade.elapsed_seconds < 0
+            or result.solver.termination != row["solver_termination"]
+            or result.solver.termination
+            not in ("completed", "budget_exhausted", "behavior_error")
+        ):
+            raise ValueError("incomparable or incomplete recorded trial")
+        if result.grade.evaluation_id != evaluation_identity(
+            identity.trial_id,
+            case.case_digest,
+            result.patch.sha256,
+            run.manifest.grader.driver_digest,
+        ):
+            raise ValueError("grade evaluation identity drift")
+        assert result.grade.report_path is not None
+        for protected_path in (result.grade.report_path, result.grade.log_path):
+            try:
+                relative = protected_path.relative_to(path.parent).as_posix()
+            except ValueError as error:
+                raise ValueError("grade evidence outside original trial") from error
+            if relative not in envelope["artifacts"]:
+                raise ValueError("missing protected grade evidence")
+        trials.append(
+            ScoredTrial(
+                case_id=case_id,
+                split=case.split,
+                repeat_index=repeat,
+                original_trial_id=identity.trial_id,
+                verdict=result.grade.verdict,
+                evidence_digest=reference["sha256"],
+            )
+        )
+    return EvaluationSet(
+        source_digest=str(snapshot["source_digest"]),
+        export_digest=str(snapshot["export_digest"]),
+        config_policy_digest=manifest_digest(run.manifest),
+        required_cases=required,
+        trials=tuple(trials),
+    )

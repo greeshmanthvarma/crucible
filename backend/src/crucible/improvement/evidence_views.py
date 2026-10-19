@@ -112,11 +112,11 @@ class DevelopmentViewBuilder:
                 str(row["id"]),
                 row["source_digest"],
                 row["export_digest"],
-                run.last_accepted_commit,
+                row["parent_commit"],
             )
             or row["status"] != "verified"
-            or snapshot.kind != "baseline"
-            or snapshot.source_digest != run.manifest.initial_source_digest
+            or snapshot.snapshot_id
+            != await self.store.accepted_snapshot_id(experiment_id)
         ):
             raise ValueError("accepted snapshot registry drift")
         harness = snapshot_file.parent / "harness"
