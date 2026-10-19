@@ -410,7 +410,12 @@ class ExperimentService:
             "stop_requested": record.stop_requested,
             "selection_trials_scheduled": record.manifest.baseline_trial_count,
             "planned_trial_upper_bound": record.manifest.planned_trial_upper_bound,
-            "completed_trials": sum(r["status"] == "complete" for r in trials),
+            "completed_trials": sum(
+                r["status"] == "complete"
+                and r["case_id"]
+                in {c.case_id for c in record.manifest.cases if c.split != "final-test"}
+                for r in trials
+            ),
             "uncertain_usage": await self.store.unsettled_usage(id),
         }
 
@@ -577,6 +582,91 @@ class ExperimentService:
             outcome = await SearchController(self.store, execution).run(id)
             return outcome.model_dump(mode="json")
 
+    async def finalize(self, id: UUID) -> dict[str, object]:
+        from dataclasses import asdict
+
+        from crucible.repair.identity import digest
+
+        existing = await self.store.search_seal(id)
+        if existing:
+            return {
+                "seal_digest": digest(asdict(existing)),
+                **json.loads(canonical_json(asdict(existing))),
+            }
+        record = await self.store.require_search_open(id)
+        config = await self._validate(record)
+        owner = await self.store.claim_execution(
+            id,
+            "final_evaluation",
+            process_id=os.getpid(),
+            process_start=await self._process_start(os.getpid()),
+        )
+        try:
+            await self._repository_lock(config, id)
+            outcomes = await self.store.events(id, "search_outcome")
+            if not outcomes:
+                raise RevisionConflict("search outcome required before finalization")
+            seal = await self.store.seal_search(
+                id, record.last_accepted_commit, str(outcomes[-1]["reason"])
+            )
+            return {
+                "seal_digest": digest(asdict(seal)),
+                **json.loads(canonical_json(asdict(seal))),
+            }
+        finally:
+            await self.store.release_execution(id, owner, "final_evaluation")
+
+    async def evaluate_final(self, id: UUID) -> dict[str, object]:
+        from crucible.improvement.final import FinalEvaluator
+
+        if await self.store.search_seal(id) is None:
+            raise RevisionConflict("final measurement requires immutable search seal")
+        record = await self.store.get(id)
+        config = await self._validate(record)
+        owner = await self.store.claim_execution(
+            id,
+            "final_evaluation",
+            process_id=os.getpid(),
+            process_start=await self._process_start(os.getpid()),
+        )
+
+        async def heartbeat() -> None:
+            while True:
+                await self.store.heartbeat(id, owner)
+                await asyncio.sleep(2)
+
+        pulse = asyncio.create_task(heartbeat())
+        try:
+            await self._repository_lock(config, id)
+            await self._worktree(config, record)
+            paths = ExperimentPaths(
+                root=self.root,
+                registry_root=config.registry_root,
+                repository=config.repository,
+            )
+            async with self._runtime(record.manifest) as supervisor:
+                runner = IsolatedTrialRunner(
+                    self.store,
+                    paths,
+                    supervisor,
+                    SwebenchGrader(record.manifest.grader),
+                    config.protected_suite_root,
+                )
+                result = await FinalEvaluator(self.store, paths, runner).evaluate_final(
+                    id
+                )
+                return result.model_dump(mode="json")
+        except asyncio.CancelledError:
+            await self.store.fail_run(id, "final_interrupted", interrupted=True)
+            raise
+        except Exception:
+            await self.store.fail_run(id, "final_infrastructure")
+            raise
+        finally:
+            pulse.cancel()
+            await asyncio.gather(pulse, return_exceptions=True)
+            await self.store.release_execution(id, owner, "final_evaluation")
+
     async def baseline(self, id: UUID) -> dict[str, object]:
         return await self._evaluate(id, False)
 
@@ -585,6 +675,8 @@ class ExperimentService:
 
     async def _evaluate(self, id: UUID, candidate: bool) -> dict[str, object]:
         record = await self.store.get(id)
+        if record.manifest.schema_version == 2:
+            await self.store.require_search_open(id)
         config = await self._validate(record)
         owner = await self.store.claim_execution(
             id,

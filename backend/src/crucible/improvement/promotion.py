@@ -190,6 +190,7 @@ class PromotionService:
 
     async def promote(self, round_id: UUID, decision_digest: str) -> PromotionRecord:
         round = await self.store.round(round_id)
+        await self.store.require_search_open(round.experiment_id)
         existing = next(
             (
                 p

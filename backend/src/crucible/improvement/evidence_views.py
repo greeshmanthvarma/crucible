@@ -93,7 +93,7 @@ class DevelopmentViewBuilder:
     async def build_development_view(
         self, experiment_id: UUID, baseline_snapshot_id: UUID, output_dir: Path
     ) -> DevelopmentView:
-        run = await self.store.get(experiment_id)
+        run = await self.store.require_search_open(experiment_id)
         if run.manifest.schema_version != 2 or run.stop_requested:
             raise ValueError("v2 active search required")
         row = await self.store.snapshot(experiment_id, baseline_snapshot_id)

@@ -99,10 +99,12 @@ async def promotion_setup(harness, tmp_path):
     await store.close()
 
 
-async def record_trials(store, root, manifest, snapshot, dev_count):
+async def record_trials(
+    store, root, manifest, snapshot, dev_count, *, final_authorization=None
+):
     run = await store.get(manifest.experiment_id)
     for case in manifest.cases:
-        if case.split == "final-test":
+        if (case.split == "final-test") != (final_authorization is not None):
             continue
         for repeat in range(3):
             trial = await store.create_trial(
@@ -111,13 +113,18 @@ async def record_trials(store, root, manifest, snapshot, dev_count):
                 case.case_id,
                 repeat,
                 trial_key(manifest, snapshot, case, repeat),
+                final_authorization=final_authorization,
             )
             directory = root / "trials" / str(trial)
             directory.mkdir(parents=True)
             (directory / "trace.json").write_text("[]")
             (directory / "solution.diff").write_text("patch")
             sha = hashlib.sha256(b"patch").hexdigest()
-            passed = repeat < dev_count if case.split == "development" else repeat > 0
+            passed = (
+                repeat < dev_count
+                if case.split in ("development", "final-test")
+                else repeat > 0
+            )
             result = TrialResult(
                 TrialIdentity(
                     trial_id=trial,

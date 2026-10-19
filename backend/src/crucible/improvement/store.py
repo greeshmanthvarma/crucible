@@ -722,7 +722,9 @@ updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
 
         snapshot = HarnessSnapshot.model_validate_json(snapshot.model_dump_json())
         async with self._transaction() as conn:
-            await self._get(conn, id)
+            run = await self._get(conn, id)
+            if run.manifest.schema_version == 2:
+                await self._search_revision(conn, id, run.revision)
             await conn.execute(
                 text("""INSERT INTO experiment_snapshots
 (id,experiment,parent_commit,kind,source_digest,
@@ -748,16 +750,30 @@ VALUES
             )
 
     async def create_trial(
-        self, id: UUID, snapshot_id: UUID, case_id: str, repeat_index: int, key: str
+        self,
+        id: UUID,
+        snapshot_id: UUID,
+        case_id: str,
+        repeat_index: int,
+        key: str,
+        *,
+        final_authorization: str | None = None,
     ) -> UUID:
         async with self._transaction() as conn:
             record = await self._get(conn, id)
             if record.stop_requested or record.status not in ("ready", "running"):
                 raise RevisionConflict("experiment not ready for trial")
-            if repeat_index not in range(3) or case_id not in {
-                c.case_id for c in record.manifest.cases if c.split != "final-test"
-            }:
-                raise ValueError("trial outside selection schedule")
+            if final_authorization is not None:
+                await self._authorize_final(
+                    conn, id, snapshot_id, case_id, repeat_index, final_authorization
+                )
+            else:
+                if record.manifest.schema_version == 2:
+                    await self._search_revision(conn, id, record.revision)
+                if repeat_index not in range(3) or case_id not in {
+                    c.case_id for c in record.manifest.cases if c.split != "final-test"
+                }:
+                    raise ValueError("trial outside selection schedule")
             snapshot = (
                 await conn.execute(
                     text(
@@ -1017,6 +1033,7 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
             await conn.execute(
                 text(
                     "UPDATE experiment_runs SET "
+                    " "
                     "owner_execution_id=:owner,owner_heartbeat_at=CURRENT_TIMESTAMP,status='running',stage=:stage,revision=revision+1"
                     " WHERE id=:id"
                 ),
@@ -1095,6 +1112,7 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
             await conn.execute(
                 text(
                     "UPDATE experiment_runs SET "
+                    " "
                     "owner_execution_id=NULL,owner_heartbeat_at=NULL,status='ready',stop_requested=0,error_code=NULL,revision=revision+1"
                     " WHERE id=:id AND status!='closed'"
                 ),
@@ -1105,6 +1123,15 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 if (await self._get(conn, id)).manifest.schema_version == 2
                 else None
             )
+            sealed = (
+                await conn.execute(
+                    text(
+                        "SELECT initial_snapshot FROM experiment_search_seals WHERE "
+                        "experiment=:id"
+                    ),
+                    {"id": str(id)},
+                )
+            ).scalar_one_or_none()
             retry_ids = []
             if accepted:
                 rows = (
@@ -1112,7 +1139,8 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                         await conn.execute(
                             text(
                                 "SELECT id FROM experiment_trials t WHERE "
-                                "experiment=:id AND snapshot=:sid AND status IN "
+                                "experiment=:id AND snapshot IN (:sid,:initial) AND "
+                                "status IN "
                                 "('error','interrupted') AND NOT EXISTS (SELECT 1 "
                                 "FROM experiment_trials n WHERE "
                                 "n.experiment=t.experiment AND n.snapshot=t.snapshot "
@@ -1120,7 +1148,11 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                                 "n.repeat_index=t.repeat_index AND "
                                 "n.generation>t.generation)"
                             ),
-                            {"id": str(id), "sid": str(accepted)},
+                            {
+                                "id": str(id),
+                                "sid": str(accepted),
+                                "initial": sealed or str(accepted),
+                            },
                         )
                     )
                     .scalars()
@@ -1236,6 +1268,7 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
             await conn.execute(
                 text(
                     "UPDATE experiment_trials SET "
+                    " "
                     "status='interrupted',error_code=COALESCE(error_code,'process_interrupted')"
                     " WHERE experiment=:id AND (status NOT IN "
                     "('complete','error','interrupted') OR snapshot IN "
@@ -1938,3 +1971,234 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
             or rows[0]["id"] not in authorized
         ):
             raise RevisionConflict("trial retry requires explicit compatible recovery")
+
+    @staticmethod
+    def _seal_record(row: RowMapping) -> SearchSeal:
+        return SearchSeal(
+            UUID(row["experiment"]),
+            UUID(row["initial_snapshot"]),
+            UUID(row["selected_final_snapshot"]),
+            row["selected_final_commit"],
+            row["accepted_lineage_digest"],
+            row["search_history_digest"],
+            row["stop_reason"],
+            row["created_at"],
+        )
+
+    async def search_seal(self, id: UUID) -> SearchSeal | None:
+        async with self.engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_search_seals WHERE experiment=:id"
+                        ),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return self._seal_record(row) if row else None
+
+    async def seal_search(
+        self, id: UUID, expected_accepted_commit: str, stop_reason: str
+    ) -> SearchSeal:
+        from dataclasses import asdict
+
+        async with self._transaction() as conn:
+            run = await self._get(conn, id)
+            existing = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_search_seals WHERE experiment=:id"
+                        ),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if existing:
+                seal = self._seal_record(existing)
+                if (seal.selected_final_commit, seal.stop_reason) != (
+                    expected_accepted_commit,
+                    stop_reason,
+                ):
+                    raise RevisionConflict("immutable seal differs")
+                return seal
+            await self._search_revision(conn, id, run.revision)
+            outcome = (
+                await conn.execute(
+                    text(
+                        "SELECT payload_json FROM experiment_events WHERE "
+                        "experiment=:id AND type='search_outcome' ORDER BY sequence "
+                        "DESC LIMIT 1"
+                    ),
+                    {"id": str(id)},
+                )
+            ).scalar_one_or_none()
+            if (
+                not outcome
+                or not json.loads(outcome).get("ready_for_final")
+                or json.loads(outcome).get("reason") != stop_reason
+                or json.loads(outcome).get("accepted_commit")
+                != run.last_accepted_commit
+                or expected_accepted_commit != run.last_accepted_commit
+            ):
+                raise RevisionConflict("completed compatible search outcome required")
+            pending = (
+                await conn.execute(
+                    text(
+                        "SELECT id FROM experiment_promotions WHERE experiment=:id "
+                        "AND state!='complete'"
+                    ),
+                    {"id": str(id)},
+                )
+            ).first()
+            effects = (
+                await conn.execute(
+                    text(
+                        "SELECT id FROM experiment_effects WHERE experiment=:id AND "
+                        "status!='stopped'"
+                    ),
+                    {"id": str(id)},
+                )
+            ).first()
+            usage = (
+                await conn.execute(
+                    text(
+                        "SELECT reservation_id FROM experiment_usage WHERE "
+                        "experiment=:id AND status!='settled'"
+                    ),
+                    {"id": str(id)},
+                )
+            ).first()
+            if pending or effects or usage:
+                raise RevisionConflict("unreconciled search cannot be sealed")
+            selected = await self._accepted_snapshot_id(conn, run)
+            initial = (
+                await conn.execute(
+                    text(
+                        "SELECT id FROM experiment_snapshots WHERE experiment=:id AND "
+                        "kind='baseline' AND source_digest=:source AND "
+                        "parent_commit=:commit AND status='verified'"
+                    ),
+                    {
+                        "id": str(id),
+                        "source": run.manifest.initial_source_digest,
+                        "commit": run.initial_commit,
+                    },
+                )
+            ).scalar_one()
+            lineage = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_promotions WHERE experiment=:id "
+                            "ORDER BY rowid"
+                        ),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            history = (
+                await conn.execute(
+                    text(
+                        "SELECT type,payload_json FROM experiment_events WHERE "
+                        "experiment=:id ORDER BY sequence"
+                    ),
+                    {"id": str(id)},
+                )
+            ).all()
+            await conn.execute(
+                text(
+                    "INSERT INTO "
+                    "experiment_search_seals(experiment,initial_snapshot,"
+                    "selected_final_snapshot,selected_final_commit,"
+                    "accepted_lineage_digest,search_history_digest,stop_reason) "
+                    "VALUES "
+                    "(:id,:initial,:selected,:commit,:lineage,:history,:reason)"
+                ),
+                {
+                    "id": str(id),
+                    "initial": initial,
+                    "selected": str(selected),
+                    "commit": run.last_accepted_commit,
+                    "lineage": digest(
+                        [asdict(self._promotion_record(p)) for p in lineage]
+                    ),
+                    "history": digest(
+                        [(r.type, json.loads(r.payload_json)) for r in history]
+                    ),
+                    "reason": stop_reason,
+                },
+            )
+            await self._search_event(
+                conn,
+                id,
+                "search_sealed",
+                {
+                    "selected_snapshot_id": str(selected),
+                    "selected_commit": run.last_accepted_commit,
+                },
+            )
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_search_seals WHERE experiment=:id"
+                        ),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            return self._seal_record(row)
+
+    async def _authorize_final(
+        self,
+        conn: AsyncConnection,
+        id: UUID,
+        snapshot: UUID,
+        case: str,
+        repeat: int,
+        seal_digest: str,
+    ) -> None:
+        from dataclasses import asdict
+
+        run = await self._get(conn, id)
+        row = (
+            (
+                await conn.execute(
+                    text("SELECT * FROM experiment_search_seals WHERE experiment=:id"),
+                    {"id": str(id)},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            raise RevisionConflict("final measurement requires immutable search seal")
+        seal = self._seal_record(row)
+        if (
+            run.stop_requested
+            or run.status not in ("ready", "running")
+            or digest(asdict(seal)) != seal_digest
+            or snapshot
+            not in (seal.initial_snapshot_id, seal.selected_final_snapshot_id)
+            or repeat not in range(3)
+            or case
+            not in {c.case_id for c in run.manifest.cases if c.split == "final-test"}
+        ):
+            raise RevisionConflict("final authorization differs from seal")
+
+    async def authorize_final(
+        self, id: UUID, snapshot: UUID, case: str, repeat: int, seal_digest: str
+    ) -> None:
+        async with self.engine.connect() as conn:
+            await self._authorize_final(conn, id, snapshot, case, repeat, seal_digest)

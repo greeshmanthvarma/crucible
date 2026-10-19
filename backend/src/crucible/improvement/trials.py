@@ -147,8 +147,13 @@ class IsolatedTrialRunner:
         self.protected_suite_root = protected_suite_root
 
     def resolve_case(self, manifest: ExperimentManifest, case_id: str) -> BenchmarkCase:
+        return self._resolve_case(manifest, case_id, allow_final=False)
+
+    def _resolve_case(
+        self, manifest: ExperimentManifest, case_id: str, *, allow_final: bool
+    ) -> BenchmarkCase:
         ref = next((c for c in manifest.cases if c.case_id == case_id), None)
-        if ref is None or ref.split == "final-test":
+        if ref is None or (ref.split == "final-test" and not allow_final):
             raise ValueError("final-test scheduling is unavailable")
         registry = CaseRegistry.model_validate_json(
             read_regular_artifact(self.paths.registry_root / "registry.json", 1_048_576)
@@ -205,11 +210,49 @@ class IsolatedTrialRunner:
     async def run(
         self, experiment_id: UUID, snapshot_id: UUID, case_id: str, repeat_index: int
     ) -> TrialResult:
+        return await self._run(experiment_id, snapshot_id, case_id, repeat_index)
+
+    async def run_final(
+        self,
+        experiment_id: UUID,
+        snapshot_id: UUID,
+        case_id: str,
+        repeat_index: int,
+        seal_digest: str,
+    ) -> TrialResult:
+        await self.store.authorize_final(
+            experiment_id, snapshot_id, case_id, repeat_index, seal_digest
+        )
+        return await self._run(
+            experiment_id,
+            snapshot_id,
+            case_id,
+            repeat_index,
+            final_authorization=seal_digest,
+        )
+
+    async def _run(
+        self,
+        experiment_id: UUID,
+        snapshot_id: UUID,
+        case_id: str,
+        repeat_index: int,
+        *,
+        final_authorization: str | None = None,
+    ) -> TrialResult:
         record = await self.store.get(experiment_id)
         if record.stop_requested or record.status not in ("ready", "running"):
             raise ValueError("experiment is not ready")
         manifest = record.manifest
-        case = self.resolve_case(manifest, case_id)
+        if final_authorization is not None:
+            await self.store.authorize_final(
+                experiment_id, snapshot_id, case_id, repeat_index, final_authorization
+            )
+        elif manifest.schema_version == 2:
+            await self.store.require_search_open(experiment_id)
+        case = self._resolve_case(
+            manifest, case_id, allow_final=final_authorization is not None
+        )
         snapshot, harness = await self.load_snapshot(experiment_id, snapshot_id)
         if snapshot.kind == "baseline" and (
             snapshot.source_digest != manifest.initial_source_digest
@@ -234,7 +277,12 @@ class IsolatedTrialRunner:
         )
         await self.store.settle_usage(start, UsageAmounts(trial_starts=1))
         trial = await self.store.create_trial(
-            experiment_id, snapshot_id, case_id, repeat_index, key
+            experiment_id,
+            snapshot_id,
+            case_id,
+            repeat_index,
+            key,
+            final_authorization=final_authorization,
         )
         root = self.paths.root / "trials" / str(trial)
         root.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -607,6 +655,8 @@ async def build_evaluation_set(
     paths: ExperimentPaths,
     experiment_id: UUID,
     snapshot_id: UUID,
+    *,
+    final: bool = False,
 ) -> "EvaluationSet":
     """Read recorded host results, preserving original IDs across accepted lineage."""
     from crucible.improvement.manifest import manifest_digest
@@ -614,7 +664,9 @@ async def build_evaluation_set(
 
     run = await store.get(experiment_id)
     snapshot = await store.snapshot(experiment_id, snapshot_id)
-    required = tuple(c for c in run.manifest.cases if c.split != "final-test")
+    required = tuple(
+        c for c in run.manifest.cases if (c.split == "final-test") == final
+    )
     refs = {c.case_id: c for c in required}
     selected = {}
     for row in await store.selected_trials(experiment_id):
