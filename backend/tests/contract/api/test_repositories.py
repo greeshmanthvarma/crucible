@@ -157,7 +157,21 @@ async def test_default_application_wires_repository_service(
     del database
     root = tmp_path / "repository"
     create_repository(root)
+
+    # App wiring is an offline contract; Docker lifecycle has separate opt-in tests.
+    class EmptyDocker:
+        async def list_containers(self, label):
+            return ()
+
+        async def list_volumes(self, label):
+            return ()
+
+    monkeypatch.setattr(
+        "crucible.application.container.SubprocessDockerClient", EmptyDocker
+    )
     monkeypatch.setenv("CRUCIBLE_DATABASE_URL", database_url)
+    monkeypatch.setenv("CRUCIBLE_MODEL", "fake")
+    monkeypatch.setenv("CRUCIBLE_DATA_DIR", str(tmp_path / "app-data"))
     monkeypatch.setenv("CRUCIBLE_ORIGIN", "http://test")
     monkeypatch.setattr("crucible.api.app.secrets.token_urlsafe", lambda _: "secret")
     app = create_app()

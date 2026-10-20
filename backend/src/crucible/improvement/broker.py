@@ -304,7 +304,26 @@ class ImprovementBroker:
                 await self.pause_worker(job.job_id, True)
                 session.approval_started = time.monotonic()
                 try:
+                    await self.store.record_event(
+                        job.experiment_id,
+                        "command_approval_requested",
+                        {
+                            "job_id": str(job.job_id),
+                            "command_id": str(command_id),
+                            "spec_digest": spec.digest,
+                        },
+                    )
                     allowed = await self.approval(job, spec)
+                    await self.store.record_event(
+                        job.experiment_id,
+                        "command_approval",
+                        {
+                            "job_id": str(job.job_id),
+                            "command_id": str(command_id),
+                            "spec_digest": spec.digest,
+                            "approved": allowed,
+                        },
+                    )
                 finally:
                     try:
                         await self.pause_worker(job.job_id, False)
@@ -312,10 +331,18 @@ class ImprovementBroker:
                         self.revoke(job.job_id)
                         await self.store.request_stop(job.experiment_id)
                         raise
-                    session.approval_seconds += (
-                        time.monotonic() - session.approval_started
-                    )
+                    elapsed = time.monotonic() - session.approval_started
+                    session.approval_seconds += elapsed
                     session.approval_started = None
+                    await self.store.record_event(
+                        job.experiment_id,
+                        "command_approval_wait",
+                        {
+                            "job_id": str(job.job_id),
+                            "command_id": str(command_id),
+                            "seconds": elapsed,
+                        },
+                    )
         if not allowed or self.commands is None:
             session.records.append(CommandRecord(command_id, spec.digest, False, None))
             return (

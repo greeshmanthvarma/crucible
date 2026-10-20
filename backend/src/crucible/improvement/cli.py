@@ -36,6 +36,15 @@ def parser() -> argparse.ArgumentParser:
         "close",
     ):
         operations.add_parser(operation).add_argument("id", type=UUID)
+    report = operations.add_parser("report")
+    report.add_argument("id", type=UUID)
+    report.add_argument("--output", type=Path, required=True)
+    publish = operations.add_parser("publish")
+    publish.add_argument("id", type=UUID)
+    publish.add_argument("--remote", default="origin")
+    publish.add_argument("--base", default="main")
+    publish.add_argument("--authorize-remote-write", action="store_true")
+    publish.add_argument("--report-only", action="store_true")
     return command
 
 
@@ -68,6 +77,16 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
                 args.config, args.idempotency_key, args.authorize_disposable_commands
             )
             output = await service.status(record.id)
+        elif args.operation == "report":
+            output = await service.report(args.id, args.output)
+        elif args.operation == "publish":
+            output = await service.publish(
+                args.id,
+                args.remote,
+                args.base,
+                args.authorize_remote_write,
+                args.report_only,
+            )
         else:
             action = {
                 "status": service.status,
@@ -82,6 +101,10 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
             }[args.operation]
             output = await action(args.id)
         print(json.dumps(output, sort_keys=True))
+        if output.get("reason") == "operator_stopped":
+            return 130
+        if args.operation == "final-evaluate" and output.get("complete") is False:
+            return 3
         return (
             3
             if output.get("status") == "error"

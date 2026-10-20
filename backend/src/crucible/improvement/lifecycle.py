@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID, uuid4
 
 import uvicorn
@@ -53,6 +53,9 @@ from crucible.models.responses_gateway import LiteLLMResponsesGateway
 from crucible.repair.admission import LocalRepairAdmissionGitHub
 from crucible.repair.gateway import ScopedModelGateway
 from crucible.repair.identity import canonical_json
+
+if TYPE_CHECKING:
+    from crucible.improvement.publication import PublicationRecord
 
 
 class RecoveryRequired(RuntimeError):
@@ -101,7 +104,13 @@ async def bounded_process(root: Path | None, *argv: str, limit: int = 65536) -> 
 
 
 class LocalAdmission:
-    async def check(self, config: StartConfig, manifest: ExperimentManifest) -> None:
+    async def check(
+        self,
+        config: StartConfig,
+        manifest: ExperimentManifest,
+        *,
+        allowed_publication: "PublicationRecord | None" = None,
+    ) -> None:
         local = (
             (await asyncio.to_thread(git_bytes, config.repository, "rev-parse", "HEAD"))
             .decode()
@@ -172,8 +181,16 @@ class LocalAdmission:
             for pr in page:
                 names = {label["name"] for label in pr["labels"]}
                 if pr["head"]["ref"].startswith(
-                    ("repair/", "codex/improve/")
+                    ("repair/", "codex/improve/", "codex/improve-report/")
                 ) or names & {"crucible-repair", "crucible-improvement"}:
+                    if (
+                        allowed_publication is not None
+                        and origin == allowed_publication.remote_url
+                    ):
+                        from crucible.improvement.publication import owns_publication_pr
+
+                        if owns_publication_pr(allowed_publication, pr, repo):
+                            continue
                     raise RevisionConflict(
                         "open repair/improvement PR blocks admission"
                     )
@@ -228,7 +245,15 @@ class ExperimentService:
             raise ManifestDrift("dependency lock drift")
         if suite_digest(config.protected_suite_root) != frozen.boundary_suite_digest:
             raise ManifestDrift("protected suite drift")
-        await self.admission.check(config, frozen)
+        publication = (
+            await self.store.publication(record.id)
+            if await self.store.search_seal(record.id)
+            else None
+        )
+        if publication is not None and isinstance(self.admission, LocalAdmission):
+            await self.admission.check(config, frozen, allowed_publication=publication)
+        else:
+            await self.admission.check(config, frozen)
         return config
 
     async def _repository_lock(
@@ -666,6 +691,90 @@ class ExperimentService:
             pulse.cancel()
             await asyncio.gather(pulse, return_exceptions=True)
             await self.store.release_execution(id, owner, "final_evaluation")
+
+    async def report(self, id: UUID, destination: Path) -> dict[str, object]:
+        from crucible.improvement.reporting import ReportExporter
+        from crucible.repair.identity import digest
+
+        config = self._load_config(id)
+        paths = ExperimentPaths(
+            root=self.root,
+            registry_root=config.registry_root,
+            repository=config.repository,
+        )
+        bundle = await ReportExporter(self.store, paths).export_report(id, destination)
+        await self.store.record_event(
+            id,
+            "report_exported",
+            {
+                "bundle": bundle.model_dump(mode="json"),
+                "bundle_digest": digest(bundle),
+                "destination": str(destination.resolve()),
+            },
+        )
+        return bundle.model_dump(mode="json")
+
+    async def publish(
+        self,
+        id: UUID,
+        remote: str,
+        base: str,
+        authorize_remote_write: bool,
+        report_only: bool = False,
+    ) -> dict[str, object]:
+        from crucible.improvement.publication import (
+            LocalPublicationPort,
+            PublicationService,
+        )
+        from crucible.improvement.reporting import ReportBundle
+        from crucible.repair.identity import digest
+
+        if not authorize_remote_write:
+            raise RevisionConflict("explicit remote write authorization required")
+        exports = await self.store.events(id, "report_exported")
+        if not exports:
+            raise RevisionConflict("export a report before optional publication")
+        event = exports[-1]
+        bundle = ReportBundle.model_validate_json(canonical_json(event["bundle"]))
+        if digest(bundle) != event["bundle_digest"]:
+            raise RevisionConflict("frozen report bundle changed")
+        config = self._load_config(id)
+        paths = ExperimentPaths(
+            root=self.root,
+            registry_root=config.registry_root,
+            repository=config.repository,
+        )
+        owner = await self.store.claim_execution(
+            id,
+            "report",
+            process_id=os.getpid(),
+            process_start=await self._process_start(os.getpid()),
+        )
+
+        async def heartbeat() -> None:
+            while True:
+                await self.store.heartbeat(id, owner)
+                await asyncio.sleep(2)
+
+        pulse = asyncio.create_task(heartbeat())
+        try:
+            await self._repository_lock(config, id)
+            record = await PublicationService(
+                self.store, paths, LocalPublicationPort(config.repository, remote)
+            ).publish(
+                id,
+                bundle,
+                Path(str(event["destination"])),
+                remote=remote,
+                base=base,
+                authorize_remote_write=True,
+                report_only=report_only,
+            )
+            return record.model_dump(mode="json", exclude={"remote_url"})
+        finally:
+            pulse.cancel()
+            await asyncio.gather(pulse, return_exceptions=True)
+            await self.store.release_execution(id, owner, "report")
 
     async def baseline(self, id: UUID) -> dict[str, object]:
         return await self._evaluate(id, False)

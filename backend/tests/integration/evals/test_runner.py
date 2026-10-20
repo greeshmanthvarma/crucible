@@ -97,7 +97,7 @@ async def test_runner_uses_ordinary_task_message_run_and_fresh_fixture(
     )
     suite = replace(suite, cases=(case,))
     container = await ApplicationContainer.create(
-        database_url, data_dir, docker_client=FakeDockerClient()
+        database_url, data_dir, model_id="fake", docker_client=FakeDockerClient()
     )
     await container.start()
     try:
@@ -155,6 +155,7 @@ async def test_pending_command_requires_human_denial_and_records_tool_result(
     container = await ApplicationContainer.create(
         database_url,
         data_dir,
+        model_id="fake",
         docker_client=FakeDockerClient(),
         gateway_factory=lambda: gateway,
     )
@@ -209,6 +210,7 @@ async def test_model_failure_keeps_failed_trial_and_trace(tmp_path: Path) -> Non
     container = await ApplicationContainer.create(
         database_url,
         data_dir,
+        model_id="fake",
         docker_client=FakeDockerClient(),
         gateway_factory=ErrorGateway,
     )

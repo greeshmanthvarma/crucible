@@ -4,6 +4,7 @@ from pathlib import Path
 
 from crucible.application.container import ApplicationContainer
 from crucible.storage.database import Database
+from tests.integration.evals.test_runner import FakeDockerClient
 
 
 def create_repository(path: Path) -> None:
@@ -31,7 +32,12 @@ async def test_complete_run_spine_survives_container_recreation(
         capture_output=True,
         text=True,
     ).stdout
-    container = await ApplicationContainer.create(database_url, tmp_path / "data")
+    container = await ApplicationContainer.create(
+        database_url,
+        tmp_path / "data",
+        model_id="fake",
+        docker_client=FakeDockerClient(),
+    )
     await container.start()
     repository = await container.repository_service.register(root)
     task = await container.task_service.create(
@@ -61,7 +67,12 @@ async def test_complete_run_spine_survives_container_recreation(
     )
     await container.close()
 
-    restored = await ApplicationContainer.create(database_url, tmp_path / "data")
+    restored = await ApplicationContainer.create(
+        database_url,
+        tmp_path / "data",
+        model_id="fake",
+        docker_client=FakeDockerClient(),
+    )
     await restored.start()
     assert await restored.task_service.get(task.id) == task
     assert await restored.message_service.list(task.id) == messages_before

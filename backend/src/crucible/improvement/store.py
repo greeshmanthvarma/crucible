@@ -4,7 +4,7 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Literal
+from typing import TYPE_CHECKING, AsyncIterator, Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -19,6 +19,9 @@ from crucible.improvement.contracts import (
 from crucible.improvement.manifest import ManifestDrift, manifest_digest
 from crucible.improvement.roles import RoleExecution, SelectionDecision
 from crucible.repair.identity import digest
+
+if TYPE_CHECKING:
+    from crucible.improvement.publication import PublicationRecord
 
 Status = Literal["ready", "running", "stopping", "interrupted", "error", "closed"]
 Stage = Literal[
@@ -1034,7 +1037,8 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 text(
                     "UPDATE experiment_runs SET "
                     " "
-                    "owner_execution_id=:owner,owner_heartbeat_at=CURRENT_TIMESTAMP,status='running',stage=:stage,revision=revision+1"
+                    "owner_execution_id=:owner,owner_heartbeat_at=CURRENT_TIMESTA"
+                    "MP,status='running',stage=:stage,revision=revision+1"
                     " WHERE id=:id"
                 ),
                 {"id": str(id), "owner": str(owner), "stage": stage},
@@ -1113,7 +1117,8 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 text(
                     "UPDATE experiment_runs SET "
                     " "
-                    "owner_execution_id=NULL,owner_heartbeat_at=NULL,status='ready',stop_requested=0,error_code=NULL,revision=revision+1"
+                    "owner_execution_id=NULL,owner_heartbeat_at=NULL,status='read"
+                    "y',stop_requested=0,error_code=NULL,revision=revision+1"
                     " WHERE id=:id AND status!='closed'"
                 ),
                 {"id": str(id)},
@@ -1269,7 +1274,8 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 text(
                     "UPDATE experiment_trials SET "
                     " "
-                    "status='interrupted',error_code=COALESCE(error_code,'process_interrupted')"
+                    "status='interrupted',error_code=COALESCE(error_code,'process"
+                    "_interrupted')"
                     " WHERE experiment=:id AND (status NOT IN "
                     "('complete','error','interrupted') OR snapshot IN "
                     "(SELECT id FROM experiment_snapshots WHERE "
@@ -2202,3 +2208,147 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
     ) -> None:
         async with self.engine.connect() as conn:
             await self._authorize_final(conn, id, snapshot, case, repeat, seal_digest)
+
+    async def audit_events(self, id: UUID) -> tuple[dict[str, object], ...]:
+        async with self.engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT sequence,type,payload_json,created_at FROM "
+                            "experiment_events WHERE experiment=:id ORDER BY "
+                            "sequence"
+                        ),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            return tuple(dict(row) for row in rows)
+
+    async def usage_records(self, id: UUID) -> tuple[dict[str, object], ...]:
+        async with self.engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT reservation_id,kind,requested_json,settled_js"
+                            "on,status FROM experiment_usage WHERE experiment=:id"
+                            " ORDER BY reservation_id"
+                        ),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            return tuple(dict(row) for row in rows)
+
+    async def publication(self, id: UUID) -> "PublicationRecord | None":
+        from crucible.improvement.publication import PublicationRecord
+        from crucible.repair.identity import canonical_json
+
+        async with self.engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_publications WHERE experiment=:id"
+                        ),
+                        {"id": str(id)},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            data = dict(row)
+            data["experiment_id"] = data.pop("experiment")
+            return PublicationRecord.model_validate_json(canonical_json(data))
+
+    async def prepare_publication(
+        self, record: "PublicationRecord", remote_before: str | None
+    ) -> None:
+        from dataclasses import asdict
+
+        seal = await self.search_seal(record.experiment_id)
+        if seal is None or digest(asdict(seal)) != record.seal_digest:
+            raise RevisionConflict("publication seal differs")
+        async with self._transaction() as conn:
+            existing = (
+                await conn.execute(
+                    text(
+                        "SELECT experiment FROM experiment_publications WHERE "
+                        "experiment=:id"
+                    ),
+                    {"id": str(record.experiment_id)},
+                )
+            ).first()
+            if existing:
+                raise RevisionConflict("publication intent already exists")
+            await conn.execute(
+                text(
+                    "INSERT INTO experiment_publications(experiment,seal_digest,r"
+                    "eport_digest,branch,expected_head,base_branch,remote_url,pr_"
+                    "url,pr_number,status,last_error) VALUES (:experiment_id,:sea"
+                    "l_digest,:report_digest,:branch,:expected_head,:base_branch,"
+                    ":remote_url,:pr_url,:pr_number,:status,:last_error)"
+                ),
+                record.model_dump(mode="json"),
+            )
+            await self._event(
+                conn,
+                record.experiment_id,
+                "publication_intent",
+                {
+                    "remote_before": remote_before,
+                    "expected_head": record.expected_head,
+                    "report_digest": record.report_digest,
+                },
+            )
+
+    async def save_publication(self, record: "PublicationRecord") -> None:
+        from crucible.improvement.publication import PublicationRecord
+        from crucible.repair.identity import canonical_json
+
+        async with self._transaction() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_publications WHERE experiment=:id"
+                        ),
+                        {"id": str(record.experiment_id)},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            data = dict(row)
+            data["experiment_id"] = data.pop("experiment")
+            existing = PublicationRecord.model_validate_json(canonical_json(data))
+            mutable = {"pr_url", "pr_number", "status", "last_error"}
+            if existing.model_dump(exclude=mutable) != record.model_dump(
+                exclude=mutable
+            ) or (
+                existing.pr_number is not None
+                and (record.pr_number, record.pr_url)
+                != (existing.pr_number, existing.pr_url)
+            ):
+                raise RevisionConflict("publication identity immutable")
+            await conn.execute(
+                text(
+                    "UPDATE experiment_publications SET pr_url=:pr_url,pr_number="
+                    ":pr_number,status=:status,last_error=:last_error WHERE "
+                    "experiment=:experiment_id"
+                ),
+                record.model_dump(mode="json"),
+            )
+            await self._event(
+                conn,
+                record.experiment_id,
+                "publication_checkpoint",
+                {"status": record.status, "error": record.last_error},
+            )

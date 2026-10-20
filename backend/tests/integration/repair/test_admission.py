@@ -466,3 +466,40 @@ async def test_cancelled_provision_is_explicitly_resumable(database):
     assert (
         await service.command(task.id, "/repair resume", "resume")
     ).status == "resumed"
+
+
+@pytest.mark.parametrize(
+    ("branch", "labels"),
+    [
+        ("codex/improve/abc", []),
+        ("other", [{"name": "crucible-improvement"}]),
+        ("codex/improve-report/abc", []),
+    ],
+)
+async def test_improvement_publication_blocks_legacy_repair_admission(
+    tmp_path, branch, labels
+):
+    import json
+
+    from crucible.repair.admission import LocalRepairAdmissionGitHub
+
+    class Process:
+        async def run(self, root, *argv):
+            if argv[0] == "git":
+                return "git@github.com:example/crucible.git"
+            return json.dumps(
+                [
+                    [
+                        {
+                            "number": 3,
+                            "html_url": "https://github.com/example/crucible/pull/3",
+                            "state": "open",
+                            "head": {"ref": branch, "sha": "c"},
+                            "labels": labels,
+                        }
+                    ]
+                ]
+            )
+
+    prs = await LocalRepairAdmissionGitHub(tmp_path, Process()).list_open_repairs()
+    assert [pr.number for pr in prs] == [3]

@@ -29,7 +29,7 @@ async def test_result_report_artifact_survives_container_reopen(tmp_path: Path) 
     )
     suite = replace(suite, cases=(case,))
     container = await ApplicationContainer.create(
-        database_url, data_dir, docker_client=FakeDockerClient()
+        database_url, data_dir, model_id="fake", docker_client=FakeDockerClient()
     )
     await container.start()
     invocation_id = uuid4()
@@ -54,7 +54,7 @@ async def test_result_report_artifact_survives_container_reopen(tmp_path: Path) 
     finally:
         await container.close()
     restored = await ApplicationContainer.create(
-        database_url, data_dir, docker_client=FakeDockerClient()
+        database_url, data_dir, model_id="fake", docker_client=FakeDockerClient()
     )
     try:
         async with restored.unit_of_work() as uow:

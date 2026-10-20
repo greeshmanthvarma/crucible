@@ -117,8 +117,13 @@ class LocalRepairAdmissionGitHub:
             PRIdentity(pr["number"], pr["html_url"], pr["state"], pr["head"]["sha"])
             for page in pages
             for pr in page
-            if pr["head"]["ref"].startswith("repair/")
-            or any(label["name"] == "crucible-repair" for label in pr["labels"])
+            if pr["head"]["ref"].startswith(
+                ("repair/", "codex/improve/", "codex/improve-report/")
+            )
+            or any(
+                label["name"] in {"crucible-repair", "crucible-improvement"}
+                for label in pr["labels"]
+            )
         )
 
     @staticmethod

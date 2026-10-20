@@ -71,12 +71,12 @@ make check
 `make check` runs lint, types, tests, migration round-trip, OpenAPI drift check,
 and the production frontend build. Optional smokes:
 
-| Target | Purpose |
-| --- | --- |
-| `make milestone` | Deterministic end-to-end milestone workflow proof |
-| `make smoke-eval` | One Trial per smoke Eval Case (deterministic gateway) |
-| `make smoke-docker` | Real Docker lifecycle (needs daemon + image) |
-| `make smoke-real-model` | Live provider connectivity (opt-in credentials) |
+| Target                  | Purpose                                               |
+| ----------------------- | ----------------------------------------------------- |
+| `make milestone`        | Deterministic end-to-end milestone workflow proof     |
+| `make smoke-eval`       | One Trial per smoke Eval Case (deterministic gateway) |
+| `make smoke-docker`     | Real Docker lifecycle (needs daemon + image)          |
+| `make smoke-real-model` | Live provider connectivity (opt-in credentials)       |
 
 ### Local demonstration
 
@@ -194,7 +194,7 @@ snapshot Validation commands, sandbox image/network policy, repair bounds, and
 Compaction limits into each Run.
 
 A Task owns one retained Conversation across Runs. Steering joins the active Run
-at the next model boundary; a message after a terminal Run starts another. 
+at the next model boundary; a message after a terminal Run starts another.
 Compaction summarizes complete semantic units without deleting original Messages,
 traces, or Artifacts. Validation is harness-authored; repair stays bounded inside
 the same Run.
@@ -462,10 +462,11 @@ recorded explicitly instead of inferred.
 
 ### Explicit isolated experiment runtime
 
-`crucible improve` provides local baseline/candidate evaluation and recovery. It does
-not mine proposals, promote commits, run final-test cases, publish reports/PRs, or
-advance accepted revisions. Legacy `/repair` and host-only benchmark calibration
-remain available. Candidate Python executes only in disposable Docker workers;
+`crucible improve` provides an explicit, bounded improvement lifecycle: isolated
+selection baselines, development-only mining, at most three proposals, protected
+checks and per-case selection, accepted Git commits, sealed final measurement, and
+sanitized local reports. Optional publication requires its own remote-write flag.
+Legacy `/repair` and host-only benchmark calibration remain available. Candidate Python executes only in disposable Docker workers;
 source inspection and trusted check assertions stay in the controller. Protected
 checks probe candidate behavior through a bounded process protocol, with no trusted
 suite or expected answers mounted into the candidate process.
@@ -478,6 +479,14 @@ crucible improve --state-root /absolute/private/experiment-state start \
 crucible improve --state-root /absolute/private/experiment-state status EXPERIMENT_UUID
 crucible improve --state-root /absolute/private/experiment-state baseline EXPERIMENT_UUID
 crucible improve --state-root /absolute/private/experiment-state candidate-evaluate EXPERIMENT_UUID
+crucible improve --state-root /absolute/private/experiment-state search EXPERIMENT_UUID
+crucible improve --state-root /absolute/private/experiment-state finalize EXPERIMENT_UUID
+crucible improve --state-root /absolute/private/experiment-state final-evaluate EXPERIMENT_UUID
+crucible improve --state-root /absolute/private/experiment-state report EXPERIMENT_UUID \
+  --output /absolute/public-export/EXPERIMENT_UUID
+# Optional remote writes; review the exported files first:
+crucible improve --state-root /absolute/private/experiment-state publish EXPERIMENT_UUID \
+  --remote origin --base main --authorize-remote-write
 crucible improve --state-root /absolute/private/experiment-state stop EXPERIMENT_UUID
 crucible improve --state-root /absolute/private/experiment-state resume EXPERIMENT_UUID
 crucible improve --state-root /absolute/private/experiment-state close EXPERIMENT_UUID
@@ -486,6 +495,8 @@ crucible improve --state-root /absolute/private/experiment-state close EXPERIMEN
 `start.json` has exactly `schema_version: 1`, `manifest_file`, `repository`,
 `registry_root`, and `protected_suite_root`; paths must be absolute. The strict
 `improvement.contracts.ExperimentManifest` defines the separately supplied manifest.
+New searches require manifest schema 2 and `worker_protocol_version: 2`; historical
+schema-1 state remains readable but cannot acquire v2 search authority.
 Every model, limit, aggregate spending budget, admitted case/evaluator identity,
 source/controller/dependency digest, image digest/platform, command policy and suite
 digest must be explicit. The private registry uses schema 1 with `pending_slots`
@@ -497,12 +508,46 @@ The suite directory contains a schema-1 `suite.json` with `test_ids` exactly
 Start requires a clean, current `main`, matching loaded controller source, read-only
 remote freshness/PR admission, and exclusive repository ownership. It freezes state
 and prepares a retained `codex/improve/UUID` worktree; it makes no model requests.
-Edit only the six frozen editable paths in that worktree before explicitly requesting
-candidate evaluation. Candidate checks must pass before paid trial dispatch. Both
+For manual candidate evaluation, edit only the six frozen editable paths in that
+worktree. `search` instead runs bounded mining and proposal roles through the
+accepted Crucible engine; the miner receives only verified development evidence.
+Candidate checks must pass before paid trial dispatch. Both
 baseline and candidate run three repeats for each development/selection-validation
 case, using the same isolated path and independent protected grading. Worker success
 claims never determine correctness. Explicit repeated evaluation may reuse only
 complete, compatible, artifact-verified observations in this experiment.
+
+A case is one frozen task; each case has repeat indices 0, 1 and 2. Promotion requires
+complete evidence for every development and selection-validation case, no decrease
+in any case's pass count, and a strict gain on at least one development case. Two
+rejections still leave the third proposal opportunity. Invalid or unchanged patches
+consume a round; only malformed mining output receives one format correction.
+Infrastructure errors remain inconclusive and never become behavioral rejections.
+Accepted trials become the next baseline with their original identities intact.
+
+`finalize` persists an immutable seal before exposing any final-test outcome. It
+makes no model calls. Search, roles and promotion cannot resume after sealing.
+`final-evaluate` explicitly measures initial and selected source with three trials
+per final case under the frozen protocol. Identical source uses three original
+trials shared by both versions. A final regression is reported without reopening
+search or rolling back the selected commit.
+
+`report` writes deterministic Markdown and metrics JSON; incomplete measurement or
+usage is prominently inconclusive. Trial success and task success (at least two of
+three trials) have separate denominators. Unknown costs, provider cache tokens,
+setup timing and licenses are marked unavailable. Reports contain no raw logs,
+reference/test source or private paths. Publishing final case identities retires
+their unseen status for later experiments.
+
+Publication consumes the frozen exported bundle and performs no model or grading
+work. It stages only `reports/self-improvement/EXPERIMENT_UUID/` in an owned detached
+export worktree, records the evaluated code commit separately, and preserves the
+main and evaluated checkouts. Durable intent and exact remote-head/PR ownership
+checks reconcile crashes after push or PR creation. It uses a normal non-force
+push and the `crucible-improvement` label; unrelated remote changes block recovery.
+Without an accepted patch, local reports remain valid and remote report-only
+publication additionally requires `--report-only`, using
+`codex/improve-report/EXPERIMENT_UUID`. Merging and restarting remain operator actions.
 
 Interactive command approval requires terminal input and pauses the worker before
 waiting. `preauthorized-disposable` mode additionally requires the start flag
@@ -518,7 +563,10 @@ candidate edits, restores the accepted baseline, and returns ready without dispa
 Unexpected edits are preserved and block restoration. Unfinished/uncertain spending
 blocks resume; quotas are never reset. Close stops owned effects and releases locks
 while retaining worktrees, branches, artifacts and spending records. Recovery never
-silently repeats a trial. Exit codes are 0 for successful operations (including a
+silently repeats a trial. After explicit resume, `search` or `final-evaluate` must
+be invoked separately. A failed trial may be superseded only under explicit
+compatible recovery; both generations remain recorded and budgets stay unchanged.
+An interrupted proposal consumes its original round. Exit codes are 0 for successful operations (including a
 completed correctness failure), 2 for invalid/conflicting state, 3 for infrastructure
 or recovery errors, and 130 for interruption.
 
