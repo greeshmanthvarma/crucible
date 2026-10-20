@@ -287,7 +287,7 @@ async def run_trial_config(path: Path, output: Path) -> TrialResult:
 async def run_cli(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(prog="crucible benchmark")
     commands = parser.add_subparsers(dest="operation", required=True)
-    for operation in ("admit", "trial"):
+    for operation in ("admit", "trial", "isolated-trial"):
         sub = commands.add_parser(operation)
         sub.add_argument("--config", type=Path, required=True)
         sub.add_argument("--output", type=Path, required=True)
@@ -346,7 +346,12 @@ async def run_cli(argv: Sequence[str]) -> int:
                     {"status": "error", "error_code": type(error).__name__}, "error"
                 )
                 raise
-        trial = await run_trial_config(args.config, args.output)
+        if args.operation == "isolated-trial":
+            from crucible.improvement.calibration import run_isolated_calibration
+
+            trial = await run_isolated_calibration(args.config, args.output)
+        else:
+            trial = await run_trial_config(args.config, args.output)
         print(json.dumps(TrialEvidence.show(args.output), sort_keys=True))
         return (
             0

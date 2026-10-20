@@ -578,3 +578,25 @@ retained. Image preparation, complete corpus admission (including the pending
 replacement), explicit budget approval, and a fresh post-refactor baseline remain
 operator gates. Do not freeze the incomplete corpus or reuse older host calibration
 as an isolated baseline. No real experiment is launched by the test suite by default.
+
+### One-shot isolated calibration
+
+`crucible benchmark isolated-trial --config /absolute/config.json --output
+/absolute/new-output` runs one retired calibration case through the same Docker
+supervisor, scoped host model/command broker and official grader as experiments.
+It does not admit a measured suite, run mining/search, or publish anything.
+
+The config is `IsolatedCalibrationConfig`: `manifest`, `repository`, and a separate
+private `data_dir`. Its `CalibrationManifest` has kind `isolated-calibration`,
+schema version 1, worker protocol 2, authorization `one-isolated-calibration`, and
+interactive approval mode. It freezes current clean source/controller/lock hashes,
+cached worker/relay image digests/platform, model, trial limits, command policy,
+aggregate budget, calibration case/admission paths and digests, and a unique trial
+ID. It contains no development/validation/final split entries or role limits.
+
+Prepare images and prove real relay/command isolation before authorizing paid use.
+Commands wait for an explicit `approve` on terminal stdin; other input or EOF denies.
+No automatic retry or resume exists. Failed identities and quota/effect evidence
+remain in the calibration-only SQLite ledger. A completed or budget-stopped worker
+can be graded only after confirmed cleanup; infrastructure failures are not passes.
+The existing `benchmark trial` command remains the older host-only calibration.

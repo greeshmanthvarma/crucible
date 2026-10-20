@@ -5,20 +5,16 @@ import hashlib
 import json
 import os
 import re
-import socket
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID, uuid4
 
-import uvicorn
-
 from crucible.benchmarks.evidence import atomic_json
 from crucible.benchmarks.swebench import SwebenchGrader
 from crucible.domain.clock import SystemClock
-from crucible.improvement.broker import ImprovementBroker, broker_app
 from crucible.improvement.checks import DockerProbes, check_candidate, suite_digest
 from crucible.improvement.contracts import (
     EDITABLE_PATHS,
@@ -28,6 +24,7 @@ from crucible.improvement.contracts import (
     HarnessSnapshot,
 )
 from crucible.improvement.manifest import ManifestDrift, freeze_manifest
+from crucible.improvement.runtime import execution_runtime
 from crucible.improvement.source import (
     _digest,
     git_bytes,
@@ -42,7 +39,6 @@ from crucible.improvement.store import (
 )
 from crucible.improvement.trials import IsolatedTrialRunner
 from crucible.improvement.worker_supervisor import (
-    DockerCommands,
     DockerPort,
     DockerRuntime,
     WorkerSupervisor,
@@ -453,61 +449,10 @@ class ExperimentService:
             clock=SystemClock(),
             endpoint="http://broker/internal/improvement/model",
         )
-        broker = ImprovementBroker(
-            self.store,
-            gateway,
-            DockerCommands(self.store, self.docker),
-            approval=self._approve,
-        )
-        listener = socket.socket()
-        listener.bind(("0.0.0.0", 0))
-        listener.listen(128)
-        listener.setblocking(False)
-        port = listener.getsockname()[1]
-
-        class BrokerServer(uvicorn.Server):
-            @contextmanager
-            def capture_signals(self):  # type: ignore[no-untyped-def]
-                yield
-
-        server = BrokerServer(
-            uvicorn.Config(
-                broker_app(broker),
-                log_level="critical",
-                access_log=False,
-                lifespan="off",
-            )
-        )
-        task = asyncio.create_task(server.serve(sockets=[listener]))
-        try:
-            for _ in range(100):
-                if server.started:
-                    break
-                if task.done():
-                    await task
-                await asyncio.sleep(0.01)
-            if not server.started:
-                raise RecoveryRequired("local broker did not start")
-            yield WorkerSupervisor(
-                self.store,
-                broker,
-                self.docker,
-                self.root,
-                manifest,
-                f"http://host.docker.internal:{port}",
-            )
-        finally:
-            await asyncio.gather(
-                *(broker.stop(job_id) for job_id in tuple(broker.sessions)),
-                return_exceptions=True,
-            )
-            server.should_exit = True
-            try:
-                await asyncio.wait_for(task, 10)
-            except TimeoutError:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-            listener.close()
+        async with execution_runtime(
+            self.store, self.root, manifest, self.docker, gateway, self._approve
+        ) as supervisor:
+            yield supervisor
 
     async def _approve(self, job: object, spec: object) -> bool:
         if not os.isatty(0):

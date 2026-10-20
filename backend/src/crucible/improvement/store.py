@@ -2474,5 +2474,51 @@ class CalibrationStore(ExperimentStore[CalibrationManifest]):
 
     manifest_type = CalibrationManifest
 
+    async def admit_trial(self, id: UUID, snapshot: UUID, case_id: str) -> UUID:
+        """One durable launch identity; unlike measured trials, never superseded."""
+        async with self._transaction() as conn:
+            record = await self._get(conn, id)
+            if record.stop_requested or record.status != "ready":
+                raise RevisionConflict("calibration is not ready")
+            verified = (
+                await conn.execute(
+                    text(
+                        "SELECT id FROM experiment_snapshots WHERE id=:snapshot "
+                        "AND experiment=:id AND status='verified'"
+                    ),
+                    {"snapshot": str(snapshot), "id": str(id)},
+                )
+            ).first()
+            existing = (
+                await conn.execute(
+                    text("SELECT id FROM experiment_trials WHERE experiment=:id"),
+                    {"id": str(id)},
+                )
+            ).first()
+            if not verified or existing:
+                raise ValueError(
+                    "calibration snapshot missing or launch already admitted"
+                )
+            trial = record.manifest.trial_id
+            await conn.execute(
+                text(
+                    "INSERT INTO experiment_trials "
+                    "(id,experiment,snapshot,case_id,repeat_index,key,status,"
+                    "generation) "
+                    "VALUES (:trial,:id,:snapshot,:case,0,:key,'pending',0)"
+                ),
+                {
+                    "trial": str(trial),
+                    "id": str(id),
+                    "snapshot": str(snapshot),
+                    "case": case_id,
+                    "key": record.manifest_hash,
+                },
+            )
+            await self._event(
+                conn, id, "calibration_admitted", {"trial_id": str(trial)}
+            )
+            return trial
+
 
 ExecutionStore = ExperimentStore | CalibrationStore
