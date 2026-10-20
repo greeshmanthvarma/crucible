@@ -1,5 +1,6 @@
 """Scripted-worker orchestration plumbing, not isolated benchmark performance."""
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -47,7 +48,7 @@ async def trial_setup(tmp_path, case_fixture, monkeypatch):
         "crucible.benchmarks.swebench.PINNED_COMMIT", case_fixture.base_commit
     )
     config = GraderConfig(
-        driver_python=Path("/usr/bin/python3"),
+        driver_python=Path(sys.executable).resolve(),
         driver_source=source,
         driver_commit=case_fixture.base_commit,
         driver_digest=case_fixture.fixture_digest,

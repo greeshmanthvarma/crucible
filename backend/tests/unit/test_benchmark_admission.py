@@ -1,6 +1,7 @@
 import hashlib
 import json
 import shutil
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -44,7 +45,7 @@ async def test_admission_records_independent_checks(
         "crucible.benchmarks.swebench.PINNED_COMMIT", case_fixture.base_commit
     )
     config = GraderConfig(
-        driver_python=Path("/usr/bin/python3"),
+        driver_python=Path(sys.executable).resolve(),
         driver_source=source,
         driver_commit=case_fixture.base_commit,
         driver_digest=case_fixture.fixture_digest,
