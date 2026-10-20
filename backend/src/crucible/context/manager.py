@@ -355,8 +355,22 @@ class ContextManager:
                         ) from error
                     return await self.prepare(run, step, observation=observation)
                 raise CompactionNeeded(boundary, estimate, capacity)
+            # The threshold is an early-compaction target, not the hard limit.
+            # Recent/incomplete units may leave no safe prefix to summarize.
+            absolute_capacity = self._input_limit - self._output_reserve
+            if estimate <= absolute_capacity:
+                return await self._persist_prepared(
+                    run,
+                    step,
+                    model_messages,
+                    messages,
+                    instruction_digests,
+                    estimate,
+                    latest_compaction,
+                )
             raise ContextLimitExceeded(
-                f"Prepared context estimate {estimate} exceeds capacity {capacity}"
+                f"Prepared context estimate {estimate} exceeds hard capacity "
+                f"{absolute_capacity}; no safe compaction boundary"
             )
         return await self._persist_prepared(
             run,

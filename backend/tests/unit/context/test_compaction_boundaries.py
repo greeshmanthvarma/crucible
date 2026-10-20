@@ -59,9 +59,10 @@ def test_units_keep_user_exchange_and_tool_call_results_together() -> None:
     units = group_conversation_units(messages, {result: call})
     assert [
         tuple(item.conversation_sequence for item in unit.messages) for unit in units
-    ] == [(1, 2, 3, 4), (5,)]
+    ] == [(1, 2, 3), (4,), (5,)]
     assert units[0].complete is True
-    assert units[1].complete is False
+    assert units[1].complete is True
+    assert units[2].complete is False
 
 
 def test_boundary_uses_largest_complete_prefix_and_retains_recent_units() -> None:
@@ -101,3 +102,38 @@ def test_steering_users_share_the_unit_closed_by_the_next_assistant() -> None:
     assert units[0].complete
     assert units[0].start_sequence == 1
     assert units[0].end_sequence == 3
+
+
+def test_long_agent_turn_has_compactable_tool_exchange_prefix() -> None:
+    messages = [message(1, MessageRole.USER)]
+    links = {}
+    for sequence in (2, 4, 6):
+        call, result = new_id(), new_id()
+        links[result] = call
+        messages.extend(
+            (
+                message(sequence, MessageRole.ASSISTANT, call=call),
+                message(sequence + 1, MessageRole.TOOL, result=result),
+            )
+        )
+    units = group_conversation_units(tuple(messages), links)
+    boundary = select_compaction_boundary(units, retain_complete_units=2)
+    assert boundary is not None
+    assert boundary.source_end_sequence == 3
+    from crucible.context.invariants import validate_compaction_boundary
+
+    validate_compaction_boundary(boundary, tuple(messages), links)
+
+
+def test_parallel_results_are_not_split_before_all_calls_finish() -> None:
+    call, result, other, other_result = (new_id() for _ in range(4))
+    messages = (
+        message(1, MessageRole.USER),
+        message(2, MessageRole.ASSISTANT, call=call),
+        message(3, MessageRole.ASSISTANT, call=other),
+        message(4, MessageRole.TOOL, result=result),
+        message(5, MessageRole.TOOL, result=other_result),
+        message(6, MessageRole.ASSISTANT),
+    )
+    units = group_conversation_units(messages, {result: call, other_result: other})
+    assert [len(u.messages) for u in units] == [5, 1]

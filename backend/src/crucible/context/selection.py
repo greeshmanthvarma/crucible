@@ -46,7 +46,18 @@ def group_conversation_units(
         current_has_assistant = bool(grouped) and any(
             item.role is MessageRole.ASSISTANT for item in grouped[-1]
         )
-        if not grouped or (message.role is MessageRole.USER and current_has_assistant):
+        # A completed assistant/tool batch is a safe checkpoint even when no
+        # new user message arrives. Pending parallel calls keep the batch open.
+        next_exchange = (
+            bool(grouped)
+            and message.role is MessageRole.ASSISTANT
+            and unit_is_complete(grouped[-1], result_to_call)
+        )
+        if (
+            not grouped
+            or (message.role is MessageRole.USER and current_has_assistant)
+            or next_exchange
+        ):
             grouped.append([])
         grouped[-1].append(message)
     return tuple(

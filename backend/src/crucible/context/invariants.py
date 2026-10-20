@@ -161,7 +161,10 @@ def validate_prepared(
 def unit_is_complete(
     messages: list[Message], result_to_call: Mapping[ToolResultId, ToolCallId]
 ) -> bool:
-    if not messages or messages[0].role is not MessageRole.USER:
+    if not messages or messages[0].role not in (
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+    ):
         return False
     if any(message.status is not MessageStatus.COMPLETED for message in messages):
         return False
