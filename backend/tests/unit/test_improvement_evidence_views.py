@@ -14,7 +14,7 @@ def test_arbitrary_path_ref_rejected():
 
 
 @pytest.fixture
-async def evidence_setup(tmp_path):
+async def evidence_setup(tmp_path, request):
     import hashlib
     import json
     from uuid import uuid4
@@ -66,11 +66,9 @@ async def evidence_setup(tmp_path):
             trace = directory / "trace.json"
             trace.write_text(
                 json.dumps(
-                    {
-                        "data": "ordinary trace"
-                        if case == "development"
-                        else "HIDDEN_TRACE_CANARY"
-                    }
+                    getattr(request, "param", {"data": "ordinary trace"})
+                    if case == "development"
+                    else {"data": "HIDDEN_TRACE_CANARY"}
                 )
             )
             patch = directory / "solution.diff"
@@ -255,3 +253,53 @@ def test_prior_feedback_excludes_hidden_case_counts_and_ids():
     assert "HIDDEN_ID_CANARY" not in feedback.model_dump_json()
     assert feedback.development[0].baseline == 0
     assert feedback.development[0].candidate == 1
+
+
+@pytest.mark.parametrize(
+    "evidence_setup",
+    [
+        {
+            "schema_version": 2,
+            "messages": [{"id": "message-1", "text": "display summary"}],
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "assistant_message_id": "message-1",
+                    "name": "read_file",
+                    "arguments": {"path": "example.py"},
+                }
+            ],
+            "tool_results": [
+                {
+                    "tool_call_id": "call-1",
+                    "result": {
+                        "ok": True,
+                        "secret": "tool-secret-canary",
+                        "text": "x" * 1_100_000,
+                    },
+                }
+            ],
+        }
+    ],
+    indirect=True,
+)
+async def test_structured_trace_retrieval_is_sanitized_and_bounded(
+    evidence_setup, tmp_path, monkeypatch
+):
+    from crucible.improvement.evidence_views import MAX_ARTIFACT, DevelopmentViewBuilder
+
+    monkeypatch.setenv("TEST_API_KEY", "tool-secret-canary")
+    store, root, run, snapshot, _ = evidence_setup
+    builder = DevelopmentViewBuilder(store, root)
+    view = await builder.build_development_view(
+        run.id, snapshot.snapshot_id, tmp_path / "view"
+    )
+    ref = next(ref for ref in view.evidence_refs if ref.artifact == "trace")
+    raw = builder.resolve_evidence(view, ref).read_bytes()
+    assert len(raw) <= MAX_ARTIFACT
+    assert b'"name": "read_file"' in raw
+    assert b'"arguments": {"path": "example.py"}' in raw
+    assert b'"tool_call_id": "call-1"' in raw
+    assert b'"ok": true' in raw
+    assert b"tool-secret-canary" not in raw
+    assert b"[TRUNCATED:" in raw

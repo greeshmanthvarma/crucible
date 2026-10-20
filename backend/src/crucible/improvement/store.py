@@ -1581,6 +1581,101 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
             )
         return RoleRecord(execution, attempt)
 
+    async def recover_undispatched_role(
+        self, execution: "RoleExecution"
+    ) -> "RoleExecution":
+        from crucible.improvement.roles import RoleExecution
+
+        async with self._transaction() as conn:
+            run = await self._get(conn, execution.experiment_id)
+            await self._search_revision(conn, run.id, run.revision)
+            saved = (
+                await conn.execute(
+                    text("SELECT execution_json FROM experiment_roles WHERE id=:id"),
+                    {"id": str(execution.role_id)},
+                )
+            ).scalar_one()
+            old = RoleExecution.model_validate_json(saved)
+            round = (
+                await conn.execute(
+                    text(
+                        "SELECT status,baseline_snapshot FROM experiment_rounds "
+                        "WHERE id=:id"
+                    ),
+                    {"id": str(old.round_id)},
+                )
+            ).one()
+            proposal = (
+                await conn.execute(
+                    text(
+                        "SELECT id FROM experiment_roles "
+                        "WHERE round=:id AND kind='proposal'"
+                    ),
+                    {"id": str(old.round_id)},
+                )
+            ).first()
+            if (
+                round.status in ("decided", "interrupted", "error")
+                or proposal
+                or round.baseline_snapshot != str(old.accepted_snapshot_id)
+                or await self._accepted_snapshot_id(conn, run)
+                != old.accepted_snapshot_id
+            ):
+                raise RevisionConflict("mining round no longer recoverable")
+            events = (
+                await conn.execute(
+                    text(
+                        "SELECT type,payload_json FROM experiment_events "
+                        "WHERE experiment=:id "
+                        "ORDER BY sequence"
+                    ),
+                    {"id": str(run.id)},
+                )
+            ).all()
+            resumed = False
+            for event in events:
+                payload = json.loads(event.payload_json)
+                if event.type == "explicit_resume":
+                    resumed = True
+                if event.type == "role_saved" and payload.get("role_id") == str(
+                    old.role_id
+                ):
+                    resumed = False
+                if event.type == "usage_reserved" and payload.get("job_id") == str(
+                    old.job_id
+                ):
+                    raise RevisionConflict("dispatched role cannot be re-executed")
+            if (
+                old != execution
+                or old.kind not in ("mining", "format_correction")
+                or old.status != "error"
+                or old.termination is not None
+                or old.output_ref is not None
+                or not resumed
+            ):
+                raise RevisionConflict("mining requires explicit undispatched recovery")
+            recovered = old.model_copy(update={"status": "running", "error_code": None})
+            await conn.execute(
+                text("UPDATE experiment_roles SET execution_json=:data WHERE id=:id"),
+                {"id": str(old.role_id), "data": recovered.model_dump_json()},
+            )
+            await self._search_event(
+                conn,
+                run.id,
+                "role_recovered",
+                {
+                    "original_execution": old.model_dump(mode="json"),
+                    "role_id": str(old.role_id),
+                },
+            )
+            await self._search_event(
+                conn,
+                run.id,
+                "role_saved",
+                {"role_id": str(old.role_id), "status": "running"},
+            )
+            return recovered
+
     async def roles(self, round_id: UUID) -> tuple[RoleRecord, ...]:
         async with self.engine.connect() as conn:
             rows = (

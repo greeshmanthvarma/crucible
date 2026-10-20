@@ -221,6 +221,8 @@ class LocalSearchExecution:
             if r.execution.kind in ("mining", "format_correction")
         ]
         execution = mining[-1] if mining else await self.roles.mine(round.id, view)
+        if mining and execution.status == "error":
+            execution = await self.roles.recover_mining(execution, view)
         if execution.status == "invalid" and execution.kind == "mining":
             execution = await self.roles.mine(
                 round.id, view, correction_of=execution.role_id

@@ -8,9 +8,10 @@ from typing import TYPE_CHECKING, Annotated, Literal, Self
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from crucible.improvement.contracts import HarnessSnapshot
+    from crucible.improvement.contracts import ExperimentManifest, HarnessSnapshot
     from crucible.improvement.evidence_views import DevelopmentViewBuilder
     from crucible.improvement.store import ExperimentStore, RoundRecord
+    from crucible.improvement.worker_protocol import RoleJob
     from crucible.improvement.worker_supervisor import WorkerSupervisor
     from crucible.improvement.worktree import OwnedWorktree
 from uuid import UUID
@@ -244,6 +245,116 @@ class RoleRunner:
             },
         )
 
+    @staticmethod
+    def _git_registry(workspace: Path) -> dict[str, list[object]]:
+        from crucible.improvement.source import safe_path
+        from crucible.improvement.worker_supervisor import read_regular_artifact
+
+        registry: dict[str, list[object]] = {}
+        for path in (workspace / ".git").rglob("*"):
+            safe_path(path)
+            if path.is_file():
+                registry[path.relative_to(workspace).as_posix()] = [
+                    0o100755 if path.stat().st_mode & 0o111 else 0o100644,
+                    hashlib.sha256(
+                        read_regular_artifact(path, 2 * 1024 * 1024)
+                    ).hexdigest(),
+                ]
+        return registry
+
+    async def recover_mining(
+        self, execution: RoleExecution, view: DevelopmentView
+    ) -> RoleExecution:
+        """Continue the same undispatched job after explicit lifecycle recovery."""
+        from crucible.improvement.contracts import HarnessSnapshot
+        from crucible.improvement.trials import owned_artifact
+        from crucible.improvement.worker_protocol import RoleJob
+        from crucible.improvement.worker_supervisor import read_regular_artifact
+
+        round = await self.store.round(execution.round_id)
+        directory = self.root / "roles" / str(execution.role_id)
+        workspace = owned_artifact(self.root, execution.input_ref).parent
+        encoded = read_regular_artifact(workspace / "input.json", 1_048_576)
+        if (
+            hashlib.sha256(encoded).hexdigest() != execution.input_digest
+            or json.loads(encoded)["view_index_digest"] != view.index_digest
+        ):
+            raise ValueError("mining recovery identity drift")
+        # A job directory is created before credentials or reservations. Its presence
+        # requires reconciliation, never a second execution of a dispatched role.
+        if (self.root / "jobs" / str(execution.job_id)).exists():
+            raise ValueError("dispatched mining requires execution reconciliation")
+        row = await self.store.snapshot(
+            execution.experiment_id, execution.accepted_snapshot_id
+        )
+        snapshot_path = owned_artifact(self.root, str(row["artifact_ref"]))
+        snapshot = HarnessSnapshot.model_validate_json(
+            read_regular_artifact(snapshot_path, 65536)
+        )
+        run = await self.store.require_search_open(execution.experiment_id)
+        job = self._job(
+            run.manifest,
+            snapshot,
+            round.id,
+            execution.kind,
+            execution.role_id,
+            execution.job_id,
+            execution.input_digest,
+        )
+        job_path = directory / "job.json"
+        if (
+            job_path.exists()
+            and RoleJob.model_validate_json(read_regular_artifact(job_path, 65536))
+            != job
+        ):
+            raise ValueError("mining recovery job drift")
+        from crucible.improvement.source import safe_path, verify_harness_export
+
+        verify_harness_export(snapshot_path.parent / "harness", snapshot)
+        self.views.export_root(view)
+        expected = json.loads(
+            read_regular_artifact(
+                directory / "workspace-original.json", 40 * 1024 * 1024
+            )
+        )
+        actual = {}
+        for path in workspace.rglob("*"):
+            safe_path(path)
+            if path.is_file() and path.relative_to(workspace).parts[0] != ".git":
+                actual[path.relative_to(workspace).as_posix()] = [
+                    0o100755 if path.stat().st_mode & 0o111 else 0o100644,
+                    read_regular_artifact(path, 2 * 1024 * 1024).hex(),
+                ]
+        if actual != expected:
+            raise ValueError("mining recovery workspace drift")
+        git_registry = directory / "mining-git.json"
+        if git_registry.exists():
+            if self._git_registry(workspace) != json.loads(
+                read_regular_artifact(git_registry, 1_048_576)
+            ):
+                raise ValueError("mining recovery Git metadata drift")
+        else:
+            # Historical jobs have no Git checksum registry. Preserve their metadata
+            # privately and replace it with a fresh repository containing no history.
+            from crucible.improvement.source import git_bytes
+
+            safe_path(workspace / ".git")
+            shutil.move(
+                workspace / ".git", directory / ("archived-git-" + str(uuid4()))
+            )
+            git_bytes(workspace, "init", "-q")
+        execution = await self.store.recover_undispatched_role(execution)
+        return await self._execute_role(
+            round,
+            execution,
+            job,
+            snapshot,
+            snapshot_path,
+            workspace,
+            json.loads(encoded),
+            view,
+        )
+
     async def propose(
         self, round_id: UUID, mining_result: MiningResult, view: DevelopmentView
     ) -> RoleExecution:
@@ -292,6 +403,42 @@ class RoleRunner:
             },
         )
 
+    @staticmethod
+    def _job(
+        manifest: "ExperimentManifest",
+        snapshot: "HarnessSnapshot",
+        round_id: UUID,
+        kind: RoleKind,
+        role_id: UUID,
+        job_id: UUID,
+        input_digest: str,
+    ) -> "RoleJob":
+        from crucible.improvement.worker_protocol import RoleJob
+
+        return RoleJob(
+            schema_version=2,
+            protocol_version=2,
+            job_id=job_id,
+            role_id=role_id,
+            round_id=round_id,
+            experiment_id=manifest.experiment_id,
+            job_kind=kind,
+            harness_digest=snapshot.source_digest,
+            export_digest=snapshot.export_digest,
+            model=manifest.model,
+            limits=manifest.role_limits["proposal" if kind == "proposal" else "mining"],
+            input_digest=input_digest,
+            workspace="/workspace",
+            command_image=manifest.worker_image,
+            command_platform=manifest.worker_platform,
+            output_limit_bytes=min(
+                manifest.command_policy.max_output_bytes_per_call, 8 * 1024 * 1024
+            ),
+            wall_deadline_seconds=manifest.role_limits[
+                "proposal" if kind == "proposal" else "mining"
+            ].wall_timeout_seconds,
+        )
+
     async def _run(
         self,
         round: "RoundRecord",
@@ -302,7 +449,6 @@ class RoleRunner:
         from crucible.improvement.contracts import HarnessSnapshot
         from crucible.improvement.source import git_bytes, verify_harness_export
         from crucible.improvement.trials import owned_artifact
-        from crucible.improvement.worker_protocol import RoleJob
         from crucible.improvement.worker_supervisor import read_regular_artifact
         from crucible.repair.identity import canonical_json
 
@@ -345,30 +491,14 @@ class RoleRunner:
         if len(encoded) > 1_048_576:
             raise ValueError("role input exceeds cap")
         (workspace / "input.json").write_bytes(encoded)
-        job = RoleJob(
-            schema_version=2,
-            protocol_version=2,
-            job_id=uuid4(),
-            role_id=role_id,
-            round_id=round.id,
-            experiment_id=run.id,
-            job_kind=kind,
-            harness_digest=snapshot.source_digest,
-            export_digest=snapshot.export_digest,
-            model=run.manifest.model,
-            limits=run.manifest.role_limits[
-                "proposal" if kind == "proposal" else "mining"
-            ],
-            input_digest=hashlib.sha256(encoded).hexdigest(),
-            workspace="/workspace",
-            command_image=run.manifest.worker_image,
-            command_platform=run.manifest.worker_platform,
-            output_limit_bytes=min(
-                run.manifest.command_policy.max_output_bytes_per_call, 8 * 1024 * 1024
-            ),
-            wall_deadline_seconds=run.manifest.role_limits[
-                "proposal" if kind == "proposal" else "mining"
-            ].wall_timeout_seconds,
+        job = self._job(
+            run.manifest,
+            snapshot,
+            round.id,
+            kind,
+            role_id,
+            uuid4(),
+            hashlib.sha256(encoded).hexdigest(),
         )
         # This private checksum registry is outside the role-readable workspace.
         original_files = {}
@@ -397,6 +527,10 @@ class RoleRunner:
             "-qm",
             "Role input",
         )
+        if kind != "proposal":
+            (directory / "mining-git.json").write_bytes(
+                canonical_json(self._git_registry(workspace))
+            )
         execution = RoleExecution(
             role_id=role_id,
             job_id=job.job_id,
@@ -417,6 +551,30 @@ class RoleRunner:
             "role_usage_group",
             {"usage_ref": str(role_id), "job_id": str(job.job_id)},
         )
+        (directory / "job.json").write_text(job.model_dump_json())
+        return await self._execute_role(
+            round, execution, job, snapshot, snapshot_path, workspace, role_input, view
+        )
+
+    async def _execute_role(
+        self,
+        round: "RoundRecord",
+        execution: RoleExecution,
+        job: "RoleJob",
+        snapshot: "HarnessSnapshot",
+        snapshot_path: Path,
+        workspace: Path,
+        role_input: dict[str, object],
+        view: DevelopmentView,
+    ) -> RoleExecution:
+        from crucible.improvement.trials import owned_artifact
+        from crucible.improvement.worker_supervisor import read_regular_artifact
+        from crucible.repair.identity import canonical_json
+
+        run = await self.store.get(execution.experiment_id)
+        directory = self.root / "roles" / str(execution.role_id)
+        kind = execution.kind
+        attempt = 1 if kind == "format_correction" else 0
         try:
             if self.supervisor is None:
                 raise ValueError("role supervisor unavailable")
@@ -428,9 +586,6 @@ class RoleRunner:
             )
             if not result.cleanup_confirmed:
                 raise ValueError("role cleanup uncertain")
-            execution = execution.model_copy(
-                update={"termination": result.observation.termination}
-            )
             execution = execution.model_copy(
                 update={"termination": result.observation.termination}
             )

@@ -347,3 +347,143 @@ async def test_interrupted_proposal_file_replacement_is_recoverable(
         assert target.read_bytes() == b"before"
     finally:
         await store.close()
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        None,
+        "legacy",
+        "source",
+        "nested_git",
+        "extra",
+        "git",
+        "job_kind",
+        "usage",
+        "dispatched",
+        "provider",
+    ],
+)
+async def test_predispatch_mining_failure_recovers_original_identity(
+    evidence_setup, tmp_path, drift
+):
+    from crucible.improvement.evidence_views import DevelopmentViewBuilder
+    from crucible.improvement.roles import RoleRunner
+    from crucible.improvement.worker_protocol import (
+        IsolatedRoleExecution,
+        RoleObservation,
+    )
+    from crucible.repair.gateway import TrustedUsage
+
+    store, root, run, snapshot, _ = evidence_setup
+    round = await store.begin_round(run.id, snapshot.snapshot_id, run.revision)
+    views = DevelopmentViewBuilder(store, root)
+    view = await views.build_development_view(
+        run.id, snapshot.snapshot_id, tmp_path / "view"
+    )
+    jobs = []
+
+    class Supervisor:
+        async def execute(self, job, accepted, workspace, *, harness_export):
+            jobs.append(job)
+            if len(jobs) == 1 and drift != "provider":
+                raise OSError("image inspection unavailable before dispatch")
+            state = tmp_path / "result"
+            state.mkdir()
+            (state / "assistant.txt").write_text(
+                '{"schema_version":1,"disposition":"no_actionable_weakness",'
+                '"weaknesses":[],"summary":"No action"}'
+            )
+            (state / "trace.json").write_text("[]")
+            observation = RoleObservation(
+                schema_version=2,
+                job_id=job.job_id,
+                role_id=job.role_id,
+                round_id=job.round_id,
+                experiment_id=job.experiment_id,
+                export_digest=job.export_digest,
+                termination="provider_error" if drift == "provider" else "completed",
+                assistant_output_ref="assistant.txt",
+                trace_ref="trace.json",
+                detail_code=None,
+            )
+            return IsolatedRoleExecution(
+                observation, workspace, state, TrustedUsage(), (), True, 1.0
+            )
+
+    runner = RoleRunner(store, root, Supervisor(), views)
+    failed = await runner.mine(round.id, view)
+    with pytest.raises(ValueError):
+        await runner.recover_mining(failed, view)
+    directory = root / "roles" / str(failed.role_id)
+    if drift == "legacy":
+        (directory / "job.json").unlink()
+        (directory / "mining-git.json").unlink()
+        (directory / "workspace" / ".git" / "private-canary").write_text(
+            "private history"
+        )
+    elif drift == "source":
+        source = next((directory / "workspace" / "source").rglob("*.py"))
+        source.write_text("# unexpected edit")
+    elif drift == "nested_git":
+        nested = directory / "workspace" / "source" / ".git"
+        nested.mkdir()
+        (nested / "private-canary").write_text("private history")
+    elif drift == "git":
+        (directory / "workspace" / ".git" / "private-canary").write_text(
+            "private history"
+        )
+    elif drift == "extra":
+        (directory / "workspace" / "extra.txt").write_text("canary")
+    elif drift == "job_kind":
+        import json
+
+        path = directory / "job.json"
+        payload = json.loads(path.read_bytes())
+        payload["job_kind"] = "proposal"
+        path.write_text(json.dumps(payload))
+    elif drift == "dispatched":
+        (root / "jobs" / str(failed.job_id)).mkdir(parents=True)
+    record = await store.request_stop(run.id)
+    owner = await store.claim_recovery(run.id, record.revision, None, 123, None)
+    await store.recover_ready(run.id, owner)
+    if drift == "usage":
+        from crucible.improvement.contracts import UsageAmounts
+
+        reservation = await store.reserve_usage(
+            run.id, None, UsageAmounts(tokens=1), kind="model", job_id=failed.job_id
+        )
+        await store.settle_usage(reservation, UsageAmounts(tokens=1))
+    if drift and drift != "legacy":
+        with pytest.raises(ValueError):
+            await runner.recover_mining(failed, view)
+        assert len(jobs) == 1
+        assert (await store.roles(round.id))[0].execution == failed
+        return
+    from types import SimpleNamespace
+
+    from crucible.improvement.search import LocalSearchExecution
+
+    local = LocalSearchExecution(
+        store,
+        SimpleNamespace(root=root),
+        tmp_path,
+        runner,
+        None,
+        views,
+        None,
+        None,
+        None,
+        tmp_path / "recovered-view",
+    )
+    mining = await local.mine(round)
+    assert mining.disposition == "no_actionable_weakness"
+    result = (await store.roles(round.id))[0].execution
+    assert result.status == "complete"
+    assert result.role_id == failed.role_id
+    assert jobs[0] == jobs[1]
+    assert len(await store.roles(round.id)) == 1
+    assert (await store.round(round.id)).mining_attempts == 1
+    if drift == "legacy":
+        assert not (directory / "workspace" / ".git" / "private-canary").exists()
+        assert list(directory.glob("archived-git-*/private-canary"))

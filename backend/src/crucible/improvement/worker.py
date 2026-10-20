@@ -28,8 +28,8 @@ from crucible.improvement.worker_protocol import (
     WorkerObservation,
     read_worker_job,
 )
+from crucible.improvement.worker_trace import export_solver_trace
 from crucible.repair.gateway import WorkerCredential
-from crucible.repair.identity import canonical_json
 from crucible.storage.database import Database
 from crucible.storage.models import metadata
 
@@ -137,7 +137,9 @@ async def main() -> None:
             await engine.execute(run_id)
         async with uow_factory() as uow:
             terminal = await uow.runs.get(run_id)
-            messages = await uow.messages.list_for_task(task_id)
+            trace = await export_solver_trace(
+                uow, task_id, run_id, job.output_limit_bytes, token
+            )
         termination = "infrastructure_error"
         if terminal and terminal.status == RunStatus.COMPLETED:
             termination = "completed"
@@ -150,9 +152,6 @@ async def main() -> None:
             termination = "behavior_error"
         if provider_failed:
             termination = "provider_error"
-        trace = canonical_json(messages)
-        if len(trace) > job.output_limit_bytes:
-            raise ValueError("worker trace exceeds cap")
         Path("/state/trace.json").write_bytes(trace)
         Path("/state/usage.json").write_bytes(b'{"authority":"host-broker"}')
         observation = WorkerObservation.model_validate(
