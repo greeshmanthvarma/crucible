@@ -8,7 +8,7 @@ from pydantic import Field
 
 from crucible.benchmarks.admission import validate_admission
 from crucible.benchmarks.manifests import case_digest, load_case
-from crucible.improvement.contracts import Contract, ExperimentManifest
+from crucible.improvement.contracts import Contract, ExecutionPolicy, ExperimentManifest
 
 
 class ManifestDrift(ValueError):
@@ -41,7 +41,7 @@ def read_bounded(path: Path, maximum: int = 1_048_576) -> bytes:
     return data
 
 
-def manifest_digest(manifest: ExperimentManifest) -> str:
+def manifest_digest(manifest: ExecutionPolicy) -> str:
     data = manifest.model_dump(mode="json")
     # Operator path spelling is not semantic identity; evaluator content is pinned.
     for name in ("driver_python", "driver_source"):

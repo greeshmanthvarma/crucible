@@ -14,12 +14,12 @@ from crucible.domain.clock import SystemClock
 from crucible.domain.commands import CommandSpec
 from crucible.improvement.broker import ImprovementBroker, WorkspaceBinding
 from crucible.improvement.contracts import (
-    ExperimentManifest,
+    ExecutionManifest,
     HarnessSnapshot,
     UsageAmounts,
 )
 from crucible.improvement.source import _digest, safe_path
-from crucible.improvement.store import ExperimentStore
+from crucible.improvement.store import ExecutionStore
 from crucible.improvement.worker_protocol import (
     IsolatedExecution,
     IsolatedRoleExecution,
@@ -161,7 +161,7 @@ def mount(path: Path, target: str, readonly: bool = False) -> tuple[str, str]:
 
 def worker_container_arguments(
     job: WorkerRequest,
-    manifest: ExperimentManifest,
+    manifest: ExecutionManifest,
     *,
     network: str,
     harness: Path,
@@ -229,7 +229,7 @@ async def verify_stopped(docker: DockerPort, identity: str, job: WorkerRequest) 
 
 
 class DockerCommands:
-    def __init__(self, store: ExperimentStore, docker: DockerPort) -> None:
+    def __init__(self, store: ExecutionStore, docker: DockerPort) -> None:
         self.store, self.docker = store, docker
         self.active: dict[UUID, list[tuple[UUID, str, WorkerRequest]]] = {}
 
@@ -335,11 +335,11 @@ class DockerCommands:
 class WorkerSupervisor:
     def __init__(
         self,
-        store: ExperimentStore,
+        store: ExecutionStore,
         broker: ImprovementBroker,
         docker: DockerPort,
         root: Path,
-        manifest: ExperimentManifest,
+        manifest: ExecutionManifest,
         broker_origin: str,
     ) -> None:
         self.store, self.broker, self.docker = store, broker, docker

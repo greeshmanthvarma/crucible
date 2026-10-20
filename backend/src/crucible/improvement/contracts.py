@@ -69,7 +69,9 @@ class UsageAmounts(Contract):
     worker_wall_seconds: Nonnegative = 0
 
 
-class ExperimentManifest(Contract):
+class ExecutionPolicy(Contract):
+    """Authority required by a worker; does not admit a measured experiment."""
+
     schema_version: Literal[1, 2]
     worker_protocol_version: Literal[2] | None = Field(
         default=None, exclude_if=lambda value: value is None
@@ -82,18 +84,42 @@ class ExperimentManifest(Contract):
     worker_image: Image
     worker_platform: Platform
     relay_image: Image
-    cases: Annotated[tuple[FrozenCaseRef, ...], Field(min_length=3, max_length=4096)]
     grader: GraderConfig
     model: ModelSettings
     trial_limits: TrialLimits
+    command_policy: ExperimentCommandPolicy
+    budget: ExperimentBudget
+    network_policy: Literal["broker-only"]
+
+
+class CalibrationManifest(ExecutionPolicy):
+    kind: Literal["isolated-calibration"]
+    schema_version: Literal[1]
+    worker_protocol_version: Literal[2]
+    authorization: Literal["one-isolated-calibration"]
+    approval_mode: Literal["interactive"]
+    case_manifest: Path
+    admission_record: Path
+    case_digest: Sha256
+    admission_digest: Sha256
+    trial_id: UUID
+
+    @model_validator(mode="after")
+    def interactive_only(self) -> Self:
+        if self.command_policy.mode != "interactive":
+            raise ValueError("calibration requires interactive commands")
+        if self.model.output_reserve >= self.model.input_limit:
+            raise ValueError("invalid context limits")
+        return self
+
+
+class ExperimentManifest(ExecutionPolicy):
+    cases: Annotated[tuple[FrozenCaseRef, ...], Field(min_length=3, max_length=4096)]
     role_limits: dict[Literal["mining", "proposal"], TrialLimits]
     repeat_count: Literal[3]
     max_rounds: Literal[3]
     editable_paths: tuple[str, ...]
     boundary_suite_digest: Sha256
-    command_policy: ExperimentCommandPolicy
-    budget: ExperimentBudget
-    network_policy: Literal["broker-only"]
     scoring_version: Literal["per-case-count-v1"]
     disposable_commands_authorized: bool = False
 
@@ -129,6 +155,9 @@ class ExperimentManifest(Contract):
         return self.baseline_trial_count * 4 + 6 * sum(
             c.split == "final-test" for c in self.cases
         )
+
+
+ExecutionManifest = ExperimentManifest | CalibrationManifest
 
 
 class ExperimentPaths(Contract):

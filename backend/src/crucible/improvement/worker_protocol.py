@@ -14,7 +14,13 @@ from crucible.benchmarks.contracts import (
     Sha256,
     TrialLimits,
 )
-from crucible.improvement.contracts import Contract, ExperimentManifest, Image, Positive
+from crucible.improvement.contracts import (
+    Contract,
+    ExecutionManifest,
+    ExperimentManifest,
+    Image,
+    Positive,
+)
 from crucible.repair.gateway import TrustedUsage
 from crucible.sandbox.protocol import SandboxOutcome
 
@@ -96,11 +102,13 @@ def read_worker_job(raw: bytes) -> WorkerRequest:
     )
 
 
-def validate_job_manifest(job: WorkerRequest, manifest: ExperimentManifest) -> None:
+def validate_job_manifest(job: WorkerRequest, manifest: ExecutionManifest) -> None:
+    if isinstance(job, RoleJob) and not isinstance(manifest, ExperimentManifest):
+        raise ValueError("roles require an experiment manifest")
     limits = (
         manifest.trial_limits
         if isinstance(job, WorkerJob)
-        else manifest.role_limits[
+        else _role_limits(manifest)[
             "proposal" if job.job_kind == "proposal" else "mining"
         ]
     )
@@ -124,12 +132,16 @@ def validate_job_manifest(job: WorkerRequest, manifest: ExperimentManifest) -> N
         raise ValueError("job exceeds frozen output or wall limits")
 
 
-def job_environment(
-    job: WorkerRequest, manifest: ExperimentManifest
-) -> tuple[str, str]:
+def job_environment(job: WorkerRequest, manifest: ExecutionManifest) -> tuple[str, str]:
     if isinstance(job, WorkerJob):
         return job.solver_case.image, job.solver_case.platform
     return manifest.worker_image, manifest.worker_platform
+
+
+def _role_limits(manifest: ExecutionManifest) -> dict[str, TrialLimits]:
+    if not isinstance(manifest, ExperimentManifest):
+        raise ValueError("roles require an experiment manifest")
+    return {key: value for key, value in manifest.role_limits.items()}
 
 
 class WorkerObservation(Contract):

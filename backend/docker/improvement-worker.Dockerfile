@@ -4,6 +4,7 @@ ARG PYTHON_IMAGE
 ARG UV_IMAGE
 FROM ${UV_IMAGE} AS uv
 FROM ${PYTHON_IMAGE}
+USER root
 COPY --from=uv /uv /usr/local/bin/uv
 WORKDIR /opt/runtime
 COPY pyproject.toml uv.lock ./

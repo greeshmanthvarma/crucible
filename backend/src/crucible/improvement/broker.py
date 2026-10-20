@@ -23,8 +23,8 @@ from crucible.engine.gateway import (
     ModelUsage,
     PreparedModelRequest,
 )
-from crucible.improvement.contracts import ExperimentManifest, UsageAmounts
-from crucible.improvement.store import ExperimentStore, QuotaExhausted
+from crucible.improvement.contracts import ExecutionManifest, UsageAmounts
+from crucible.improvement.store import ExecutionStore, QuotaExhausted
 from crucible.improvement.worker_protocol import (
     CommandRecord,
     RoleJob,
@@ -62,7 +62,7 @@ class CommandExecutor(Protocol):
 @dataclass
 class JobSession:
     job: WorkerRequest
-    manifest: ExperimentManifest
+    manifest: ExecutionManifest
     binding: WorkspaceBinding
     token_hash: str = field(repr=False)
     revoked: bool = False
@@ -84,7 +84,7 @@ Approval = Callable[[WorkerRequest, CommandSpec], Awaitable[bool]]
 class ImprovementBroker:
     def __init__(
         self,
-        store: ExperimentStore,
+        store: ExecutionStore,
         gateway: ScopedModelGateway | None,
         commands: CommandExecutor | None,
         approval: Approval | None = None,
@@ -101,7 +101,7 @@ class ImprovementBroker:
     def issue(
         self,
         job: WorkerRequest,
-        manifest: ExperimentManifest,
+        manifest: ExecutionManifest,
         workspace_binding: WorkspaceBinding,
     ) -> WorkerCredential:
         if (workspace_binding.image, workspace_binding.platform) != job_environment(

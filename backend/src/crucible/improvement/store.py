@@ -4,14 +4,17 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncIterator, Literal
+from typing import TYPE_CHECKING, AsyncIterator, Generic, Literal, Self, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+from typing_extensions import TypeVar
 
 from crucible.improvement.contracts import (
+    CalibrationManifest,
+    ExecutionPolicy,
     ExperimentManifest,
     HarnessSnapshot,
     UsageAmounts,
@@ -51,10 +54,13 @@ class RevisionConflict(ValueError):
     pass
 
 
+Policy = TypeVar("Policy", bound=ExecutionPolicy, default=ExperimentManifest)
+
+
 @dataclass(frozen=True)
-class ExperimentRecord:
+class ExperimentRecord(Generic[Policy]):
     id: UUID
-    manifest: ExperimentManifest
+    manifest: Policy
     manifest_hash: str
     initial_commit: str
     last_accepted_commit: str
@@ -202,12 +208,14 @@ REFERENCES experiment_runs(id))""",
 )
 
 
-class ExperimentStore:
+class ExperimentStore(Generic[Policy]):
+    manifest_type: type[ExecutionPolicy] = ExperimentManifest
+
     def __init__(self, engine: AsyncEngine) -> None:
         self.engine = engine
 
     @classmethod
-    async def open(cls, path: Path) -> "ExperimentStore":
+    async def open(cls, path: Path) -> Self:
         if not path.is_absolute() or any(p.is_symlink() for p in (path, *path.parents)):
             raise ValueError("invalid controller database path")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,7 +268,7 @@ class ExperimentStore:
     async def close(self) -> None:
         await self.engine.dispose()
 
-    async def _get(self, conn: AsyncConnection, id: UUID) -> ExperimentRecord:
+    async def _get(self, conn: AsyncConnection, id: UUID) -> ExperimentRecord[Policy]:
         row = (
             (
                 await conn.execute(
@@ -272,7 +280,7 @@ class ExperimentStore:
         )
         return ExperimentRecord(
             UUID(row["id"]),
-            ExperimentManifest.model_validate_json(row["manifest_json"]),
+            cast(Policy, self.manifest_type.model_validate_json(row["manifest_json"])),
             row["manifest_hash"],
             row["initial_commit"],
             row["last_accepted_commit"],
@@ -282,7 +290,7 @@ class ExperimentStore:
             bool(row["stop_requested"]),
         )
 
-    async def get(self, id: UUID) -> ExperimentRecord:
+    async def get(self, id: UUID) -> ExperimentRecord[Policy]:
         async with self.engine.connect() as conn:
             return await self._get(conn, id)
 
@@ -301,14 +309,16 @@ experiment_events WHERE experiment=:id"""),
 
     async def create(
         self,
-        manifest: ExperimentManifest,
+        manifest: Policy,
         repository_identity: str,
         idempotency_key: str,
-    ) -> ExperimentRecord:
+    ) -> ExperimentRecord[Policy]:
         if not repository_identity or not idempotency_key or len(idempotency_key) > 200:
             raise ValueError("explicit repository and idempotency identities required")
         # Revalidate: model_copy is deliberately not a validation boundary.
-        manifest = ExperimentManifest.model_validate_json(manifest.model_dump_json())
+        manifest = cast(
+            Policy, self.manifest_type.model_validate_json(manifest.model_dump_json())
+        )
         hashed = manifest_digest(manifest)
         async with self._transaction() as conn:
             previous = (
@@ -387,7 +397,7 @@ VALUES
 
     async def transition(
         self, id: UUID, expected_revision: int, status: Status, stage: Stage, event: str
-    ) -> ExperimentRecord:
+    ) -> ExperimentRecord[Policy]:
         if status not in (
             "ready",
             "running",
@@ -576,7 +586,7 @@ revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
                 {"reservation_id": str(reservation_id), "uncertain": exceeded},
             )
 
-    async def request_stop(self, id: UUID) -> ExperimentRecord:
+    async def request_stop(self, id: UUID) -> ExperimentRecord[Policy]:
         async with self._transaction() as conn:
             record = await self._get(conn, id)
             if record.status != "closed":
@@ -766,6 +776,8 @@ VALUES
             record = await self._get(conn, id)
             if record.stop_requested or record.status not in ("ready", "running"):
                 raise RevisionConflict("experiment not ready for trial")
+            if not isinstance(record.manifest, ExperimentManifest):
+                raise ValueError("measured trials require an experiment manifest")
             if final_authorization is not None:
                 await self._authorize_final(
                     conn, id, snapshot_id, case_id, repeat_index, final_authorization
@@ -1330,6 +1342,8 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
         self, conn: AsyncConnection, id: UUID, revision: int
     ) -> ExperimentRecord:
         record = await self._get(conn, id)
+        if not isinstance(record.manifest, ExperimentManifest):
+            raise ValueError("search requires an experiment manifest")
         sealed = (
             await conn.execute(
                 text(
@@ -1348,7 +1362,7 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
             or sealed
         ):
             raise RevisionConflict("stale, stopped or sealed search")
-        return record
+        return cast(ExperimentRecord, record)
 
     async def _search_event(
         self, conn: AsyncConnection, id: UUID, event: str, payload: dict[str, object]
@@ -1971,7 +1985,7 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
         return await self.promotion(id)
 
     async def _accepted_snapshot_id(
-        self, conn: AsyncConnection, run: ExperimentRecord
+        self, conn: AsyncConnection, run: ExperimentRecord[Policy] | ExperimentRecord
     ) -> UUID:
         promoted = (
             await conn.execute(
@@ -2273,6 +2287,8 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
         from dataclasses import asdict
 
         run = await self._get(conn, id)
+        if not isinstance(run.manifest, ExperimentManifest):
+            raise ValueError("final evaluation requires an experiment manifest")
         row = (
             (
                 await conn.execute(
@@ -2447,3 +2463,16 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 "publication_checkpoint",
                 {"status": record.status, "error": record.last_error},
             )
+
+
+class CalibrationStore(ExperimentStore[CalibrationManifest]):
+    """Separate calibration database using the same quota/effect transactions.
+
+    Default experiment stores cannot decode these records. Search and measured
+    trial admission explicitly require ExperimentManifest and reject this kind.
+    """
+
+    manifest_type = CalibrationManifest
+
+
+ExecutionStore = ExperimentStore | CalibrationStore
