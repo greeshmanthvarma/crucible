@@ -8,7 +8,6 @@ from crucible.context.manager import (
     CodingBehaviorInvalid,
     ContextLimitExceeded,
     ContextManager,
-    SimpleTokenEstimator,
 )
 from crucible.domain.clock import Clock
 from crucible.domain.conversation import (
@@ -46,6 +45,7 @@ from crucible.engine.journal import (
     message_completed_mutation,
     terminal_run_mutation,
 )
+from crucible.models.token_counting import LocalTokenEstimator
 from crucible.tools.dispatcher import DispatchContext, ToolDispatcher
 from crucible.tools.registry import default_registry
 
@@ -91,7 +91,7 @@ class RunEngine:
         self._context_manager = context_manager or ContextManager(
             unit_of_work,
             clock,
-            SimpleTokenEstimator(),
+            LocalTokenEstimator(tools=registry.definitions),
             harness_policy="Follow harness safety and execution policy.",
             tool_contract="Use only the structured tools supplied by the harness.",
             model="fake",

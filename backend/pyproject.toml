@@ -9,6 +9,7 @@ dependencies = [
     "fastapi",
     "litellm==1.102.0",
     "sqlalchemy>=2.0.54",
+    "tiktoken==0.14.0",
     "uuid6>=2025.0.1",
     "uvicorn[standard]",
 ]

@@ -406,7 +406,10 @@ class ContextManager:
             run_id=run.id,
             step_id=step.id,
             model=self._model,
-            parameters={"max_output_tokens": self._max_output_tokens},
+            parameters={
+                "max_output_tokens": self._max_output_tokens,
+                "estimator_version": getattr(self._estimator, "version", "custom"),
+            },
             input_limit=self._input_limit,
             output_reserve=self._output_reserve,
             threshold=self._threshold,

@@ -68,6 +68,21 @@ make install
 make check
 ```
 
+Token counting is local: production context checks and host budget reservations
+share a pinned `tiktoken` `o200k_base` policy over the complete Responses payload
+(messages, tool calls/results, and schemas), with 20% plus framing headroom.
+This is an estimate, not an exact or universal model tokenizer mapping;
+provider-reported usage remains authoritative and reservation overruns fail closed.
+`make install` downloads the hash-pinned vocabulary once to
+`~/.cache/crucible/tiktoken`. Set `TIKTOKEN_CACHE_DIR` before installation and
+startup to override this persistent location. For manual backend setup, run
+`uv run python -m crucible.models.token_counting --prepare` after `uv sync`.
+Runtime refuses missing/corrupt vocabulary rather than downloading it or falling
+back to character counts. Both worker Dockerfiles prepare a read-only-accessible
+cache at image-build time; existing images must be rebuilt and readmitted.
+The older character estimator remains only for historical repair evidence replay
+and explicitly injected test fixtures, not production dispatch.
+
 `make check` runs lint, types, tests, migration round-trip, OpenAPI drift check,
 and the production frontend build. Optional smokes:
 

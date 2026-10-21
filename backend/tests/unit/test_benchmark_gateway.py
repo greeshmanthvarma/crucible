@@ -11,6 +11,7 @@ from crucible.engine.gateway import (
     PreparedModelRequest,
 )
 from crucible.engine.run_engine import RunBudgetExceeded
+from crucible.models.token_counting import estimate_input_tokens
 
 
 async def test_all_model_requests_share_one_token_ledger() -> None:
@@ -26,7 +27,9 @@ async def test_all_model_requests_share_one_token_ledger() -> None:
     limits = TrialLimits(
         max_steps=10,
         max_tool_calls=10,
-        max_model_tokens=50,
+        # Admit two calls after settling the first one's 20 actual tokens,
+        # but not a third. Include the full local input reservation.
+        max_model_tokens=20 + estimate_input_tokens((), ()) + 20,
         max_active_seconds=30,
         wall_timeout_seconds=30,
     )

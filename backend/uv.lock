@@ -305,6 +305,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "litellm" },
     { name = "sqlalchemy" },
+    { name = "tiktoken" },
     { name = "uuid6" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -326,6 +327,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "litellm", specifier = "==1.102.0" },
     { name = "sqlalchemy", specifier = ">=2.0.54" },
+    { name = "tiktoken", specifier = "==0.14.0" },
     { name = "uuid6", specifier = ">=2025.0.1" },
     { name = "uvicorn", extras = ["standard"] },
 ]

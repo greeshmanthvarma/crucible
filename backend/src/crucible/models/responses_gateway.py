@@ -10,8 +10,6 @@ from crucible.domain.ids import new_id
 from crucible.engine.gateway import (
     CompleteToolCall,
     ModelError,
-    ModelMessage,
-    ModelRole,
     ModelStop,
     ModelStopReason,
     ModelStreamItem,
@@ -20,6 +18,8 @@ from crucible.engine.gateway import (
     ReasoningDelta,
     TextDelta,
 )
+from crucible.models.request_payload import response_items as _items
+from crucible.models.request_payload import response_tool as _tool
 
 ResponseFunction = Callable[..., Awaitable[object]]
 
@@ -128,50 +128,6 @@ async def _safe_events(
             yield event
     except Exception as error:
         yield ModelError("provider_stream_failed", str(error)[:1000])
-
-
-def _items(message: ModelMessage) -> list[dict[str, object]]:
-    text = "".join(
-        part.text_content or "" for part in message.parts if part.kind == "text"
-    )
-    items: list[dict[str, object]] = []
-    if message.role is ModelRole.TOOL:
-        for part in message.parts:
-            if part.kind == "tool_result":
-                items.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": part.provider_correlation_id
-                        or str(part.tool_call_id),
-                        "output": part.text_content or "",
-                    }
-                )
-        return items
-    if text:
-        items.append({"role": message.role.value, "content": text})
-    for part in message.parts:
-        if part.kind == "tool_call":
-            items.append(
-                {
-                    "type": "function_call",
-                    "call_id": part.provider_correlation_id or str(part.tool_call_id),
-                    "name": part.tool_name or "",
-                    "arguments": json.dumps(
-                        dict(part.arguments or {}), separators=(",", ":")
-                    ),
-                }
-            )
-    return items
-
-
-def _tool(tool: object) -> dict[str, object]:
-    return {
-        "type": "function",
-        "name": getattr(tool, "name"),
-        "description": getattr(tool, "description"),
-        "parameters": dict(getattr(tool, "input_schema")),
-        "strict": False,
-    }
 
 
 def _mapping(value: object) -> dict[str, Any]:

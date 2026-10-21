@@ -11,11 +11,11 @@ from uuid import UUID
 
 from crucible.application.artifact_service import ArtifactService
 from crucible.application.ports import UnitOfWork
-from crucible.context.invariants import SimpleTokenEstimator
 from crucible.domain.clock import Clock
 from crucible.domain.evals import EvalBudgets
 from crucible.domain.repair import RepairRun
 from crucible.evals.manifests import EvalPartition, EvalSuiteDefinition, load_case
+from crucible.models.token_counting import LocalTokenEstimator
 from crucible.repair.cases import ApprovedCase, relative_path
 from crucible.repair.controller import RepairInfrastructureError, TrialBatch
 from crucible.repair.fingerprints import (
@@ -191,7 +191,7 @@ class RepairEvaluation:
                 lock_digest=self.runtime.lock_digest,
                 image_digest=self.image,
                 verifier_version=VERIFIER_VERSION,
-                estimator_version=SimpleTokenEstimator.version,
+                estimator_version=LocalTokenEstimator.version,
                 adapter_version="repair-worker-v1",
                 resource_policy={
                     "network": "scoped-model-relay",

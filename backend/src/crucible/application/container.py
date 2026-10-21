@@ -25,7 +25,7 @@ from crucible.application.sandbox_reconciliation import SandboxReconciler
 from crucible.application.task_service import TaskService
 from crucible.artifacts.store import LocalArtifactStore
 from crucible.context.compaction import CompactionLifecycle
-from crucible.context.manager import ContextManager, SimpleTokenEstimator
+from crucible.context.manager import ContextManager
 from crucible.domain.clock import SystemClock
 from crucible.domain.evals import EvalBudgets
 from crucible.engine.approval_broker import InMemoryApprovalBroker
@@ -37,6 +37,7 @@ from crucible.engine.notifier import TaskEventNotifier
 from crucible.engine.run_engine import RunEngine
 from crucible.engine.supervisor import LocalRunSupervisor
 from crucible.models.responses_gateway import LiteLLMResponsesGateway
+from crucible.models.token_counting import LocalTokenEstimator
 from crucible.repair.admission import (
     LocalRepairAdmissionGit,
     LocalRepairAdmissionGitHub,
@@ -221,7 +222,7 @@ class ApplicationContainer:
         context_manager = ContextManager(
             unit_of_work,
             clock,
-            SimpleTokenEstimator(),
+            LocalTokenEstimator(tools=registry.definitions),
             harness_policy=str(
                 worker_job.settings.get(
                     "harness_policy", "Follow harness safety and execution policy."
@@ -347,7 +348,7 @@ class ApplicationContainer:
             role_context = ContextManager(
                 unit_of_work,
                 clock,
-                SimpleTokenEstimator(),
+                LocalTokenEstimator(tools=role_registry.definitions),
                 harness_policy="Follow harness safety and execution policy.",
                 tool_contract="Use only the structured tools supplied by the harness.",
                 model=model,

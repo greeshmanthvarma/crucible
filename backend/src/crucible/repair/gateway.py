@@ -21,6 +21,7 @@ from crucible.engine.gateway import (
     ReasoningDelta,
     TextDelta,
 )
+from crucible.models.token_counting import estimate_input_tokens
 from crucible.repair.identity import canonical_json
 
 
@@ -136,19 +137,7 @@ class ScopedModelGateway:
             session = self._authorize(token, job_id)
             if session.model != request.model:
                 raise GatewayDenied(403, "Worker model is outside its scope")
-            # Character estimate includes instructions, calls, and tool schemas.
-            estimate = max(
-                1,
-                (
-                    len(
-                        canonical_json(
-                            {"messages": request.messages, "tools": request.tools}
-                        )
-                    )
-                    + 3
-                )
-                // 4,
-            )
+            estimate = estimate_input_tokens(request.messages, request.tools)
             reserved = estimate + request.max_output_tokens
             if (
                 session.requests >= session.max_requests

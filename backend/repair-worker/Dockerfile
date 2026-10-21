@@ -14,6 +14,9 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
 COPY backend/pyproject.toml backend/uv.lock /build/
 RUN uv sync --project /build --frozen --no-dev --no-install-project \
     && rm -rf /root/.cache /build /usr/local/bin/uv
+ENV TIKTOKEN_CACHE_DIR=/opt/tokenizer-cache
+RUN /opt/venv/bin/python -c "import tiktoken; tiktoken.get_encoding('o200k_base')" \
+    && chmod -R a+rX /opt/tokenizer-cache
 USER 65532:65532
 WORKDIR /workspace
 ENTRYPOINT []

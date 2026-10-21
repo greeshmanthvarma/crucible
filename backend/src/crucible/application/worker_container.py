@@ -10,7 +10,7 @@ from crucible.application.command_authority import CommandAuthority
 from crucible.application.ports import UnitOfWork
 from crucible.artifacts.store import LocalArtifactStore
 from crucible.context.compaction import CompactionLifecycle
-from crucible.context.manager import ContextManager, SimpleTokenEstimator
+from crucible.context.manager import ContextManager
 from crucible.domain.clock import SystemClock
 from crucible.engine.approval_broker import InMemoryApprovalBroker
 from crucible.engine.compaction_gateway import ModelCompactionGateway
@@ -23,6 +23,7 @@ from crucible.improvement.worker_commands import (
     WorkerResources,
 )
 from crucible.improvement.worker_protocol import RoleJob, WorkerRequest
+from crucible.models.token_counting import LocalTokenEstimator
 from crucible.sandbox.resources import TaskResourceManager
 from crucible.storage.database import Database
 from crucible.storage.unit_of_work import SqlAlchemyUnitOfWork
@@ -71,7 +72,7 @@ def create_worker_engine(
     context = ContextManager(
         uow,
         clock,
-        SimpleTokenEstimator(),
+        LocalTokenEstimator(tools=registry.definitions),
         harness_policy="Follow harness safety and execution policy.",
         tool_contract="Use only the structured tools supplied by the harness.",
         model=job.model.model_id,

@@ -2,6 +2,7 @@
 
 install:
 	cd backend && uv sync --frozen
+	cd backend && uv run python -m crucible.models.token_counting --prepare
 	cd frontend && pnpm install --frozen-lockfile
 
 format:
