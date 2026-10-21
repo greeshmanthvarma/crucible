@@ -49,6 +49,7 @@ def test_mining_registry_contains_only_read_tools():
         "list_files",
         "search_files",
         "read_file",
+        "read_file_chunk",
     }
     for tool in ("write_file", "apply_patch", "execute_command"):
         assert registry.get(tool) is None

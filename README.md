@@ -526,6 +526,12 @@ and prepares a retained `codex/improve/UUID` worktree; it makes no model request
 For manual candidate evaluation, edit only the six frozen editable paths in that
 worktree. `search` instead runs bounded mining and proposal roles through the
 accepted Crucible engine; the miner receives only verified development evidence.
+Roles start from the development index and inspect evidence with `read_file_chunk`:
+each UTF-8 page contains at most 8192 bytes and returns a byte `next_offset`
+(`null` at EOF), including for single-line JSON traces. Follow continuation only
+for relevant details, rather than loading every trace. Role `read_file`, search,
+and file-list output are also capped at 8192 bytes. This changes role evidence
+access, not the ordinary coding solver's tools or the export's existing byte caps.
 Candidate checks must pass before paid trial dispatch. Both
 baseline and candidate run three repeats for each development/selection-validation
 case, using the same isolated path and independent protected grading. Worker success

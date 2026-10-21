@@ -193,6 +193,7 @@ async def test_role_uses_ordinary_engine_with_read_only_registry(database, tmp_p
     assert {tool.name for tool in requests[0].tools} == {
         "list_files",
         "read_file",
+        "read_file_chunk",
         "search_files",
     }
 
