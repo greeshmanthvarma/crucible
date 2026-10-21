@@ -312,6 +312,15 @@ class ContextManager:
                 selection.group_conversation_units(messages, result_to_call),
                 retain_complete_units=self._recent_complete_units,
             )
+            # Boundaries cover the full prefix for validation and lineage, but
+            # only an extension of the saved prefix can reduce visible context.
+            if (
+                boundary is not None
+                and latest_compaction is not None
+                and boundary.source_end_sequence
+                <= latest_compaction.source_end_sequence
+            ):
+                boundary = None
             if boundary is not None:
                 validate_compaction_boundary(boundary, messages, result_to_call)
                 if self._compaction_lifecycle is not None:

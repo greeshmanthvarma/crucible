@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from crucible.application.artifact_service import ArtifactService
 from crucible.artifacts.store import LocalArtifactStore
 from crucible.context.compaction import (
@@ -9,6 +11,7 @@ from crucible.context.compaction import (
     group_conversation_units,
     select_compaction_boundary,
 )
+from crucible.context.manager import ContextLimitExceeded, ContextManager
 from crucible.domain.conversation import (
     Message,
     MessagePart,
@@ -17,6 +20,8 @@ from crucible.domain.conversation import (
     MessageStatus,
 )
 from crucible.domain.ids import new_id
+from crucible.domain.steps import Step
+from crucible.engine.gateway import ModelMessage
 from crucible.storage.database import Database
 from tests.integration.engine.conftest import FixedClock, queued_run, uow_factory
 
@@ -93,6 +98,109 @@ async def test_successful_compaction_persists_private_artifact_and_lineage(
         "compaction.started",
         "compaction.completed",
     ]
+
+
+@pytest.mark.parametrize("estimate", [85, 95])
+async def test_prepare_does_not_repeat_saved_compaction(
+    database: Database, tmp_path: Path, estimate: int
+) -> None:
+    class FixedEstimator:
+        def estimate(self, messages: tuple[ModelMessage, ...]) -> int:
+            return estimate
+
+    submitted = await queued_run(database, tmp_path, "compaction-progress")
+    factory = uow_factory(database)
+    async with factory() as uow:
+        run = await uow.runs.get(submitted.run_id)
+        assert run is not None
+        step = Step.preparing(new_id(), run.task_id, run.id, 1, FixedClock().now())
+        await uow.steps.add(step)
+        await uow.commit()
+    await completed_messages(factory, run)
+    await completed_messages(factory, run, "second exchange")
+    await completed_messages(factory, run, "third exchange")
+    gateway = ScriptedCompactionGateway((summary("first"),) * 10)
+    lifecycle = CompactionLifecycle(
+        factory,
+        ArtifactService(
+            LocalArtifactStore(tmp_path / "progress", FixedClock()), factory
+        ),
+        gateway,
+        FixedClock(),
+    )
+    manager = ContextManager(
+        factory,
+        FixedClock(),
+        FixedEstimator(),
+        harness_policy="policy",
+        tool_contract="tools",
+        model="fixture",
+        input_limit=100,
+        output_reserve=10,
+        threshold=0.8,
+        recent_complete_units=2,
+        compaction_lifecycle=lifecycle,
+    )
+    for index in range(2):
+        if index:
+            step = Step.preparing(new_id(), run.task_id, run.id, 2, FixedClock().now())
+            async with factory() as uow:
+                await uow.steps.add(step)
+                await uow.commit()
+        if estimate > 90:
+            with pytest.raises(
+                ContextLimitExceeded, match="no safe compaction boundary"
+            ):
+                await manager.prepare(run, step)
+        else:
+            prepared = await manager.prepare(run, step)
+            assert prepared.manifest.compaction_id is not None
+        assert len(gateway.requests) == 1
+    if estimate <= 90:
+        await completed_messages(factory, run, "fourth exchange")
+        step = Step.preparing(new_id(), run.task_id, run.id, 3, FixedClock().now())
+        async with factory() as uow:
+            await uow.steps.add(step)
+            previous = await uow.compactions.latest_for_task(run.task_id)
+            await uow.commit()
+        await manager.prepare(run, step)
+        assert previous is not None
+        assert len(gateway.requests) == 2
+        assert gateway.requests[-1].previous_compaction_id == previous.id
+        assert (
+            gateway.requests[-1].source_units[0].messages[0].parts[0].text_content
+            == previous.rendered_summary
+        )
+        async with factory() as uow:
+            latest = await uow.compactions.latest_for_task(run.task_id)
+        assert latest is not None
+        assert latest.source_end_sequence > previous.source_end_sequence
+
+
+async def test_lifecycle_rejects_nonadvancing_boundary_before_gateway(
+    database: Database, tmp_path: Path
+) -> None:
+    submitted = await queued_run(database, tmp_path, "compaction-stale")
+    factory = uow_factory(database)
+    async with factory() as uow:
+        run = await uow.runs.get(submitted.run_id)
+        assert run is not None
+    messages = await completed_messages(factory, run)
+    boundary = select_compaction_boundary(
+        group_conversation_units(messages, {}), retain_complete_units=0
+    )
+    assert boundary is not None
+    gateway = ScriptedCompactionGateway((summary("first"),))
+    lifecycle = CompactionLifecycle(
+        factory,
+        ArtifactService(LocalArtifactStore(tmp_path / "stale", FixedClock()), factory),
+        gateway,
+        FixedClock(),
+    )
+    await lifecycle.compact(run, boundary)
+    with pytest.raises(ValueError, match="advance"):
+        await lifecycle.compact(run, boundary)
+    assert len(gateway.requests) == 1
 
 
 async def test_compaction_retries_within_budget(

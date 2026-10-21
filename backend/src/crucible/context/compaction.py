@@ -121,6 +121,11 @@ class CompactionLifecycle:
     ) -> Compaction:
         async with self._unit_of_work() as uow:
             previous = await uow.compactions.latest_for_task(run.task_id)
+        if (
+            previous is not None
+            and boundary.source_end_sequence <= previous.source_end_sequence
+        ):
+            raise ValueError("Compaction boundary must advance beyond the saved prefix")
         source_units = boundary.source_units
         if previous is not None:
             summary_message = Message(
