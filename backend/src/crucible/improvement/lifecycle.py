@@ -24,6 +24,7 @@ from crucible.improvement.contracts import (
     HarnessSnapshot,
 )
 from crucible.improvement.manifest import ManifestDrift, freeze_manifest
+from crucible.improvement.recovery_guidance import recovery_actions
 from crucible.improvement.runtime import execution_runtime
 from crucible.improvement.source import (
     _digest,
@@ -448,34 +449,13 @@ class ExperimentService:
         }
         remaining = usage["remaining"]
         assert isinstance(remaining, dict)
-        exhausted = any(
-            remaining[name] == 0
-            for name in (
-                "tokens",
-                "requests",
-                "active_seconds",
-                "worker_wall_seconds",
-                "trial_starts",
-            )
+        actions = recovery_actions(
+            record.status,
+            cleanup_confirmed=cleanup,
+            unsettled_usage=unresolved,
+            remaining=remaining,
+            retry_required=bool(failed - (authorized - consumed)),
         )
-        if record.status == "closed":
-            actions = []
-        elif not cleanup:
-            actions = ["recover", "investigate"]
-        elif unresolved:
-            actions = ["acknowledge_accounting", "recover"]
-        elif record.status in ("error", "interrupted", "stopping"):
-            actions = ["recover"]
-        elif record.status == "ready":
-            actions = (
-                ["remain_blocked"]
-                if exhausted
-                else ["authorize_retry"]
-                if failed - (authorized - consumed)
-                else ["continue"]
-            )
-        else:
-            actions = []
         return {
             "experiment_id": str(id),
             "status": record.status,

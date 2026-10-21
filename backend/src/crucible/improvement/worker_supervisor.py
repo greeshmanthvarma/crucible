@@ -20,7 +20,7 @@ from crucible.improvement.contracts import (
     UsageAmounts,
 )
 from crucible.improvement.source import _digest, safe_path
-from crucible.improvement.store import ExecutionStore
+from crucible.improvement.store import BudgetDenied, ExecutionStore, QuotaExhausted
 from crucible.improvement.worker_protocol import (
     IsolatedExecution,
     IsolatedRoleExecution,
@@ -34,6 +34,7 @@ from crucible.improvement.worker_protocol import (
     read_worker_observation,
 )
 from crucible.repair.gateway import TrustedUsage
+from crucible.repair.identity import canonical_json
 from crucible.sandbox.protocol import (
     OutputChunk,
     OutputStream,
@@ -379,6 +380,56 @@ class WorkerSupervisor:
         await self.store.effect_state(effect, "active", identity)
         return identity
 
+    async def _admission_failure(
+        self,
+        job: WorkerRequest,
+        workspace: Path,
+        category: Literal["execution", "quota"],
+    ) -> IsolatedExecution | IsolatedRoleExecution:
+        # Revoke first: persistence failure must never leave usable authority.
+        self.broker.revoke(job.job_id)
+        outcome = JobOutcome(
+            job.job_id,
+            job.experiment_id,
+            job.trial_id if isinstance(job, WorkerJob) else job.role_id,
+            job.harness_digest,
+            job.repeat_index if isinstance(job, WorkerJob) else None,
+            "failed",
+            "admission",
+            JobFailure(category, "controller", "not_sent"),
+            True,
+            None,
+            "host_measured",
+            "recover",
+            UsageAmounts(),
+            TrustedUsage(),
+            (),
+            None,
+        )
+        root = self.root / "jobs" / str(job.job_id)
+        if root.is_dir():
+            atomic_json(root / "job-outcome.json", outcome)
+        await self.store.record_event(
+            job.experiment_id,
+            "job_outcome",
+            {
+                "job_id": str(job.job_id),
+                "termination": "failed",
+                "cleanup_confirmed": True,
+                "stage": "admission",
+                "failure_category": category,
+                "dispatch": "not_sent",
+                "outcome": json.loads(canonical_json(outcome)),
+            },
+        )
+        await self.store.fail_run(job.experiment_id, category)
+        execution_type = (
+            IsolatedExecution if isinstance(job, WorkerJob) else IsolatedRoleExecution
+        )
+        return execution_type(
+            None, workspace, root / "state", TrustedUsage(), (), True, 0.0, outcome
+        )
+
     @overload
     async def execute(
         self,
@@ -444,45 +495,7 @@ class WorkerSupervisor:
                 ):
                     raise ValueError("worker image digest/platform drift")
         except (ValueError, OSError):
-            outcome = JobOutcome(
-                job.job_id,
-                job.experiment_id,
-                job.trial_id if isinstance(job, WorkerJob) else job.role_id,
-                job.harness_digest,
-                job.repeat_index if isinstance(job, WorkerJob) else None,
-                "failed",
-                "admission",
-                JobFailure("execution", "worker", "not_sent"),
-                True,
-                None,
-                "host_measured",
-                "recover",
-                UsageAmounts(),
-                TrustedUsage(),
-                (),
-                None,
-            )
-            await self.store.record_event(
-                job.experiment_id,
-                "job_outcome",
-                {
-                    "job_id": str(job.job_id),
-                    "termination": "failed",
-                    "cleanup_confirmed": True,
-                    "stage": "admission",
-                    "failure_category": "execution",
-                    "dispatch": "not_sent",
-                },
-            )
-            await self.store.fail_run(job.experiment_id, "execution")
-            execution_type = (
-                IsolatedExecution
-                if isinstance(job, WorkerJob)
-                else IsolatedRoleExecution
-            )
-            return execution_type(
-                None, solver_export, self.root, TrustedUsage(), (), True, 0.0, outcome
-            )
+            return await self._admission_failure(job, solver_export, "execution")
         root = self.root / "jobs" / str(job.job_id)
         root.mkdir(parents=True, exist_ok=False, mode=0o700)
         state = root / "state"
@@ -502,21 +515,29 @@ class WorkerSupervisor:
             "runpy.run_module('crucible.improvement.worker', run_name='__main__')\n"
         )
         started = time.monotonic()
-        reservation = await self.store.reserve_usage(
-            job.experiment_id,
-            job.trial_id,
-            UsageAmounts(
-                worker_wall_seconds=job.wall_deadline_seconds,
-                active_seconds=job.limits.max_active_seconds,
-                output_bytes=job.output_limit_bytes,
-            ),
-            kind="worker",
-            job_id=job.job_id,
-        )
+        try:
+            reservation = await self.store.reserve_usage(
+                job.experiment_id,
+                job.trial_id,
+                UsageAmounts(
+                    worker_wall_seconds=job.wall_deadline_seconds,
+                    active_seconds=job.limits.max_active_seconds,
+                    output_bytes=job.output_limit_bytes,
+                ),
+                kind="worker",
+                job_id=job.job_id,
+            )
+        except BudgetDenied as error:
+            return await self._admission_failure(
+                job,
+                solver_export,
+                "quota" if isinstance(error, QuotaExhausted) else "execution",
+            )
         active_started: float | None = None
         active_elapsed = 0.0
         cleanup_verified = False
         output_known = True
+        observed_output_bytes = 0
         stdout_chunks: tuple[OutputChunk, ...] = ()
         observation = None
         failure: BaseException | None = None
@@ -648,6 +669,10 @@ class WorkerSupervisor:
             )
         except BaseException as error:
             failure = error
+            if isinstance(error, DockerOutputLimit):
+                stdout_chunks = error.chunks
+                observed_output_bytes = error.original
+                output_known = False
         else:
             failure = None
         session = self.broker.sessions[job.job_id]
@@ -685,7 +710,9 @@ class WorkerSupervisor:
                 root_failure = JobFailure("cleanup", "cleanup")
         elapsed = time.monotonic() - started
         measured = UsageAmounts(
-            output_bytes=sum(len(c.data) for c in stdout_chunks),
+            output_bytes=max(
+                observed_output_bytes, sum(len(c.data) for c in stdout_chunks)
+            ),
             active_seconds=int(active_elapsed + 0.999),
             worker_wall_seconds=int(elapsed + 0.999),
         )

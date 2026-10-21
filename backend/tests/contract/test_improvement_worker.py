@@ -197,6 +197,9 @@ async def test_cleanup_attempts_other_resources_after_failure(tmp_path):
     [
         None,
         "preflight",
+        "budget",
+        "output_limit",
+        "output_limit_cleanup",
         "create",
         "worker_exit",
         "cancel",
@@ -275,7 +278,10 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(tmp_path, fa
             if args[0] == "inspect":
                 return json.dumps([self.containers[args[1]]])
             if args[0] == "kill":
-                if fault in ("cleanup", "stream_cleanup") and "worker" in args[1]:
+                if (
+                    fault in ("cleanup", "stream_cleanup", "output_limit_cleanup")
+                    and "worker" in args[1]
+                ):
                     raise ValueError("cleanup failed SECRET_CANARY")
                 self.containers[args[1]]["State"]["Running"] = False
                 return ""
@@ -284,6 +290,10 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(tmp_path, fa
         async def attach(self, identity, limit, credential=None):
             self.containers[identity]["State"]["Running"] = True
             self.credentials.append(credential)
+            if fault in ("output_limit", "output_limit_cleanup"):
+                from crucible.improvement.worker_supervisor import DockerOutputLimit
+
+                raise DockerOutputLimit((), job.output_limit_bytes + 500)
             if fault == "worker_exit":
                 return 1, ()
             if fault == "cancel":
@@ -340,15 +350,25 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(tmp_path, fa
         "http://host.docker.internal:1234",
     )
     try:
+        if fault == "budget":
+            from crucible.improvement.contracts import UsageAmounts
+
+            debit = UsageAmounts(
+                worker_wall_seconds=manifest.budget.max_worker_wall_seconds
+            )
+            rid = await store.reserve_usage(job.experiment_id, None, debit)
+            await store.settle_usage(rid, debit)
         result = await supervisor.execute(job, snapshot, solver, harness_export=harness)
         assert result.outcome is not None
-        if fault == "preflight":
+        if fault in ("preflight", "budget"):
             assert result.cleanup_confirmed
             assert result.outcome.stage == "admission"
             assert result.outcome.failure.dispatch == "not_sent"
             assert result.outcome.resource_reservation_id is None
             assert await store.effects(job.experiment_id) == ()
-            assert job.job_id not in broker.sessions
+            assert (
+                job.job_id not in broker.sessions or broker.sessions[job.job_id].revoked
+            )
             assert len(await store.events(job.experiment_id, "job_outcome")) == 1
             return
         assert (
@@ -357,6 +377,37 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(tmp_path, fa
                 tmp_path / "controller/jobs" / str(job.job_id) / "job-outcome.json"
             ).read_text()
         )
+        if fault in ("output_limit", "output_limit_cleanup"):
+            assert (
+                result.outcome.resource_usage.output_bytes
+                == job.output_limit_bytes + 500
+            )
+            row = next(
+                r
+                for r in await store.usage_records(job.experiment_id)
+                if r["reservation_id"] == str(result.outcome.resource_reservation_id)
+            )
+            from crucible.improvement.contracts import UsageAmounts
+
+            assert (
+                UsageAmounts.model_validate_json(row["settled_json"]).output_bytes
+                >= job.output_limit_bytes + 500
+            )
+            assert result.cleanup_confirmed == (fault == "output_limit")
+            if fault == "output_limit":
+                stopped = await store.request_stop(job.experiment_id)
+                owner = await store.claim_recovery(
+                    job.experiment_id, stopped.revision, None, 123, "test"
+                )
+                await store.acknowledge_usage(
+                    job.experiment_id, owner, (result.outcome.resource_reservation_id,)
+                )
+                assert (await store.usage_summary(job.experiment_id))["conservative"][
+                    "output_bytes"
+                ] >= job.output_limit_bytes + 500
+            else:
+                assert result.outcome.cleanup_failure.category == "cleanup"
+            return
         if fault in (
             "create",
             "worker_exit",

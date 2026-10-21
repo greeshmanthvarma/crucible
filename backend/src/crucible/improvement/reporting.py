@@ -18,6 +18,7 @@ from crucible.benchmarks.manifests import case_digest
 from crucible.improvement.contracts import Contract, ExperimentPaths
 from crucible.improvement.final import FinalEvaluator
 from crucible.improvement.manifest import CaseRegistry, manifest_digest
+from crucible.improvement.recovery_guidance import recovery_actions
 from crucible.improvement.source import atomic_source_file, safe_path
 from crucible.improvement.store import ExperimentStore, RevisionConflict
 from crucible.improvement.worker_supervisor import read_regular_artifact
@@ -269,33 +270,15 @@ class ReportExporter:
         }
         remaining = summary["remaining"]
         assert isinstance(remaining, dict)
-        exhausted = any(
-            remaining[name] == 0
-            for name in (
-                "tokens",
-                "requests",
-                "active_seconds",
-                "worker_wall_seconds",
-                "trial_starts",
-            )
+        actions = recovery_actions(
+            run.status,
+            cleanup_confirmed=cleanup,
+            unsettled_usage=bool(unsettled),
+            remaining=remaining,
+            retry_required=bool(failed - (authorized - consumed)),
+            work_complete=measurement.complete,
         )
-        action = (
-            "none"
-            if run.status == "closed"
-            else "investigate"
-            if not cleanup
-            else "acknowledge_accounting"
-            if unsettled
-            else "recover"
-            if run.status in ("error", "interrupted", "stopping")
-            else "remain_blocked"
-            if not measurement.complete and exhausted
-            else "authorize_retry"
-            if failed - (authorized - consumed)
-            else "continue"
-            if not measurement.complete
-            else "none"
-        )
+        action = actions[0] if actions else "none"
         retry_links = [
             {
                 "original_trial_id": str(UUID(str(e["original_trial_id"]))),
@@ -466,6 +449,7 @@ class ReportExporter:
             "recovery": {
                 "cleanup_confirmed": cleanup,
                 "required_operator_action": action,
+                "required_operator_actions": actions,
             },
             "trial_retry_links": retry_links,
             "job_outcomes": job_facts,
