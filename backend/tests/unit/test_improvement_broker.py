@@ -259,6 +259,25 @@ async def test_unknown_model_usage_remains_reserved(tmp_path):
         assert (await store.get(job.experiment_id)).status == "error"
         with pytest.raises(BudgetDenied):
             await store.reserve_usage(job.experiment_id, None, UsageAmounts(tokens=1))
+        rows = await store.usage_records(job.experiment_id)
+        from uuid import UUID
+
+        stopped = await store.request_stop(job.experiment_id)
+        owner = await store.claim_recovery(
+            job.experiment_id, stopped.revision, None, 123, "test"
+        )
+        await store.acknowledge_usage(
+            job.experiment_id, owner, (UUID(rows[0]["reservation_id"]),)
+        )
+        summary = await store.usage_summary(job.experiment_id)
+        assert summary["confirmed"]["requests"] == 1
+        assert summary["confirmed"]["output_bytes"] > 0
+        assert summary["conservative"]["tokens"] > 0
+        assert (
+            summary["conservative"]["requests"]
+            == summary["conservative"]["output_bytes"]
+            == 0
+        )
     finally:
         await store.close()
 
@@ -544,5 +563,145 @@ async def test_non_quota_failures_are_not_budget_termination(tmp_path, denial):
         assert events
         assert all(isinstance(event, ModelError) for event in events)
         assert all(event.code != "improvement_budget_exhausted" for event in events)
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        "provider_request_failed",
+        "provider_stream_failed",
+        "invalid_tool_arguments",
+        "improvement_budget_exhausted",
+    ],
+)
+async def test_request_failure_preserves_safe_category_and_confirmed_usage(
+    tmp_path, category
+):
+    from uuid import uuid4, uuid5
+
+    from crucible.engine.gateway import ModelError, ModelUsage, PreparedModelRequest
+
+    class Upstream:
+        calls = 0
+
+        async def stream(self, request):
+            self.calls += 1
+            yield ModelUsage(10, 5)
+            yield ModelError(category, "SECRET_CANARY https://secret.invalid/key")
+
+    upstream = Upstream()
+    store, broker, job, credential = await setup_broker(tmp_path, upstream)
+    try:
+        request = PreparedModelRequest(
+            uuid5(job.job_id, "run"), uuid4(), job.model.model_id, (), (), 100
+        )
+        events = [e async for e in broker.model(credential.token, job.job_id, request)]
+        assert events[1].code == (
+            category if category != "improvement_budget_exhausted" else "upstream_error"
+        )
+        assert "SECRET_CANARY" not in str(events)
+        rows = await store.usage_records(job.experiment_id)
+        assert rows[0]["status"] == "settled"
+        assert "15" in rows[0]["settled_json"]
+        assert (await store.get(job.experiment_id)).stop_requested
+        assert upstream.calls == 1
+    finally:
+        await store.close()
+
+
+async def test_stop_interrupts_inflight_model_without_replay(tmp_path):
+    import asyncio
+    from uuid import uuid4, uuid5
+
+    from crucible.engine.gateway import PreparedModelRequest
+
+    entered = asyncio.Event()
+
+    class Upstream:
+        calls = 0
+
+        async def stream(self, request):
+            self.calls += 1
+            entered.set()
+            await asyncio.Event().wait()
+            yield
+
+    upstream = Upstream()
+    store, broker, job, credential = await setup_broker(tmp_path, upstream)
+
+    async def consume():
+        request = PreparedModelRequest(
+            uuid5(job.job_id, "run"), uuid4(), job.model.model_id, (), (), 100
+        )
+        return [e async for e in broker.model(credential.token, job.job_id, request)]
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(broker.stop(job.job_id), 2)
+        assert task.done()
+        assert upstream.calls == 1
+        assert await store.unsettled_usage(job.experiment_id)
+        assert (await store.get(job.experiment_id)).stop_requested
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await store.close()
+
+
+@pytest.mark.parametrize("input_tokens,output_tokens", [(10, 5), (550, 1), (10, None)])
+async def test_failed_responses_adapter_preserves_usage_through_broker(
+    tmp_path, input_tokens, output_tokens
+):
+    from uuid import UUID, uuid4, uuid5
+
+    from crucible.engine.gateway import PreparedModelRequest
+    from crucible.improvement.contracts import UsageAmounts
+    from crucible.models.responses_gateway import LiteLLMResponsesGateway
+
+    async def events():
+        yield {
+            "type": "response.failed",
+            "response": {
+                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}
+            },
+            "error": "SECRET_CANARY",
+        }
+
+    async def response(**kwargs):
+        assert kwargs["num_retries"] == kwargs["max_retries"] == 0
+        return events()
+
+    store, broker, job, credential = await setup_broker(
+        tmp_path, LiteLLMResponsesGateway(response, disable_retries=True)
+    )
+    try:
+        request = PreparedModelRequest(
+            uuid5(job.job_id, "run"), uuid4(), job.model.model_id, (), (), 100
+        )
+        result = [e async for e in broker.model(credential.token, job.job_id, request)]
+        assert result[0].input_tokens == input_tokens
+        assert "SECRET_CANARY" not in str(result)
+        row = (await store.usage_records(job.experiment_id))[0]
+        usage = UsageAmounts.model_validate_json(row["settled_json"])
+        assert usage.tokens >= input_tokens + (output_tokens or 0)
+        if input_tokens == 10 and output_tokens == 5:
+            assert row["status"] == "settled" and usage.tokens == 15
+        else:
+            stopped = await store.request_stop(job.experiment_id)
+            owner = await store.claim_recovery(
+                job.experiment_id, stopped.revision, None, 123, "test"
+            )
+            await store.acknowledge_usage(
+                job.experiment_id, owner, (UUID(row["reservation_id"]),)
+            )
+            summary = await store.usage_summary(job.experiment_id)
+            if output_tokens is not None:
+                assert summary["confirmed"]["tokens"] == input_tokens + output_tokens
+                assert summary["conservative"]["tokens"] == 0
+            else:
+                assert summary["conservative"]["tokens"] >= input_tokens
     finally:
         await store.close()

@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID, uuid5
 
 from fastapi import FastAPI, HTTPException, Request
@@ -32,7 +32,12 @@ from crucible.improvement.worker_protocol import (
     job_environment,
     validate_job_manifest,
 )
-from crucible.repair.gateway import GatewayDenied, ScopedModelGateway, WorkerCredential
+from crucible.repair.gateway import (
+    GatewayDenied,
+    ScopedModelGateway,
+    WorkerCredential,
+    safe_model_error,
+)
 from crucible.repair.identity import canonical_json
 from crucible.repair.worker_protocol import WireRequest, decode_request, encode_event
 from crucible.sandbox.protocol import OutputChunk, SandboxOutcome
@@ -65,6 +70,9 @@ class JobSession:
     manifest: ExecutionManifest
     binding: WorkspaceBinding
     token_hash: str = field(repr=False)
+    failure: str | None = None
+    failure_origin: Literal["model", "worker", "controller", "cleanup"] = "model"
+    model_tasks: set[asyncio.Task[object]] = field(default_factory=set)
     revoked: bool = False
     command_calls: int = 0
     records: list[CommandRecord] = field(default_factory=list)
@@ -171,16 +179,20 @@ class ImprovementBroker:
         try:
             reservation = await self.gateway.reserve(token, job_id, request)
             # Persist before opening upstream. A global denial spends no model request.
-            ledger = await self.store.reserve_usage(
-                session.job.experiment_id,
-                session.job.trial_id,
-                UsageAmounts(
-                    tokens=reservation.tokens,
-                    requests=1,
-                    output_bytes=session.job.output_limit_bytes,
-                ),
-                job_id=session.job.job_id,
-            )
+            try:
+                ledger = await self.store.reserve_usage(
+                    session.job.experiment_id,
+                    session.job.trial_id,
+                    UsageAmounts(
+                        tokens=reservation.tokens,
+                        requests=1,
+                        output_bytes=session.job.output_limit_bytes,
+                    ),
+                    job_id=session.job.job_id,
+                )
+            except BaseException:
+                await self.gateway.release_unused(reservation)
+                raise
         except GatewayDenied as error:
             if error.status_code != 429:
                 raise
@@ -189,6 +201,18 @@ class ImprovementBroker:
         except QuotaExhausted:
             yield ModelError("improvement_budget_exhausted", "Model quota exhausted")
             return
+        await self.store.record_event(
+            session.job.experiment_id,
+            "request_dispatched",
+            {
+                "job_id": str(job_id),
+                "reservation_id": str(ledger),
+                "dispatch": "possibly_sent",
+            },
+        )
+        task = asyncio.current_task()
+        if task:
+            session.model_tasks.add(task)
         input_tokens = output_tokens = 0
         saw_input = saw_output = stopped = failed = False
         size = 0
@@ -205,12 +229,21 @@ class ImprovementBroker:
                     stopped = True
                 if isinstance(event, ModelError):
                     failed = True
+                    event = safe_model_error(event.code)
+                    session.failure = session.failure or event.code
                 size += len(canonical_json(encode_event(event))) + 1
                 if size > session.job.output_limit_bytes:
                     raise ValueError("model output cap exceeded")
                 yield event
+        except asyncio.CancelledError:
+            if session.failure is None:
+                session.failure = "cancellation"
+                session.failure_origin = "controller"
+            raise
         finally:
-            if stopped and saw_input and saw_output and not failed:
+            if task:
+                session.model_tasks.discard(task)
+            if saw_input and saw_output:
                 await self.store.settle_usage(
                     ledger,
                     UsageAmounts(
@@ -220,7 +253,31 @@ class ImprovementBroker:
                     ),
                 )
             else:
-                await self.store.mark_uncertain(ledger)
+                await self.store.record_partial_usage(
+                    ledger,
+                    UsageAmounts(
+                        tokens=input_tokens + output_tokens,
+                        requests=1,
+                        output_bytes=size,
+                    ),
+                    ("tokens",),
+                )
+            await self.store.record_event(
+                session.job.experiment_id,
+                "request_terminal",
+                {
+                    "job_id": str(job_id),
+                    "reservation_id": str(ledger),
+                    "dispatch": "possibly_sent",
+                    "category": session.failure,
+                    "usage_basis": "reported"
+                    if saw_input and saw_output
+                    else "partial_or_unknown",
+                },
+            )
+            if failed or not stopped or not (saw_input and saw_output):
+                session.failure = session.failure or "upstream_incomplete"
+                await self.store.fail_run(session.job.experiment_id, session.failure)
                 self.revoke(job_id)
 
     async def command(
@@ -385,8 +442,20 @@ class ImprovementBroker:
                 ),
             )
             return payload
-        except BaseException:
+        except BaseException as error:
+            if session.failure is None:
+                session.failure = (
+                    "cancellation"
+                    if isinstance(error, asyncio.CancelledError)
+                    else "execution"
+                )
+                session.failure_origin = (
+                    "controller"
+                    if isinstance(error, asyncio.CancelledError)
+                    else "worker"
+                )
             await self.store.mark_uncertain(reservation)
+            await self.store.fail_run(job.experiment_id, session.failure)
             self.revoke(job.job_id)
             raise
 
@@ -402,6 +471,13 @@ class ImprovementBroker:
         self.revoke(job_id)
         session = self.sessions.get(job_id)
         if session:
+            current = asyncio.current_task()
+            pending_models = [
+                task for task in session.model_tasks if task is not current
+            ]
+            for task in pending_models:
+                task.cancel()
+            await asyncio.gather(*pending_models, return_exceptions=True)
             for task in session.commands.values():
                 if not task.done():
                     task.cancel()

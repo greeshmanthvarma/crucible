@@ -72,6 +72,7 @@ async def test_streams_text_and_function_calls_with_provider_ids() -> None:
     assert captured["model"] == "openai/gpt-6-luna"
     assert captured["stream"] is True
     assert captured["store"] is False
+    assert "num_retries" not in captured and "max_retries" not in captured
     assert captured["input"] == [{"role": "user", "content": "Inspect."}]
     assert captured["tools"] == [
         {

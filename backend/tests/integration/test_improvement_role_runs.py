@@ -503,3 +503,66 @@ async def test_predispatch_mining_failure_recovers_original_identity(
     if drift == "legacy":
         assert not (directory / "workspace" / ".git" / "private-canary").exists()
         assert list(directory.glob("archived-git-*/private-canary"))
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+async def test_role_consumes_host_outcome_without_worker_observation(
+    evidence_setup, tmp_path, interrupted
+):
+    import asyncio
+
+    from crucible.improvement.contracts import UsageAmounts
+    from crucible.improvement.evidence_views import DevelopmentViewBuilder
+    from crucible.improvement.roles import RoleRunner
+    from crucible.improvement.worker_protocol import (
+        IsolatedRoleExecution,
+        JobFailure,
+        JobOutcome,
+    )
+    from crucible.repair.gateway import TrustedUsage
+
+    store, root, run, snapshot, _ = evidence_setup
+    round = await store.begin_round(run.id, snapshot.snapshot_id, run.revision)
+    views = DevelopmentViewBuilder(store, root)
+    view = await views.build_development_view(
+        run.id, snapshot.snapshot_id, tmp_path / "view"
+    )
+
+    class Supervisor:
+        async def execute(self, job, accepted, workspace, *, harness_export):
+            outcome = JobOutcome(
+                job.job_id,
+                job.experiment_id,
+                job.role_id,
+                job.harness_digest,
+                None,
+                "interrupted" if interrupted else "failed",
+                "execution",
+                JobFailure(
+                    "cancellation" if interrupted else "provider_stream_failed",
+                    "controller" if interrupted else "model",
+                ),
+                True,
+                None,
+                "host_measured",
+                "recover",
+                UsageAmounts(),
+                TrustedUsage(),
+                (),
+                None,
+            )
+            return IsolatedRoleExecution(
+                None, workspace, tmp_path, TrustedUsage(), (), True, 1.0, outcome
+            )
+
+    runner = RoleRunner(store, root, Supervisor(), views)
+    if interrupted:
+        with pytest.raises(asyncio.CancelledError):
+            await runner.mine(round.id, view)
+    else:
+        result = await runner.mine(round.id, view)
+        assert result.status == "error"
+        assert result.error_code == "provider_stream_failed"
+    saved = (await store.roles(round.id))[0].execution
+    assert saved.status == ("interrupted" if interrupted else "error")
+    assert (root / "roles" / str(saved.role_id) / "job-outcome.json").exists()

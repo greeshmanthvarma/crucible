@@ -20,6 +20,7 @@ from crucible.improvement.contracts import (
     ExperimentManifest,
     Image,
     Positive,
+    UsageAmounts,
 )
 from crucible.repair.gateway import TrustedUsage
 from crucible.sandbox.protocol import SandboxOutcome
@@ -198,14 +199,42 @@ class CommandRecord:
 
 
 @dataclass(frozen=True)
+class JobFailure:
+    category: str
+    origin: Literal["model", "worker", "controller", "cleanup"]
+    dispatch: Literal["not_sent", "possibly_sent", "unknown"] = "unknown"
+
+
+@dataclass(frozen=True)
+class JobOutcome:
+    job_id: UUID
+    experiment_id: UUID
+    attempt_id: UUID
+    harness_digest: str
+    repeat_index: int | None
+    termination: Literal["completed", "budget_exhausted", "failed", "interrupted"]
+    stage: str
+    failure: JobFailure | None
+    cleanup_confirmed: bool
+    resource_reservation_id: UUID | None
+    accounting_basis: Literal["host_measured", "retained_reservation"]
+    next_action: Literal["continue", "recover", "investigate"]
+    resource_usage: UsageAmounts
+    model_usage: TrustedUsage
+    unresolved_reservations: tuple[UUID, ...]
+    cleanup_failure: JobFailure | None
+
+
+@dataclass(frozen=True)
 class IsolatedExecution:
-    observation: WorkerObservation
+    observation: WorkerObservation | None
     workspace: Path
     state_root: Path
     usage: TrustedUsage
     commands: tuple[CommandRecord, ...]
     cleanup_confirmed: bool
     elapsed_seconds: float
+    outcome: JobOutcome | None = None
 
 
 class RoleObservation(Contract):
@@ -250,10 +279,11 @@ def read_role_observation(raw: bytes, job: RoleJob) -> RoleObservation:
 
 @dataclass(frozen=True)
 class IsolatedRoleExecution:
-    observation: RoleObservation
+    observation: RoleObservation | None
     workspace: Path
     state_root: Path
     usage: TrustedUsage
     commands: tuple[CommandRecord, ...]
     cleanup_confirmed: bool
     elapsed_seconds: float
+    outcome: JobOutcome | None = None

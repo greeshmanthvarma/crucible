@@ -167,6 +167,7 @@ async def test_same_source_final_uses_three_fresh_trials_and_shared_original_ids
 
 async def test_final_infrastructure_is_inconclusive_and_requires_explicit_resume(
     final_setup,
+    tmp_path,
 ):
     evaluator, _, store, manifest, _, seal, worker, grader = final_setup
     worker.cleanup = False
@@ -183,11 +184,33 @@ async def test_final_infrastructure_is_inconclusive_and_requires_explicit_resume
 
     await recover(store, manifest.experiment_id)
     worker.cleanup = True
+    with pytest.raises(ValueError, match="explicit compatible authorization"):
+        await evaluator.evaluate_final(manifest.experiment_id)
+    assert worker.calls == 7
+    await recover(store, manifest.experiment_id)
+    from uuid import UUID
+
+    failed = tuple(
+        UUID(str(row["id"]))
+        for row in await store.selected_trials(manifest.experiment_id)
+        if row["status"] in ("error", "interrupted")
+    )
+    await store.authorize_trial_retries(manifest.experiment_id, failed)
     result = await evaluator.evaluate_final(manifest.experiment_id)
     assert result.complete
     assert worker.calls == 10  # original failed attempt plus exactly three valid trials
     assert len(await store.trials(manifest.experiment_id)) == 10
     assert await store.events(manifest.experiment_id, "trial_superseded")
+    import json
+
+    from crucible.improvement.reporting import ReportExporter
+
+    await ReportExporter(store, evaluator.paths).export_report(
+        manifest.experiment_id, tmp_path / "retry-report"
+    )
+    report = json.loads((tmp_path / "retry-report/metrics.json").read_text())
+    assert len(report["trial_retry_links"]) == 1
+    assert report["recovery"]["cleanup_confirmed"] is True
 
 
 async def test_final_regression_is_reported_without_reopening_selection(

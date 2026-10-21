@@ -15,12 +15,13 @@ from pydantic import Field
 
 from crucible.benchmarks.contracts import BenchmarkCase, Sha256
 from crucible.benchmarks.manifests import case_digest
-from crucible.improvement.contracts import Contract, ExperimentPaths, UsageAmounts
+from crucible.improvement.contracts import Contract, ExperimentPaths
 from crucible.improvement.final import FinalEvaluator
 from crucible.improvement.manifest import CaseRegistry, manifest_digest
 from crucible.improvement.source import atomic_source_file, safe_path
 from crucible.improvement.store import ExperimentStore, RevisionConflict
 from crucible.improvement.worker_supervisor import read_regular_artifact
+from crucible.repair.gateway import SAFE_MODEL_ERRORS
 from crucible.repair.identity import canonical_json, digest
 
 
@@ -70,6 +71,14 @@ PUBLIC_EVENTS = frozenset(
         "usage_reserved",
         "usage_settled",
         "usage_uncertain",
+        "usage_partial",
+        "usage_acknowledged",
+        "recovery_completed",
+        "trial_retry_authorized",
+        "trial_retry_consumed",
+        "request_dispatched",
+        "request_terminal",
+        "job_outcome",
     }
 )
 
@@ -226,19 +235,100 @@ class ReportExporter:
             if event["type"] == "command_approval":
                 item["approved"] = payload.get("approved") is True
             public_events.append(item)
-        actual = dict.fromkeys(UsageAmounts.model_fields, 0)
-        reserved = dict.fromkeys(UsageAmounts.model_fields, 0)
-        unsettled = 0
-        for row in await self.store.usage_records(id):
-            if row["settled_json"] is not None:
-                amounts = UsageAmounts.model_validate_json(str(row["settled_json"]))
-                for key in actual:
-                    actual[key] += getattr(amounts, key)
-            if row["status"] != "settled":
-                unsettled += 1
-                amounts = UsageAmounts.model_validate_json(str(row["requested_json"]))
-                for key in reserved:
-                    reserved[key] += getattr(amounts, key)
+        summary = await self.store.usage_summary(id)
+        actual = summary["confirmed"]
+        conservative = summary["conservative"]
+        reserved = summary["retained"]
+        assert (
+            isinstance(actual, dict)
+            and isinstance(conservative, dict)
+            and isinstance(reserved, dict)
+        )
+        unsettled = sum(
+            r["status"] not in ("settled", "conservative")
+            for r in await self.store.usage_records(id)
+        )
+        cleanup = all(e["status"] == "stopped" for e in await self.store.effects(id))
+        required_snapshots = {
+            str(seal.initial_snapshot_id),
+            str(seal.selected_final_snapshot_id),
+        }
+        failed = {
+            str(r["id"])
+            for r in await self.store.selected_trials(id)
+            if r["snapshot"] in required_snapshots
+            and r["status"] in ("error", "interrupted")
+        }
+        authorized = {
+            str(e["trial_id"])
+            for e in await self.store.events(id, "trial_retry_authorized")
+        }
+        consumed = {
+            str(e["trial_id"])
+            for e in await self.store.events(id, "trial_retry_consumed")
+        }
+        remaining = summary["remaining"]
+        assert isinstance(remaining, dict)
+        exhausted = any(
+            remaining[name] == 0
+            for name in (
+                "tokens",
+                "requests",
+                "active_seconds",
+                "worker_wall_seconds",
+                "trial_starts",
+            )
+        )
+        action = (
+            "none"
+            if run.status == "closed"
+            else "investigate"
+            if not cleanup
+            else "acknowledge_accounting"
+            if unsettled
+            else "recover"
+            if run.status in ("error", "interrupted", "stopping")
+            else "remain_blocked"
+            if not measurement.complete and exhausted
+            else "authorize_retry"
+            if failed - (authorized - consumed)
+            else "continue"
+            if not measurement.complete
+            else "none"
+        )
+        retry_links = [
+            {
+                "original_trial_id": str(UUID(str(e["original_trial_id"]))),
+                "replacement_trial_id": str(UUID(str(e["replacement_trial_id"]))),
+            }
+            for e in await self.store.events(id, "trial_superseded")
+        ]
+        job_facts = []
+        for e in await self.store.events(id, "job_outcome"):
+            try:
+                job_id = str(UUID(str(e.get("job_id"))))
+            except ValueError:
+                continue
+            category = e.get("failure_category")
+            job_facts.append(
+                {
+                    "job_id": job_id,
+                    "termination": e.get("termination")
+                    if e.get("termination")
+                    in ("completed", "budget_exhausted", "failed", "interrupted")
+                    else "failed",
+                    "cleanup_confirmed": e.get("cleanup_confirmed") is True,
+                    "failure_category": category
+                    if category is None
+                    or (
+                        isinstance(category, str)
+                        and category
+                        in SAFE_MODEL_ERRORS
+                        | {"execution", "cancellation", "cleanup", "unknown"}
+                    )
+                    else "unknown",
+                }
+            )
         trials = await self.store.trials(id)
         rounds = await self.store.rounds(id)
         role_facts = []
@@ -373,6 +463,12 @@ class ReportExporter:
                 d.model_dump(mode="json") for d in await self.store.decisions(id)
             ],
             "roles": role_facts,
+            "recovery": {
+                "cleanup_confirmed": cleanup,
+                "required_operator_action": action,
+            },
+            "trial_retry_links": retry_links,
+            "job_outcomes": job_facts,
             "trial_attempts": [
                 {
                     "trial_id": t["id"],
@@ -405,6 +501,7 @@ class ReportExporter:
             },
             "usage": {
                 "known_actual": actual,
+                "conservative_charges": conservative,
                 "unsettled_reserved": reserved,
                 "unsettled_reservations": unsettled,
                 "complete": not unsettled,
@@ -475,6 +572,7 @@ class ReportExporter:
             "",
             f"Actual trial generations: {len(trials)}. "
             f"Reported tokens: {actual['tokens']}. "
+            f"Conservative charges: {conservative}. "
             f"Unsettled reservations: {unsettled}. "
             "Dollars and provider cached-token totals: unavailable.",
             "",

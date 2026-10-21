@@ -88,7 +88,7 @@ async def test_unknown_schema_rejected(tmp_path):
 
     path = tmp_path / "experiments.sqlite3"
     with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA user_version=3")
+        conn.execute("PRAGMA user_version=4")
     with pytest.raises(ValueError, match="schema"):
         await ExperimentStore.open(path)
 
@@ -122,3 +122,24 @@ async def test_uncertain_usage_cannot_be_rewritten(tmp_path):
             await store.settle_usage(reservation, UsageAmounts(tokens=0))
     finally:
         await store.close()
+
+
+async def test_v2_accounting_upgrade_preserves_every_original_row(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "state.sqlite3"
+    store = await ExperimentStore.open(path)
+    run = await store.create(make_manifest(), "repo", "key")
+    reservation = await store.reserve_usage(run.id, None, UsageAmounts(tokens=50))
+    await store.mark_uncertain(reservation)
+    await store.close()
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA user_version=2")
+        before = conn.execute("SELECT * FROM experiment_usage").fetchall()
+        events = conn.execute("SELECT * FROM experiment_events").fetchall()
+    store = await ExperimentStore.open(path)
+    await store.close()
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (3,)
+        assert conn.execute("SELECT * FROM experiment_usage").fetchall() == before
+        assert conn.execute("SELECT * FROM experiment_events").fetchall() == events

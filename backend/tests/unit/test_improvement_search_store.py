@@ -82,7 +82,7 @@ async def test_historical_manifest_identity_survives_migration(tmp_path):
             ).fetchone()
             == original
         )
-        assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (3,)
 
 
 async def test_failed_migration_rolls_back_every_new_table(tmp_path):

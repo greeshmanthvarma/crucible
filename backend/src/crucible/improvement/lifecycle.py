@@ -422,6 +422,60 @@ class ExperimentService:
     async def status(self, id: UUID) -> dict[str, object]:
         record = await self.store.get(id)
         trials = await self.store.trials(id)
+        usage = await self.store.usage_summary(id)
+        effects = await self.store.effects(id)
+        cleanup = all(e["status"] == "stopped" for e in effects)
+        unresolved = await self.store.unsettled_usage(id)
+        authorized = {
+            e["trial_id"] for e in await self.store.events(id, "trial_retry_authorized")
+        }
+        consumed = {
+            e["trial_id"] for e in await self.store.events(id, "trial_retry_consumed")
+        }
+        required_snapshots = set()
+        if await self.store.snapshots(id):
+            required_snapshots.add(str(await self.store.accepted_snapshot_id(id)))
+        seal = await self.store.search_seal(id)
+        if seal:
+            required_snapshots.update(
+                (str(seal.initial_snapshot_id), str(seal.selected_final_snapshot_id))
+            )
+        failed = {
+            r["id"]
+            for r in await self.store.selected_trials(id)
+            if r["status"] in ("error", "interrupted")
+            and r["snapshot"] in required_snapshots
+        }
+        remaining = usage["remaining"]
+        assert isinstance(remaining, dict)
+        exhausted = any(
+            remaining[name] == 0
+            for name in (
+                "tokens",
+                "requests",
+                "active_seconds",
+                "worker_wall_seconds",
+                "trial_starts",
+            )
+        )
+        if record.status == "closed":
+            actions = []
+        elif not cleanup:
+            actions = ["recover", "investigate"]
+        elif unresolved:
+            actions = ["acknowledge_accounting", "recover"]
+        elif record.status in ("error", "interrupted", "stopping"):
+            actions = ["recover"]
+        elif record.status == "ready":
+            actions = (
+                ["remain_blocked"]
+                if exhausted
+                else ["authorize_retry"]
+                if failed - (authorized - consumed)
+                else ["continue"]
+            )
+        else:
+            actions = []
         return {
             "experiment_id": str(id),
             "status": record.status,
@@ -437,7 +491,11 @@ class ExperimentService:
                 in {c.case_id for c in record.manifest.cases if c.split != "final-test"}
                 for r in trials
             ),
-            "uncertain_usage": await self.store.unsettled_usage(id),
+            "uncertain_usage": unresolved,
+            "cleanup_confirmed": cleanup,
+            "usage": usage,
+            "permitted_actions": actions,
+            "trial_attempts": list(trials),
         }
 
     @asynccontextmanager
@@ -445,7 +503,7 @@ class ExperimentService:
         self, manifest: ExperimentManifest
     ) -> AsyncIterator[WorkerSupervisor]:
         gateway = ScopedModelGateway(
-            LiteLLMResponsesGateway(),
+            LiteLLMResponsesGateway(disable_retries=True),
             clock=SystemClock(),
             endpoint="http://broker/internal/improvement/model",
         )
@@ -480,7 +538,9 @@ class ExperimentService:
         finally:
             loop.remove_reader(0)
 
-    async def search(self, id: UUID) -> dict[str, object]:
+    async def search(
+        self, id: UUID, *, stop_after: Literal["mining", "search"] = "search"
+    ) -> dict[str, object]:
         record = await self.store.require_search_open(id)
         config = await self._validate(record)
         owner = await self.store.claim_execution(
@@ -508,7 +568,7 @@ class ExperimentService:
                 prefix="crucible-development-view-"
             ) as view_directory:
                 return await self._search_runtime(
-                    id, record, config, paths, owned, Path(view_directory)
+                    id, record, config, paths, owned, Path(view_directory), stop_after
                 )
         finally:
             pulse.cancel()
@@ -523,6 +583,7 @@ class ExperimentService:
         paths: ExperimentPaths,
         owned: OwnedWorktree,
         view_directory: Path,
+        stop_after: Literal["mining", "search"] = "search",
     ) -> dict[str, object]:
         from crucible.improvement.evidence_views import DevelopmentViewBuilder
         from crucible.improvement.promotion import PromotionService
@@ -549,7 +610,9 @@ class ExperimentService:
                 DockerProbes(self.store, self.docker, record.manifest),
                 view_directory,
             )
-            outcome = await SearchController(self.store, execution).run(id)
+            outcome = await SearchController(self.store, execution).run(
+                id, stop_after=stop_after
+            )
             return outcome.model_dump(mode="json")
 
     async def finalize(self, id: UUID) -> dict[str, object]:
@@ -721,6 +784,23 @@ class ExperimentService:
             await asyncio.gather(pulse, return_exceptions=True)
             await self.store.release_execution(id, owner, "report")
 
+    async def authorize_retry(
+        self, id: UUID, trials: tuple[UUID, ...]
+    ) -> dict[str, object]:
+        await self._validate(await self.store.get(id))
+        await self.store.authorize_trial_retries(id, trials)
+        return await self.status(id)
+
+    async def run_stages(
+        self, id: UUID, stop_after: Literal["baseline", "mining", "search"] = "search"
+    ) -> dict[str, object]:
+        baseline = await self.baseline(id)
+        if not baseline.get("complete") or stop_after == "baseline":
+            return baseline
+        return await self.search(
+            id, stop_after="mining" if stop_after == "mining" else "search"
+        )
+
     async def baseline(self, id: UUID) -> dict[str, object]:
         return await self._evaluate(id, False)
 
@@ -808,7 +888,22 @@ class ExperimentService:
                     config.protected_suite_root,
                 )
                 results = await runner.run_selection_baseline(id, snapshot_id)
-                if any(r.status != "complete" for r in results):
+                from crucible.improvement.selection import selection_counts
+                from crucible.improvement.trials import build_evaluation_set
+
+                evaluation = await build_evaluation_set(
+                    self.store, paths, id, snapshot_id
+                )
+                response["complete"] = selection_counts(evaluation) is not None
+                response["completed_stage"] = (
+                    ("candidate_trials" if candidate else "baseline")
+                    if response["complete"]
+                    else None
+                )
+                if (
+                    any(r.status != "complete" for r in results)
+                    or not response["complete"]
+                ):
                     await self.store.fail_run(id, "trial_infrastructure")
             return response
         except asyncio.CancelledError:
@@ -820,7 +915,17 @@ class ExperimentService:
         finally:
             pulse.cancel()
             await asyncio.gather(pulse, return_exceptions=True)
-            await self.store.release_execution(id, owner, "awaiting_search")
+            await self.store.release_execution(
+                id,
+                owner,
+                "awaiting_search"
+                if response.get("complete")
+                else "candidate_checks"
+                if candidate and "candidate_checks" in response
+                else "candidate_trials"
+                if candidate
+                else "baseline",
+            )
             response.update(await self.status(id))
 
     async def _process_start(self, pid: int) -> str | None:
@@ -975,14 +1080,39 @@ class ExperimentService:
         return await self.status(id)
 
     async def resume(self, id: UUID) -> dict[str, object]:
-        if await self.store.unsettled_usage(id):
-            raise RecoveryRequired(
-                "uncertain or unfinished usage blocks resume; close retains spending"
-            )
+        """Compatibility alias for reconciliation; never grants retry authority."""
+        return await self.recover(id)
+
+    async def recover(
+        self, id: UUID, acknowledge: tuple[UUID, ...] = ()
+    ) -> dict[str, object]:
         record = await self.store.get(id)
-        if record.status not in ("running", "error", "interrupted", "stopping"):
-            raise RevisionConflict("explicit resume requires interrupted/error state")
         config = await self._validate(record)
+        if (
+            record.status == "ready"
+            and not await self.store.unsettled_usage(id)
+            and await self.store.execution_owner(id) is None
+            and all(e["status"] == "stopped" for e in await self.store.effects(id))
+        ):
+            if acknowledge:
+                rows = {
+                    str(r["reservation_id"]): r
+                    for r in await self.store.usage_records(id)
+                }
+                if any(
+                    rows.get(str(rid), {}).get("status") != "conservative"
+                    for rid in acknowledge
+                ):
+                    raise RevisionConflict("acknowledgment differs from prior recovery")
+            return await self.status(id)
+        if record.status not in (
+            "running",
+            "error",
+            "interrupted",
+            "stopping",
+            "ready",
+        ):
+            raise RevisionConflict("explicit resume requires interrupted/error state")
         owner = await self._claim_recovery(id)
         try:
             await self._repository_lock(config, id)
@@ -1021,6 +1151,12 @@ class ExperimentService:
                     )
                 )
             await self.store.invalidate_interrupted(id)
+            if acknowledge:
+                await self.store.acknowledge_usage(id, owner, acknowledge)
+            if await self.store.unsettled_usage(id):
+                raise RecoveryRequired(
+                    "usage requires explicit conservative acknowledgment"
+                )
             await self.store.recover_ready(id, owner)
         finally:
             if await self.store.execution_owner(id) == str(owner):

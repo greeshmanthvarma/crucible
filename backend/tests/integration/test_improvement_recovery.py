@@ -6,18 +6,32 @@ from crucible.improvement.store import ExperimentStore
 from tests.unit.test_improvement_manifest import make_manifest
 
 
-async def test_uncertain_usage_blocks_resume(tmp_path):
-    store = await ExperimentStore.open(tmp_path / "experiments.sqlite3")
-    try:
-        run = await store.create(make_manifest(), "repo", "key")
-        usage = await store.reserve_usage(run.id, None, UsageAmounts(tokens=50))
-        await store.mark_uncertain(usage)
-        service = ExperimentService(store, tmp_path)
-        with pytest.raises(RecoveryRequired, match="usage"):
-            await service.resume(run.id)
-        assert (await store.get(run.id)).status == "error"
-    finally:
-        await store.close()
+async def test_uncertain_usage_blocks_resume(lifecycle_setup):
+    service, config, _, _ = lifecycle_setup
+    run = await service.start(config, "key", True)
+    usage = await service.store.reserve_usage(run.id, None, UsageAmounts(tokens=50))
+    await service.store.mark_uncertain(usage)
+    await service.store.fail_run(run.id, "transport")
+    with pytest.raises(RecoveryRequired, match="usage"):
+        await service.resume(run.id)
+    assert (await service.store.get(run.id)).status != "ready"
+    assert await service.store.unsettled_usage(run.id)
+    assert service.docker.calls == []
+
+
+async def test_recover_acknowledges_without_dispatch_or_retry(lifecycle_setup):
+    service, config, _, _ = lifecycle_setup
+    run = await service.start(config, "key", True)
+    usage = await service.store.reserve_usage(run.id, None, UsageAmounts(tokens=50))
+    await service.store.mark_uncertain(usage)
+    await service.store.fail_run(run.id, "transport")
+    result = await service.recover(run.id, (usage,))
+    assert result["status"] == "ready"
+    assert result["cleanup_confirmed"]
+    assert result["usage"]["conservative"]["tokens"] == 50
+    assert await service.recover(run.id, (usage,)) == result
+    assert await service.store.events(run.id, "trial_retry_authorized") == ()
+    assert service.docker.calls == []
 
 
 async def test_recovery_completion_cannot_clear_new_execution(tmp_path):
@@ -424,3 +438,120 @@ async def test_resume_reconciles_promotion_before_worktree_inspection(
     ] == "verified"
     assert len(await service.store.trials(run.id)) == 12
     assert git(repository, "rev-parse", "HEAD") == run.initial_commit
+
+
+async def test_acknowledgment_retains_overage_and_is_idempotent(tmp_path):
+    from crucible.improvement.store import RevisionConflict
+
+    store = await ExperimentStore.open(tmp_path / "state.sqlite3")
+    try:
+        run = await store.create(make_manifest(), "repo", "key")
+        reservation = await store.reserve_usage(run.id, None, UsageAmounts(tokens=50))
+        await store.settle_usage(reservation, UsageAmounts(tokens=70))
+        stopped = await store.request_stop(run.id)
+        owner = await store.claim_recovery(run.id, stopped.revision, None, 123, "test")
+        await store.acknowledge_usage(run.id, owner, (reservation,))
+        await store.close()
+        store = await ExperimentStore.open(tmp_path / "state.sqlite3")
+        import asyncio
+
+        await asyncio.gather(
+            store.acknowledge_usage(run.id, owner, (reservation,)),
+            store.acknowledge_usage(run.id, owner, (reservation,)),
+        )
+        rows = await store.usage_records(run.id)
+        assert rows[0]["status"] == "conservative"
+        assert UsageAmounts.model_validate_json(rows[0]["settled_json"]).tokens == 70
+        assert len(await store.events(run.id, "usage_acknowledged")) == 1
+        summary = await store.usage_summary(run.id)
+        assert summary["confirmed"]["tokens"] == 70
+        assert summary["conservative"]["tokens"] == 0
+        await store.recover_ready(run.id, owner)
+        assert not await store.unsettled_usage(run.id)
+        assert await store.events(run.id, "explicit_resume") == ()
+        with pytest.raises(RevisionConflict):
+            await store.acknowledge_usage(run.id, owner, (reservation,))
+    finally:
+        await store.close()
+
+
+async def test_acknowledgment_cannot_ignore_owned_effect(tmp_path):
+    from crucible.improvement.store import RevisionConflict
+
+    store = await ExperimentStore.open(tmp_path / "state.sqlite3")
+    try:
+        run = await store.create(make_manifest(), "repo", "key")
+        reservation = await store.reserve_usage(run.id, None, UsageAmounts(tokens=50))
+        await store.begin_effect(run.id, None, "worker", {"name": "survivor"}, {})
+        await store.mark_uncertain(reservation)
+        stopped = await store.request_stop(run.id)
+        owner = await store.claim_recovery(run.id, stopped.revision, None, 123, "test")
+        with pytest.raises(RevisionConflict, match="effects"):
+            await store.acknowledge_usage(run.id, owner, (reservation,))
+        assert await store.unsettled_usage(run.id)
+    finally:
+        await store.close()
+
+
+async def test_partial_resource_usage_settles_known_time_without_inventing_output(
+    tmp_path,
+):
+    store = await ExperimentStore.open(tmp_path / "state.sqlite3")
+    try:
+        run = await store.create(make_manifest(), "repo", "key")
+        reservation = await store.reserve_usage(
+            run.id,
+            None,
+            UsageAmounts(worker_wall_seconds=50, active_seconds=40, output_bytes=100),
+        )
+        await store.record_partial_usage(
+            reservation,
+            UsageAmounts(worker_wall_seconds=7, active_seconds=3),
+            ("output_bytes",),
+        )
+        summary = await store.usage_summary(run.id)
+        assert summary["confirmed"]["worker_wall_seconds"] == 7
+        assert summary["retained"]["worker_wall_seconds"] == 0
+        assert summary["retained"]["output_bytes"] == 100
+        stopped = await store.request_stop(run.id)
+        owner = await store.claim_recovery(run.id, stopped.revision, None, 123, "test")
+        await store.acknowledge_usage(run.id, owner, (reservation,))
+        summary = await store.usage_summary(run.id)
+        assert summary["confirmed"]["worker_wall_seconds"] == 7
+        assert summary["conservative"]["worker_wall_seconds"] == 0
+        assert summary["conservative"]["output_bytes"] == 100
+    finally:
+        await store.close()
+
+
+async def test_stage_driver_never_advances_after_incomplete_baseline(
+    lifecycle_setup, monkeypatch
+):
+    from contextlib import asynccontextmanager
+
+    from crucible.improvement.trials import IsolatedTrialRunner
+
+    service, config, _, _ = lifecycle_setup
+    run = await service.start(config, "stage-test", True)
+    calls = []
+
+    @asynccontextmanager
+    async def runtime(manifest):
+        yield None
+
+    async def incomplete(self, id, snapshot):
+        return []
+
+    async def search(id, **kwargs):
+        calls.append(id)
+        raise AssertionError("mining must not be dispatched")
+
+    monkeypatch.setattr(service, "_runtime", runtime)
+    monkeypatch.setattr(IsolatedTrialRunner, "run_selection_baseline", incomplete)
+    monkeypatch.setattr(service, "search", search)
+    result = await service.run_stages(run.id, "mining")
+    assert result["complete"] is False
+    assert result["status"] == "error"
+    assert result["stage"] == "baseline"
+    assert result["completed_stage"] is None
+    assert calls == []

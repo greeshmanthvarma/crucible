@@ -36,6 +36,19 @@ def parser() -> argparse.ArgumentParser:
         "close",
     ):
         operations.add_parser(operation).add_argument("id", type=UUID)
+    recover = operations.add_parser("recover")
+    recover.add_argument("id", type=UUID)
+    recover.add_argument(
+        "--acknowledge-reservation", type=UUID, action="append", default=[]
+    )
+    retry = operations.add_parser("authorize-retry")
+    retry.add_argument("id", type=UUID)
+    retry.add_argument("--trial", type=UUID, action="append", required=True)
+    stages = operations.add_parser("continue")
+    stages.add_argument("id", type=UUID)
+    stages.add_argument(
+        "--stop-after", choices=("baseline", "mining", "search"), default="baseline"
+    )
     report = operations.add_parser("report")
     report.add_argument("id", type=UUID)
     report.add_argument("--output", type=Path, required=True)
@@ -77,6 +90,12 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
                 args.config, args.idempotency_key, args.authorize_disposable_commands
             )
             output = await service.status(record.id)
+        elif args.operation == "recover":
+            output = await service.recover(args.id, tuple(args.acknowledge_reservation))
+        elif args.operation == "authorize-retry":
+            output = await service.authorize_retry(args.id, tuple(args.trial))
+        elif args.operation == "continue":
+            output = await service.run_stages(args.id, args.stop_after)
         elif args.operation == "report":
             output = await service.report(args.id, args.output)
         elif args.operation == "publish":
@@ -103,7 +122,7 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(output, sort_keys=True))
         if output.get("reason") == "operator_stopped":
             return 130
-        if args.operation == "final-evaluate" and output.get("complete") is False:
+        if output.get("complete") is False:
             return 3
         return (
             3
@@ -122,7 +141,25 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 130
-    except (ManifestDrift, RevisionConflict, ValueError, KeyError, NoResultFound):
+    except RevisionConflict as error:
+        if hasattr(args, "id"):
+            try:
+                output = await service.status(args.id)
+            except (ValueError, NoResultFound):
+                output = {}
+            output.update(
+                {
+                    "operation_blocked": True,
+                    "reason": "retry_authorization_required"
+                    if "trial retry requires" in str(error)
+                    else "state_conflict",
+                }
+            )
+            print(json.dumps(output, sort_keys=True))
+        else:
+            print("Improvement state conflicts with frozen inputs.", file=sys.stderr)
+        return 2
+    except (ManifestDrift, ValueError, KeyError, NoResultFound):
         print(
             "Improvement configuration or state conflicts with frozen inputs.",
             file=sys.stderr,

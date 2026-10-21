@@ -7,9 +7,10 @@ import signal
 import stat
 import time
 from pathlib import Path
-from typing import Protocol, overload
+from typing import Literal, Protocol, overload
 from uuid import UUID
 
+from crucible.benchmarks.evidence import atomic_json
 from crucible.domain.clock import SystemClock
 from crucible.domain.commands import CommandSpec
 from crucible.improvement.broker import ImprovementBroker, WorkspaceBinding
@@ -23,6 +24,8 @@ from crucible.improvement.store import ExecutionStore
 from crucible.improvement.worker_protocol import (
     IsolatedExecution,
     IsolatedRoleExecution,
+    JobFailure,
+    JobOutcome,
     RoleJob,
     WorkerJob,
     WorkerRequest,
@@ -30,6 +33,7 @@ from crucible.improvement.worker_protocol import (
     read_role_observation,
     read_worker_observation,
 )
+from crucible.repair.gateway import TrustedUsage
 from crucible.sandbox.protocol import (
     OutputChunk,
     OutputStream,
@@ -428,14 +432,57 @@ class WorkerSupervisor:
                 )
         if _digest(files) != snapshot.export_digest:
             raise ValueError("immutable export drift")
-        for image in (self.manifest.worker_image, self.manifest.relay_image):
-            info = json.loads(await self.docker.invoke("image", "inspect", image))[0]
-            if (
-                image not in info.get("RepoDigests", [])
-                or (info.get("Os") + "/" + info.get("Architecture"))
-                != self.manifest.worker_platform
-            ):
-                raise ValueError("worker image digest/platform drift")
+        try:
+            for image in (self.manifest.worker_image, self.manifest.relay_image):
+                info = json.loads(await self.docker.invoke("image", "inspect", image))[
+                    0
+                ]
+                if (
+                    image not in info.get("RepoDigests", [])
+                    or (info.get("Os") + "/" + info.get("Architecture"))
+                    != self.manifest.worker_platform
+                ):
+                    raise ValueError("worker image digest/platform drift")
+        except (ValueError, OSError):
+            outcome = JobOutcome(
+                job.job_id,
+                job.experiment_id,
+                job.trial_id if isinstance(job, WorkerJob) else job.role_id,
+                job.harness_digest,
+                job.repeat_index if isinstance(job, WorkerJob) else None,
+                "failed",
+                "admission",
+                JobFailure("execution", "worker", "not_sent"),
+                True,
+                None,
+                "host_measured",
+                "recover",
+                UsageAmounts(),
+                TrustedUsage(),
+                (),
+                None,
+            )
+            await self.store.record_event(
+                job.experiment_id,
+                "job_outcome",
+                {
+                    "job_id": str(job.job_id),
+                    "termination": "failed",
+                    "cleanup_confirmed": True,
+                    "stage": "admission",
+                    "failure_category": "execution",
+                    "dispatch": "not_sent",
+                },
+            )
+            await self.store.fail_run(job.experiment_id, "execution")
+            execution_type = (
+                IsolatedExecution
+                if isinstance(job, WorkerJob)
+                else IsolatedRoleExecution
+            )
+            return execution_type(
+                None, solver_export, self.root, TrustedUsage(), (), True, 0.0, outcome
+            )
         root = self.root / "jobs" / str(job.job_id)
         root.mkdir(parents=True, exist_ok=False, mode=0o700)
         state = root / "state"
@@ -466,6 +513,14 @@ class WorkerSupervisor:
             kind="worker",
             job_id=job.job_id,
         )
+        active_started: float | None = None
+        active_elapsed = 0.0
+        cleanup_verified = False
+        output_known = True
+        stdout_chunks: tuple[OutputChunk, ...] = ()
+        observation = None
+        failure: BaseException | None = None
+        stage = "execution"
         network = "improvement-network-" + str(job.job_id)
         relay = "improvement-relay-" + str(job.job_id)
         try:
@@ -552,6 +607,7 @@ class WorkerSupervisor:
                     ),
                 )
                 active_started = time.monotonic()
+                output_known = False
                 attach = asyncio.create_task(
                     self.docker.attach(
                         worker_id, job.output_limit_bytes, credential.token
@@ -566,19 +622,23 @@ class WorkerSupervisor:
                         await monitor
                         raise ValueError("worker stopped by protected controller")
                     code, stdout_chunks = await attach
+                    output_known = True
                 finally:
                     attach.cancel()
                     monitor.cancel()
                     await asyncio.gather(attach, monitor, return_exceptions=True)
-                active_elapsed = max(
-                    0.0,
-                    time.monotonic()
-                    - active_started
-                    - self.broker.approval_wait_seconds(job.job_id),
-                )
+                    active_elapsed = max(
+                        0.0,
+                        time.monotonic()
+                        - active_started
+                        - self.broker.approval_wait_seconds(job.job_id),
+                    )
                 if code:
                     raise ValueError("worker process failed")
+            stage = "cleanup"
             await self.stop(job.job_id)
+            cleanup_verified = True
+            stage = "observation"
             raw = state / "observation.json"
             data = read_regular_artifact(raw, 1_048_576)
             observation = (
@@ -586,36 +646,150 @@ class WorkerSupervisor:
                 if isinstance(job, WorkerJob)
                 else read_role_observation(data, job)
             )
-            elapsed = time.monotonic() - started
-            await self.store.settle_usage(
-                reservation,
-                UsageAmounts(
-                    output_bytes=sum(len(c.data) for c in stdout_chunks),
-                    active_seconds=int(active_elapsed + 0.999),
-                    worker_wall_seconds=int(elapsed + 0.999),
-                ),
+        except BaseException as error:
+            failure = error
+        else:
+            failure = None
+        session = self.broker.sessions[job.job_id]
+        root_failure = (
+            JobFailure(
+                session.failure,
+                session.failure_origin,
+                "possibly_sent" if session.failure_origin == "model" else "unknown",
             )
-            assert self.broker.gateway is not None
-            execution_type = (
-                IsolatedExecution
-                if isinstance(job, WorkerJob)
-                else IsolatedRoleExecution
+            if session.failure
+            else JobFailure(
+                "cancellation"
+                if isinstance(failure, asyncio.CancelledError)
+                else "cleanup"
+                if stage == "cleanup"
+                else "execution",
+                "controller"
+                if isinstance(failure, asyncio.CancelledError)
+                else "cleanup"
+                if stage == "cleanup"
+                else "worker",
             )
-            return execution_type(
-                observation,  # type: ignore[arg-type]
-                solver_export,
-                state,
-                self.broker.gateway.usage(job.job_id),
-                tuple(self.broker.sessions[job.job_id].records),
-                True,
-                elapsed,
-            )
-        except BaseException:
-            try:
+            if failure
+            else None
+        )
+        cleanup_confirmed = True
+        cleanup_failure = None
+        try:
+            if not cleanup_verified:
                 await self.stop(job.job_id)
-            finally:
-                await self.store.mark_uncertain(reservation)
-            raise
+        except Exception:
+            cleanup_confirmed = False
+            cleanup_failure = JobFailure("cleanup", "cleanup")
+            if root_failure is None:
+                root_failure = JobFailure("cleanup", "cleanup")
+        elapsed = time.monotonic() - started
+        measured = UsageAmounts(
+            output_bytes=sum(len(c.data) for c in stdout_chunks),
+            active_seconds=int(active_elapsed + 0.999),
+            worker_wall_seconds=int(elapsed + 0.999),
+        )
+        if cleanup_confirmed:
+            if not output_known:
+                await self.store.record_partial_usage(
+                    reservation, measured, ("output_bytes",)
+                )
+            else:
+                await self.store.settle_usage(reservation, measured)
+        else:
+            await self.store.mark_uncertain(reservation, measured)
+        termination: Literal[
+            "completed", "budget_exhausted", "failed", "interrupted"
+        ] = (
+            "interrupted"
+            if (
+                isinstance(failure, asyncio.CancelledError)
+                or session.failure == "cancellation"
+                or (observation and observation.termination == "cancelled")
+            )
+            else "failed"
+            if root_failure
+            else "budget_exhausted"
+            if observation and observation.termination == "budget_exhausted"
+            else "completed"
+            if observation
+            and observation.termination in ("completed", "behavior_error")
+            else "failed"
+        )
+        if root_failure is None and termination == "interrupted":
+            root_failure = JobFailure("cancellation", "controller")
+        if root_failure is None and termination == "failed":
+            root_failure = JobFailure("unknown", "worker")
+        assert self.broker.gateway is not None
+        reservation_ids = {
+            str(e["reservation_id"])
+            for e in await self.store.events(job.experiment_id, "usage_reserved")
+            if e.get("job_id") == str(job.job_id)
+        }
+        unresolved = tuple(
+            UUID(str(r["reservation_id"]))
+            for r in await self.store.usage_records(job.experiment_id)
+            if r["reservation_id"] in reservation_ids
+            and r["status"] not in ("settled", "conservative")
+        )
+        outcome = JobOutcome(
+            job.job_id,
+            job.experiment_id,
+            job.trial_id if isinstance(job, WorkerJob) else job.role_id,
+            job.harness_digest,
+            job.repeat_index if isinstance(job, WorkerJob) else None,
+            termination,
+            stage,
+            root_failure,
+            cleanup_confirmed,
+            reservation,
+            "host_measured" if cleanup_confirmed else "retained_reservation",
+            "recover" if root_failure else "continue",
+            measured,
+            self.broker.gateway.usage(job.job_id),
+            unresolved,
+            cleanup_failure,
+        )
+        atomic_json(root / "job-outcome.json", outcome)
+        await self.store.record_event(
+            job.experiment_id,
+            "job_outcome",
+            {
+                "job_id": str(job.job_id),
+                "path": str((root / "job-outcome.json").relative_to(self.root)),
+                "termination": termination,
+                "cleanup_confirmed": cleanup_confirmed,
+                "failure_category": root_failure.category if root_failure else None,
+            },
+        )
+        if root_failure:
+            await self.store.fail_run(
+                job.experiment_id,
+                root_failure.category,
+                interrupted=termination == "interrupted",
+            )
+        if (
+            failure
+            and stage != "cleanup"
+            and not isinstance(
+                failure, (ValueError, OSError, TimeoutError, asyncio.CancelledError)
+            )
+        ):
+            raise failure
+        assert self.broker.gateway is not None
+        execution_type = (
+            IsolatedExecution if isinstance(job, WorkerJob) else IsolatedRoleExecution
+        )
+        return execution_type(
+            observation,  # type: ignore[arg-type]
+            solver_export,
+            state,
+            self.broker.gateway.usage(job.job_id),
+            tuple(session.records),
+            cleanup_confirmed,
+            elapsed,
+            outcome,
+        )
 
     async def _monitor(self, job: WorkerRequest, started: float) -> None:
         while True:

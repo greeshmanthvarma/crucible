@@ -420,14 +420,20 @@ async def test_duplicate_generations_are_not_silently_selected(promotion_setup):
     service, store, paths, owned, round, baseline, candidate, checks = promotion_setup
     manifest = (await store.get(round.experiment_id)).manifest
     case = next(c for c in manifest.cases if c.split == "development")
-    await store.create_trial(
-        round.experiment_id,
-        candidate.snapshot_id,
-        case.case_id,
-        0,
-        trial_key(manifest, candidate, case, 0),
+    before = await build_evaluation_set(
+        store, paths, round.experiment_id, candidate.snapshot_id
     )
-    with pytest.raises(ValueError, match="ambiguous trial generations"):
+    with pytest.raises(ValueError, match="not retry eligible"):
+        await store.create_trial(
+            round.experiment_id,
+            candidate.snapshot_id,
+            case.case_id,
+            0,
+            trial_key(manifest, candidate, case, 0),
+        )
+    assert (
         await build_evaluation_set(
             store, paths, round.experiment_id, candidate.snapshot_id
         )
+        == before
+    )

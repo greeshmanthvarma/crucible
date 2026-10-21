@@ -192,10 +192,21 @@ async def test_cleanup_attempts_other_resources_after_failure(tmp_path):
     assert (worker_effect, "uncertain") in stopped
 
 
-@pytest.mark.parametrize("crash_after_create", [False, True])
-async def test_create_before_ack_cleanup_and_memory_only_credential(
-    tmp_path, crash_after_create
-):
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "preflight",
+        "create",
+        "worker_exit",
+        "cancel",
+        "cleanup",
+        "stream",
+        "stream_cleanup",
+        "behavior",
+    ],
+)
+async def test_create_before_ack_cleanup_and_memory_only_credential(tmp_path, fault):
     from uuid import uuid4
 
     from crucible.improvement.contracts import HarnessSnapshot
@@ -229,6 +240,8 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(
 
         async def invoke(self, *args):
             if args[:2] == ("image", "inspect"):
+                if fault == "preflight":
+                    raise OSError("image unavailable SECRET_CANARY")
                 return json.dumps(
                     [{"RepoDigests": [args[2]], "Os": "linux", "Architecture": "amd64"}]
                 )
@@ -253,7 +266,7 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(
                     "Config": {"Labels": {"crucible.improvement.job": str(job.job_id)}},
                     "State": {"Running": False},
                 }
-                if name.startswith("improvement-worker") and crash_after_create:
+                if name.startswith("improvement-worker") and fault == "create":
                     raise ValueError("crash after create before acknowledgment")
                 return name
             if args[0] == "start":
@@ -262,19 +275,54 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(
             if args[0] == "inspect":
                 return json.dumps([self.containers[args[1]]])
             if args[0] == "kill":
+                if fault in ("cleanup", "stream_cleanup") and "worker" in args[1]:
+                    raise ValueError("cleanup failed SECRET_CANARY")
                 self.containers[args[1]]["State"]["Running"] = False
                 return ""
             raise AssertionError(args)
 
         async def attach(self, identity, limit, credential=None):
+            self.containers[identity]["State"]["Running"] = True
             self.credentials.append(credential)
+            if fault == "worker_exit":
+                return 1, ()
+            if fault == "cancel":
+                import asyncio
+
+                raise asyncio.CancelledError
+            if fault in ("stream", "stream_cleanup"):
+                from uuid import uuid5
+
+                from crucible.engine.gateway import ModelError, PreparedModelRequest
+
+                class Upstream:
+                    calls = 0
+
+                    async def stream(self, request):
+                        self.calls += 1
+                        yield ModelError("provider_stream_failed", "SECRET_CANARY")
+
+                upstream = Upstream()
+                broker.gateway.upstream = upstream
+                request = PreparedModelRequest(
+                    uuid5(job.job_id, "run"), uuid4(), job.model.model_id, (), (), 100
+                )
+                events = [
+                    e async for e in broker.model(credential, job.job_id, request)
+                ]
+                assert events[0].code == "provider_stream_failed"
+                assert upstream.calls == 1
             state = tmp_path / "controller/jobs" / str(job.job_id) / "state"
             payload = dict(
                 schema_version=1,
                 job_id=str(job.job_id),
                 trial_id=str(job.trial_id),
                 export_digest=job.export_digest,
-                termination="completed",
+                termination="behavior_error"
+                if fault == "behavior"
+                else "provider_error"
+                if fault in ("stream", "stream_cleanup")
+                else "completed",
                 trace_ref="trace.json",
                 usage_ref="usage.json",
                 detail_code=None,
@@ -292,21 +340,63 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(
         "http://host.docker.internal:1234",
     )
     try:
-        if crash_after_create:
-            with pytest.raises(ValueError, match="crash after create"):
-                await supervisor.execute(job, snapshot, solver, harness_export=harness)
-        else:
-            result = await supervisor.execute(
-                job, snapshot, solver, harness_export=harness
+        result = await supervisor.execute(job, snapshot, solver, harness_export=harness)
+        assert result.outcome is not None
+        if fault == "preflight":
+            assert result.cleanup_confirmed
+            assert result.outcome.stage == "admission"
+            assert result.outcome.failure.dispatch == "not_sent"
+            assert result.outcome.resource_reservation_id is None
+            assert await store.effects(job.experiment_id) == ()
+            assert job.job_id not in broker.sessions
+            assert len(await store.events(job.experiment_id, "job_outcome")) == 1
+            return
+        assert (
+            "SECRET_CANARY"
+            not in (
+                tmp_path / "controller/jobs" / str(job.job_id) / "job-outcome.json"
+            ).read_text()
+        )
+        if fault in (
+            "create",
+            "worker_exit",
+            "cancel",
+            "cleanup",
+            "stream",
+            "stream_cleanup",
+        ):
+            assert result.outcome.termination == (
+                "interrupted" if fault == "cancel" else "failed"
             )
+            assert result.outcome.failure.category == (
+                "cancellation"
+                if fault == "cancel"
+                else "cleanup"
+                if fault == "cleanup"
+                else "provider_stream_failed"
+                if fault in ("stream", "stream_cleanup")
+                else "execution"
+            )
+            assert result.cleanup_confirmed == (
+                fault not in ("cleanup", "stream_cleanup")
+            )
+            assert len(await store.events(job.experiment_id, "job_outcome")) == 1
+            if fault in ("stream", "stream_cleanup"):
+                assert await store.unsettled_usage(job.experiment_id)
+                assert result.outcome.failure.origin == "model"
+            if fault == "stream_cleanup":
+                assert result.outcome.cleanup_failure.category == "cleanup"
+        else:
+            assert result.outcome.termination == "completed"
             assert result.cleanup_confirmed
             assert docker.credentials[0]
-        assert all(not c["State"]["Running"] for c in docker.containers.values())
+        if fault not in ("cleanup", "stream_cleanup"):
+            assert all(not c["State"]["Running"] for c in docker.containers.values())
         assert not any(
             p.name == "credential" for p in (tmp_path / "controller").rglob("*")
         )
         assert all(
             e["status"] == "stopped" for e in await store.effects(job.experiment_id)
-        )
+        ) == (fault not in ("cleanup", "stream_cleanup"))
     finally:
         await store.close()

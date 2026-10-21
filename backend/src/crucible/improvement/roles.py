@@ -573,6 +573,7 @@ class RoleRunner:
 
         run = await self.store.get(execution.experiment_id)
         directory = self.root / "roles" / str(execution.role_id)
+        result = None
         kind = execution.kind
         attempt = 1 if kind == "format_correction" else 0
         try:
@@ -584,6 +585,19 @@ class RoleRunner:
                 workspace,
                 harness_export=snapshot_path.parent / "harness",
             )
+            from crucible.benchmarks.evidence import atomic_json
+
+            atomic_json(directory / "job-outcome.json", result.outcome)
+            if result.outcome and result.outcome.termination == "interrupted":
+                import asyncio
+
+                raise asyncio.CancelledError
+            if result.observation is None:
+                if result.outcome and result.outcome.termination == "interrupted":
+                    import asyncio
+
+                    raise asyncio.CancelledError
+                raise ValueError("role execution failed")
             if not result.cleanup_confirmed:
                 raise ValueError("role cleanup uncertain")
             execution = execution.model_copy(
@@ -656,7 +670,11 @@ class RoleRunner:
                     "status": "interrupted" if interrupted else "error",
                     "error_code": "role_interrupted"
                     if interrupted
-                    else "role_infrastructure_error",
+                    else (
+                        result.outcome.failure.category
+                        if result and result.outcome and result.outcome.failure
+                        else "role_infrastructure_error"
+                    ),
                 }
             )
             # Infrastructure failures are not schema-correction opportunities.

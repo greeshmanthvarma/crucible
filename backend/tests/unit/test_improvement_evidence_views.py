@@ -58,6 +58,12 @@ async def evidence_setup(tmp_path, request):
     ids = []
     for case in ("development", "selection-validation"):
         for repeat in range(3):
+            if (
+                getattr(request, "param", {}).get("omit_repeat")
+                and case == "development"
+                and repeat == 0
+            ):
+                continue
             trial = await store.create_trial(
                 run.id, snapshot.snapshot_id, case, repeat, "key"
             )
@@ -199,11 +205,11 @@ async def test_unregistered_evidence_refused(evidence_setup, tmp_path):
         )
 
 
+@pytest.mark.parametrize("evidence_setup", [{"omit_repeat": True}], indirect=True)
 async def test_missing_development_repeat_stops_view(evidence_setup, tmp_path):
     from crucible.improvement.evidence_views import DevelopmentViewBuilder
 
     store, root, run, snapshot, ids = evidence_setup
-    await store.create_trial(run.id, snapshot.snapshot_id, "development", 0, "new-key")
     with pytest.raises(ValueError, match="ambiguous|complete"):
         await DevelopmentViewBuilder(store, root).build_development_view(
             run.id, snapshot.snapshot_id, tmp_path / "view"

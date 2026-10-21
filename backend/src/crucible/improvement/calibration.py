@@ -239,7 +239,7 @@ async def run_isolated_calibration(config: Path, output: Path) -> TrialResult:
             wall_deadline_seconds=manifest.trial_limits.wall_timeout_seconds,
         )
         gateway = ScopedModelGateway(
-            LiteLLMResponsesGateway(),
+            LiteLLMResponsesGateway(disable_retries=True),
             clock=SystemClock(),
             endpoint="http://broker/internal/improvement/model",
         )
@@ -258,6 +258,8 @@ async def run_isolated_calibration(config: Path, output: Path) -> TrialResult:
             finally:
                 await supervisor.stop(job.job_id)
         atomic_json(output / "execution.json", execution)
+        if execution.observation is None:
+            raise ValueError("calibration worker execution failed")
         for reference, destination in (
             (execution.observation.trace_ref, "trace.json"),
             (execution.observation.usage_ref, "usage.json"),

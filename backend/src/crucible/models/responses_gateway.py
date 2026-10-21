@@ -25,8 +25,11 @@ ResponseFunction = Callable[..., Awaitable[object]]
 
 
 class LiteLLMResponsesGateway:
-    def __init__(self, response: ResponseFunction | None = None) -> None:
+    def __init__(
+        self, response: ResponseFunction | None = None, *, disable_retries: bool = False
+    ) -> None:
         self._response = response or cast(ResponseFunction, aresponses)
+        self._disable_retries = disable_retries
 
     async def stream(
         self, request: PreparedModelRequest
@@ -41,6 +44,11 @@ class LiteLLMResponsesGateway:
                 max_output_tokens=request.max_output_tokens,
                 stream=True,
                 store=False,
+                **(
+                    {"num_retries": 0, "max_retries": 0}
+                    if self._disable_retries
+                    else {}
+                ),
             )
         except Exception as error:
             yield ModelError("provider_request_failed", str(error)[:1000])
@@ -58,6 +66,20 @@ class LiteLLMResponsesGateway:
                 yield ModelError("invalid_provider_event", str(error))
                 return
             event_type = event.get("type")
+            if event_type in (
+                "response.completed",
+                "response.incomplete",
+                "response.failed",
+                "error",
+            ):
+                result = event.get("response")
+                if isinstance(result, dict):
+                    usage = result.get("usage")
+                    if isinstance(usage, dict):
+                        yield ModelUsage(
+                            _optional_int(usage.get("input_tokens")),
+                            _optional_int(usage.get("output_tokens")),
+                        )
             if event_type == "response.output_text.delta":
                 delta = event.get("delta")
                 if isinstance(delta, str) and delta:
@@ -93,14 +115,6 @@ class LiteLLMResponsesGateway:
                 saw_tool_call = True
                 yield CompleteToolCall(new_id(), name, parsed, call_id)
             elif event_type in ("response.completed", "response.incomplete"):
-                result = event.get("response")
-                if isinstance(result, dict):
-                    usage = result.get("usage")
-                    if isinstance(usage, dict):
-                        yield ModelUsage(
-                            _optional_int(usage.get("input_tokens")),
-                            _optional_int(usage.get("output_tokens")),
-                        )
                 reason = (
                     ModelStopReason.LENGTH
                     if event_type == "response.incomplete"

@@ -301,6 +301,7 @@ class IsolatedTrialRunner:
         )
         job_id = uuid4()
         solver = None
+        execution = None
         patch = None
         grade = None
         host_output = None
@@ -382,6 +383,13 @@ class IsolatedTrialRunner:
             execution = await self.supervisor.execute(
                 job, snapshot, solver_case.workspace, harness_export=harness
             )
+            atomic_json(root / "job-outcome.json", execution.outcome)
+            if execution.outcome and execution.outcome.termination == "interrupted":
+                raise asyncio.CancelledError
+            if execution.observation is None:
+                if execution.outcome and execution.outcome.termination == "interrupted":
+                    raise asyncio.CancelledError
+                raise ValueError("worker execution failed")
             if not execution.cleanup_confirmed:
                 raise ValueError("owned worker/command cleanup uncertain")
             current = await self.store.get(experiment_id)
@@ -552,7 +560,15 @@ class IsolatedTrialRunner:
             code = (
                 "cleanup_uncertain"
                 if not cleanup
-                else ("operator_interrupted" if interrupted else "isolated_trial_error")
+                else (
+                    "operator_interrupted"
+                    if interrupted
+                    else (
+                        execution.outcome.failure.category
+                        if execution and execution.outcome and execution.outcome.failure
+                        else "isolated_trial_error"
+                    )
+                )
             )
             await self.store.fail_run(
                 experiment_id, code, interrupted=interrupted and cleanup

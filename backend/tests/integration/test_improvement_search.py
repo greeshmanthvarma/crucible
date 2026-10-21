@@ -248,13 +248,15 @@ async def test_local_baseline_error_never_schedules_implicit_retry(local_search)
     execution, _, store, round, baseline = local_search
     manifest = (await store.get(round.experiment_id)).manifest
     case = next(c for c in manifest.cases if c.split == "development")
-    # A duplicate generation with no explicit recovery is ambiguous and must stop
-    # before the execution port could schedule a fresh worker.
-    await store.create_trial(
-        round.experiment_id, baseline.snapshot_id, case.case_id, 0, "a" * 64
-    )
-    with pytest.raises(ValueError, match="ambiguous trial generations"):
-        await execution.baseline(round.experiment_id)
+    # Duplicate generations are now rejected atomically before they can make
+    # otherwise complete evidence ambiguous or dispatch a worker.
+    before = await store.trials(round.experiment_id)
+    with pytest.raises(ValueError, match="not retry eligible"):
+        await store.create_trial(
+            round.experiment_id, baseline.snapshot_id, case.case_id, 0, "a" * 64
+        )
+    assert await store.trials(round.experiment_id) == before
+    assert (await execution.baseline(round.experiment_id)).trials
 
 
 async def test_malformed_mining_after_one_correction_is_failure(local_search):
@@ -352,23 +354,38 @@ async def test_interrupted_proposal_consumes_round_on_explicit_resume(search_set
     assert (await store.rounds(id))[0].status == "interrupted"
 
 
-async def test_trial_retry_requires_explicit_resume_and_preserves_original(
+async def test_trial_retry_requires_named_authorization_and_preserves_original(
     search_setup,
+    tmp_path,
 ):
     store, id, port = search_setup
     case = next(c for c in port.manifest.cases if c.split == "development")
     sid, key = port.snapshot.snapshot_id, "a" * 64
     original = await store.create_trial(id, sid, case.case_id, 0, key)
     await store.trial_state(original, "error", error="infrastructure")
-    with pytest.raises(ValueError, match="explicit compatible recovery"):
+    with pytest.raises(ValueError, match="explicit compatible authorization"):
         await store.require_trial_retry(id, sid, case.case_id, 0, key)
     await recover(store, id)
+    with pytest.raises(ValueError, match="explicit compatible authorization"):
+        await store.require_trial_retry(id, sid, case.case_id, 0, key)
+    from crucible.improvement.lifecycle import ExperimentService
+
+    service = ExperimentService(store, tmp_path)
+    assert (await service.status(id))["permitted_actions"] == ["authorize_retry"]
+    await store.authorize_trial_retries(id, (original,))
+    await store.authorize_trial_retries(id, (original,))
+    assert (await service.status(id))["permitted_actions"] == ["continue"]
+    assert len(await store.events(id, "trial_retry_authorized")) == 1
     await store.require_trial_retry(id, sid, case.case_id, 0, key)
     replacement = await store.create_trial(id, sid, case.case_id, 0, key)
     assert [r["id"] for r in await store.selected_trials(id)] == [str(replacement)]
     assert len(await store.trials(id)) == 2
+    assert len(await store.events(id, "trial_retry_consumed")) == 1
+    with pytest.raises(ValueError):
+        await store.create_trial(id, sid, case.case_id, 0, key)
+    assert len(await store.trials(id)) == 2
     assert (await store.trials(id))[0]["status"] == "error"
-    with pytest.raises(ValueError, match="explicit compatible recovery"):
+    with pytest.raises(ValueError, match="explicit compatible authorization"):
         await store.require_trial_retry(id, sid, case.case_id, 0, key)
 
 
@@ -436,3 +453,12 @@ async def test_role_fail_closed_stop_flag_is_infrastructure(local_search):
     assert outcome.reason == "infrastructure_error"
     assert not outcome.ready_for_final
     assert (await store.get(round.experiment_id)).status == "error"
+
+
+async def test_supported_mining_stop_dispatches_no_proposal(search_setup):
+    store, id, port = search_setup
+    result = await SearchController(store, port).run(id, stop_after="mining")
+    assert result.reason == "stage_complete"
+    assert not result.ready_for_final
+    assert port.proposals == 0
+    assert len(await store.rounds(id)) == 1

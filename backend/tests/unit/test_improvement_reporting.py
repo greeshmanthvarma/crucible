@@ -20,6 +20,18 @@ async def test_report_is_deterministic_and_incomplete_is_prominent(
             "path": "/private/CANARY_PATH",
         },
     )
+    from uuid import uuid4
+
+    await store.record_event(
+        manifest.experiment_id,
+        "job_outcome",
+        {
+            "job_id": str(uuid4()),
+            "failure_category": "CANARY_SECRET",
+            "termination": "CANARY_REFERENCE",
+            "cleanup_confirmed": True,
+        },
+    )
     exporter = ReportExporter(store, evaluator.paths)
     first = await exporter.export_report(manifest.experiment_id, tmp_path / "report-a")
     second = await exporter.export_report(manifest.experiment_id, tmp_path / "report-b")
@@ -37,6 +49,9 @@ async def test_report_is_deterministic_and_incomplete_is_prominent(
     ):
         assert value not in markdown + metrics_raw
     metrics = json.loads(metrics_raw)
+    assert metrics["job_outcomes"][0]["failure_category"] == "unknown"
+    assert metrics["job_outcomes"][0]["termination"] == "failed"
+    assert metrics["recovery"]["cleanup_confirmed"] is True
     assert metrics["usage"]["dollars"] is None
     assert metrics["usage"]["provider_cache_tokens"] is None
     assert metrics["measurement"]["splits"][0]["expected_trials_per_version"] == 3
@@ -132,3 +147,49 @@ async def test_report_creation_crash_is_recoverable(final_setup, tmp_path, monke
     with pytest.raises(RuntimeError, match="atomic export"):
         await exporter.export_report(manifest.experiment_id, directory)
     assert await exporter.export_report(manifest.experiment_id, directory)
+
+
+async def test_conservative_accounting_is_never_confirmed_provider_usage(
+    final_setup, tmp_path
+):
+    from crucible.improvement.contracts import UsageAmounts
+
+    evaluator, _, store, manifest, _, _, _, _ = final_setup
+    reservation = await store.reserve_usage(
+        manifest.experiment_id, None, UsageAmounts(tokens=70)
+    )
+    await store.mark_uncertain(reservation)
+    stopped = await store.request_stop(manifest.experiment_id)
+    owner = await store.claim_recovery(
+        manifest.experiment_id, stopped.revision, None, 123, "test"
+    )
+    await store.acknowledge_usage(manifest.experiment_id, owner, (reservation,))
+    await store.recover_ready(manifest.experiment_id, owner)
+    await ReportExporter(store, evaluator.paths).export_report(
+        manifest.experiment_id, tmp_path / "conservative"
+    )
+    data = json.loads((tmp_path / "conservative/metrics.json").read_text())
+    assert data["usage"]["conservative_charges"]["tokens"] == 70
+    assert data["usage"]["known_actual"]["tokens"] == 0
+    assert data["usage"]["dollars"] is None
+
+
+async def test_report_and_status_block_exhausted_remaining_allowance(
+    final_setup, tmp_path
+):
+    from crucible.improvement.contracts import UsageAmounts
+    from crucible.improvement.lifecycle import ExperimentService
+
+    evaluator, _, store, manifest, _, _, _, _ = final_setup
+    amount = UsageAmounts(tokens=manifest.budget.max_reported_and_reserved_tokens)
+    reservation = await store.reserve_usage(manifest.experiment_id, None, amount)
+    await store.settle_usage(reservation, amount)
+    await ReportExporter(store, evaluator.paths).export_report(
+        manifest.experiment_id, tmp_path / "exhausted"
+    )
+    data = json.loads((tmp_path / "exhausted/metrics.json").read_text())
+    status = await ExperimentService(store, evaluator.paths.root).status(
+        manifest.experiment_id
+    )
+    assert status["permitted_actions"] == ["remain_blocked"]
+    assert data["recovery"]["required_operator_action"] == "remain_blocked"

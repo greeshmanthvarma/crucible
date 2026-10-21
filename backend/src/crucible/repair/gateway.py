@@ -24,6 +24,26 @@ from crucible.engine.gateway import (
 from crucible.models.token_counting import estimate_input_tokens
 from crucible.repair.identity import canonical_json
 
+SAFE_MODEL_ERRORS = frozenset(
+    {
+        "provider_request_failed",
+        "provider_stream_failed",
+        "invalid_provider_event",
+        "invalid_tool_call",
+        "invalid_tool_arguments",
+        "provider_error",
+        "upstream_incomplete",
+        "worker_session_expired",
+    }
+)
+
+
+def safe_model_error(code: str) -> ModelError:
+    return ModelError(
+        code if code in SAFE_MODEL_ERRORS else "upstream_error",
+        "Model request could not complete",
+    )
+
 
 class GatewayDenied(ValueError):
     def __init__(self, status_code: int, detail: str) -> None:
@@ -148,6 +168,12 @@ class ScopedModelGateway:
             session.charged_tokens += reserved
             return Reservation(session, request, estimate, reserved)
 
+    async def release_unused(self, reservation: Reservation) -> None:
+        """Trusted caller only: provider stream has never been opened."""
+        async with self._lock:
+            reservation.session.requests -= 1
+            reservation.session.charged_tokens -= reservation.tokens
+
     async def stream(self, reservation: Reservation) -> AsyncIterator[ModelStreamItem]:
         session, request = reservation.session, reservation.request
         reported_input = reported_output = 0
@@ -208,9 +234,7 @@ class ScopedModelGateway:
                     if isinstance(event, ModelStop):
                         stopped = True
                     if isinstance(event, ModelError):
-                        yield ModelError(
-                            "upstream_error", "Model request could not complete"
-                        )
+                        yield safe_model_error(event.code)
                     else:
                         yield event
                 if not stopped:

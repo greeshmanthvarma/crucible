@@ -245,7 +245,13 @@ class ExperimentStore(Generic[Policy]):
                     for sql in _SEARCH_SCHEMA:
                         await conn.execute(text(sql))
                     await conn.execute(text("PRAGMA user_version=2"))
-                elif version != 2:
+                    version = 2
+                if version == 2:
+                    # Semantic accounting version: old binaries must refuse new
+                    # conservative/partial rows rather than misprice them.
+                    # No historical rows or events are rewritten.
+                    await conn.execute(text("PRAGMA user_version=3"))
+                elif version != 3:
                     raise ValueError("unsupported experiment schema version")
             path.chmod(0o600)
             return store
@@ -493,7 +499,9 @@ revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
                 if row.status == "uncertain":
                     raise BudgetDenied("uncertain usage requires explicit recovery")
                 amounts = UsageAmounts.model_validate_json(
-                    row.settled_json if row.status == "settled" else row.requested_json
+                    row.settled_json
+                    if row.status in ("settled", "conservative")
+                    else row.requested_json
                 )
                 for name in totals:
                     totals[name] += getattr(amounts, name)
@@ -546,8 +554,10 @@ revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
                 .mappings()
                 .one()
             )
-            if row["status"] == "uncertain":
-                raise RevisionConflict("uncertain usage cannot be rewritten")
+            if row["status"] in ("uncertain", "conservative"):
+                raise RevisionConflict(
+                    "uncertain or conservative usage cannot be rewritten"
+                )
             if row["status"] == "settled":
                 if row["settled_json"] != actual.model_dump_json():
                     raise RevisionConflict("usage already settled differently")
@@ -586,6 +596,56 @@ revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
                 {"reservation_id": str(reservation_id), "uncertain": exceeded},
             )
 
+    async def record_partial_usage(
+        self, reservation_id: UUID, observed: UsageAmounts, unknown: tuple[str, ...]
+    ) -> None:
+        """Settle known dimensions while retaining only unknown dimensions' caps."""
+        if not set(unknown) <= UsageAmounts.model_fields.keys():
+            raise ValueError("unknown usage dimension")
+        async with self._transaction() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT * FROM experiment_usage WHERE reservation_id=:rid"
+                        ),
+                        {"rid": str(reservation_id)},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            if row["status"] != "reserved":
+                raise RevisionConflict("usage already recorded")
+            reserved = UsageAmounts.model_validate_json(row["requested_json"])
+            charged = UsageAmounts(
+                **{
+                    name: max(getattr(observed, name), getattr(reserved, name))
+                    if name in unknown
+                    else getattr(observed, name)
+                    for name in UsageAmounts.model_fields
+                }
+            )
+            await conn.execute(
+                text(
+                    "UPDATE experiment_usage SET status='uncertain',"
+                    "settled_json=:charge "
+                    "WHERE reservation_id=:rid"
+                ),
+                {"rid": str(reservation_id), "charge": charged.model_dump_json()},
+            )
+            await self._event(
+                conn,
+                UUID(row["experiment"]),
+                "usage_partial",
+                {
+                    "reservation_id": str(reservation_id),
+                    "observed": observed.model_dump(),
+                    "unknown_dimensions": list(unknown),
+                    "charged": charged.model_dump(),
+                },
+            )
+
     async def request_stop(self, id: UUID) -> ExperimentRecord[Policy]:
         async with self._transaction() as conn:
             record = await self._get(conn, id)
@@ -601,33 +661,39 @@ revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
                 await self._event(conn, id, "stop_requested", {})
             return await self._get(conn, id)
 
-    async def mark_uncertain(self, reservation_id: UUID) -> None:
+    async def mark_uncertain(
+        self, reservation_id: UUID, observed: UsageAmounts | None = None
+    ) -> None:
         async with self._transaction() as conn:
             row = (
                 await conn.execute(
                     text(
-                        "SELECT experiment,status FROM experiment_usage WHERE "
+                        "SELECT experiment,status,settled_json FROM experiment_usage "
+                        "WHERE "
                         "reservation_id=:id"
                     ),
                     {"id": str(reservation_id)},
                 )
             ).one()
-            if row.status == "settled":
-                raise RevisionConflict("settled usage cannot become uncertain")
-            await conn.execute(
-                text(
-                    "UPDATE experiment_usage SET status='uncertain' WHERE "
-                    "reservation_id=:id"
-                ),
-                {"id": str(reservation_id)},
+            if row.status in ("settled", "conservative"):
+                raise RevisionConflict("finalized usage cannot become uncertain")
+            previous = UsageAmounts.model_validate_json(row.settled_json or "{}")
+            observed = UsageAmounts(
+                **{
+                    name: max(
+                        getattr(previous, name),
+                        getattr(observed or UsageAmounts(), name),
+                    )
+                    for name in UsageAmounts.model_fields
+                }
             )
             await conn.execute(
                 text(
-                    "UPDATE experiment_runs SET "
-                    "status='error',stop_requested=1,revision=revision+1 "
-                    "WHERE id=:id"
+                    "UPDATE experiment_usage SET "
+                    "status='uncertain',settled_json=:observed WHERE "
+                    "reservation_id=:id"
                 ),
-                {"id": row.experiment},
+                {"id": str(reservation_id), "observed": observed.model_dump_json()},
             )
             await self._event(
                 conn,
@@ -845,31 +911,21 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                         },
                     )
                 ).one()
-                resume = (
-                    await conn.execute(
-                        text(
-                            "SELECT payload_json FROM experiment_events WHERE "
-                            "experiment=:id AND type='explicit_resume' ORDER BY "
-                            "sequence DESC LIMIT 1"
-                        ),
-                        {"id": str(id)},
-                    )
-                ).scalar_one_or_none()
                 if (
-                    resume
-                    and previous.id in json.loads(resume).get("retry_trial_ids", [])
-                    and previous.status in ("error", "interrupted")
-                    and previous.key == key
+                    previous.status not in ("error", "interrupted")
+                    or previous.key != key
                 ):
-                    await self._event(
-                        conn,
-                        id,
-                        "trial_superseded",
-                        {
-                            "original_trial_id": previous.id,
-                            "replacement_trial_id": str(trial_id),
-                        },
-                    )
+                    raise RevisionConflict("previous trial is not retry eligible")
+                await self._consume_trial_retry(conn, id, previous.id, str(trial_id))
+                await self._event(
+                    conn,
+                    id,
+                    "trial_superseded",
+                    {
+                        "original_trial_id": previous.id,
+                        "replacement_trial_id": str(trial_id),
+                    },
+                )
             await self._event(
                 conn,
                 id,
@@ -990,7 +1046,7 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
             await conn.execute(
                 text(
                     "UPDATE experiment_runs SET status=:status, "
-                    "stop_requested=1, error_code=:code, "
+                    "stop_requested=1, error_code=COALESCE(error_code,:code), "
                     "revision=revision+1 WHERE id=:id AND "
                     "status!='closed'"
                 ),
@@ -1007,6 +1063,81 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 {"code": code, "interrupted": interrupted},
             )
 
+    async def usage_summary(self, id: UUID) -> dict[str, object]:
+        run = await self.get(id)
+        confirmed = dict.fromkeys(UsageAmounts.model_fields, 0)
+        conservative = dict.fromkeys(UsageAmounts.model_fields, 0)
+        retained = dict.fromkeys(UsageAmounts.model_fields, 0)
+        partials = {
+            e["reservation_id"]: e for e in await self.events(id, "usage_partial")
+        }
+        reported_overages = {
+            e["reservation_id"]
+            for e in await self.events(id, "usage_settled")
+            if e.get("uncertain") is True
+        }
+        acknowledgments = {
+            e["reservation_id"]: e for e in await self.events(id, "usage_acknowledged")
+        }
+        for row in await self.usage_records(id):
+            reserved = UsageAmounts.model_validate_json(str(row["requested_json"]))
+            observed = UsageAmounts.model_validate_json(
+                str(row["settled_json"] or "{}")
+            )
+            target = (
+                confirmed
+                if row["status"] == "settled"
+                else conservative
+                if row["status"] == "conservative"
+                else retained
+            )
+            partial = partials.get(row["reservation_id"])
+            for name in target:
+                unknown = partial.get("unknown_dimensions") if partial else None
+                if row["reservation_id"] in reported_overages:
+                    # An overage is known usage, even while its allowance needs
+                    # recovery. Acknowledgment never changes that provenance.
+                    receipt = acknowledgments.get(row["reservation_id"])
+                    reported = (
+                        UsageAmounts.model_validate(receipt["observed"])
+                        if receipt
+                        else observed
+                    )
+                    confirmed[name] += getattr(reported, name)
+                    target[name] += max(
+                        0, getattr(reserved, name) - getattr(reported, name)
+                    )
+                elif partial and isinstance(unknown, list) and name not in unknown:
+                    confirmed[name] += getattr(observed, name)
+                else:
+                    target[name] += (
+                        getattr(observed, name)
+                        if row["status"] == "settled"
+                        else max(getattr(reserved, name), getattr(observed, name))
+                    )
+        caps = dict(
+            tokens=run.manifest.budget.max_reported_and_reserved_tokens,
+            requests=run.manifest.budget.max_model_requests,
+            active_seconds=run.manifest.budget.max_active_seconds,
+            output_bytes=run.manifest.budget.max_total_output_bytes,
+            trial_starts=run.manifest.budget.max_trial_starts,
+            worker_wall_seconds=run.manifest.budget.max_worker_wall_seconds,
+        )
+        return {
+            "confirmed": confirmed,
+            "conservative": conservative,
+            "retained": retained,
+            "remaining": {
+                name: max(
+                    0,
+                    caps[name] - confirmed[name] - conservative[name] - retained[name],
+                )
+                for name in caps
+            },
+            "dollars": None,
+            "price_basis": None,
+        }
+
     async def unsettled_usage(self, id: UUID) -> bool:
         async with self.engine.connect() as conn:
             return bool(
@@ -1014,7 +1145,8 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                     await conn.execute(
                         text(
                             "SELECT reservation_id FROM experiment_usage "
-                            "WHERE experiment=:id AND status!='settled' LIMIT"
+                            "WHERE experiment=:id AND status NOT IN "
+                            "('settled','conservative') LIMIT"
                             " 1"
                         ),
                         {"id": str(id)},
@@ -1102,6 +1234,200 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 {"id": str(id), "owner": str(owner)},
             )
 
+    async def acknowledge_usage(
+        self, id: UUID, owner: UUID, reservation_ids: tuple[UUID, ...]
+    ) -> None:
+        """Retain conservative charges after effects are positively reconciled."""
+        async with self._transaction() as conn:
+            await self._require_owner(conn, id, owner)
+            if (await self._get(conn, id)).status == "closed":
+                raise RevisionConflict("closed experiment")
+            effects = (
+                await conn.execute(
+                    text(
+                        "SELECT id FROM experiment_effects WHERE experiment=:id "
+                        "AND status!='stopped' LIMIT 1"
+                    ),
+                    {"id": str(id)},
+                )
+            ).first()
+            if effects:
+                raise RevisionConflict(
+                    "owned effects must be stopped before acknowledgment"
+                )
+            for rid in dict.fromkeys(reservation_ids):
+                row = (
+                    (
+                        await conn.execute(
+                            text(
+                                "SELECT * FROM experiment_usage WHERE experiment=:id "
+                                "AND reservation_id=:rid"
+                            ),
+                            {"id": str(id), "rid": str(rid)},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                if row["status"] == "conservative":
+                    continue
+                if row["status"] not in ("reserved", "uncertain"):
+                    raise RevisionConflict(
+                        "only unresolved reservations can be acknowledged"
+                    )
+                reserved = UsageAmounts.model_validate_json(row["requested_json"])
+                observed = UsageAmounts.model_validate_json(row["settled_json"] or "{}")
+                partial = (
+                    await conn.execute(
+                        text(
+                            "SELECT payload_json FROM experiment_events "
+                            "WHERE experiment=:id "
+                            "AND type='usage_partial' AND "
+                            "json_extract(payload_json,'$.reservation_id')=:rid"
+                        ),
+                        {"id": str(id), "rid": str(rid)},
+                    )
+                ).scalar_one_or_none()
+                unknown = (
+                    json.loads(partial)["unknown_dimensions"]
+                    if partial
+                    else list(UsageAmounts.model_fields)
+                )
+                charged = UsageAmounts(
+                    **{
+                        name: max(getattr(reserved, name), getattr(observed, name))
+                        if name in unknown
+                        else getattr(observed, name)
+                        for name in UsageAmounts.model_fields
+                    }
+                )
+                await conn.execute(
+                    text(
+                        "UPDATE experiment_usage SET "
+                        "status='conservative',settled_json=:charge "
+                        "WHERE reservation_id=:rid"
+                    ),
+                    {"rid": str(rid), "charge": charged.model_dump_json()},
+                )
+                await self._event(
+                    conn,
+                    id,
+                    "usage_acknowledged",
+                    {
+                        "reservation_id": str(rid),
+                        "basis": "conservative",
+                        "reserved": reserved.model_dump(),
+                        "observed": observed.model_dump(),
+                        "charged": charged.model_dump(),
+                    },
+                )
+
+    async def authorize_trial_retries(
+        self, id: UUID, trial_ids: tuple[UUID, ...]
+    ) -> None:
+        """Authorize named failed attempts; this operation executes no work."""
+        async with self._transaction() as conn:
+            run = await self._get(conn, id)
+            owner = (
+                await conn.execute(
+                    text("SELECT owner_execution_id FROM experiment_runs WHERE id=:id"),
+                    {"id": str(id)},
+                )
+            ).scalar_one()
+            if run.status != "ready" or run.stop_requested or owner is not None:
+                raise RevisionConflict("recover before authorizing retries")
+            blocked = (
+                await conn.execute(
+                    text(
+                        "SELECT 1 FROM experiment_usage WHERE experiment=:id AND "
+                        "status NOT IN ('settled','conservative') UNION ALL "
+                        "SELECT 1 FROM experiment_effects WHERE experiment=:id "
+                        "AND status!='stopped'"
+                    ),
+                    {"id": str(id)},
+                )
+            ).first()
+            if blocked:
+                raise RevisionConflict("effects or usage require recovery")
+            for trial in dict.fromkeys(trial_ids):
+                row = (
+                    (
+                        await conn.execute(
+                            text(
+                                "SELECT * FROM experiment_trials WHERE id=:trial AND "
+                                "experiment=:id"
+                            ),
+                            {"id": str(id), "trial": str(trial)},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                newer = (
+                    await conn.execute(
+                        text(
+                            "SELECT id FROM experiment_trials WHERE experiment=:id AND "
+                            "snapshot=:sid "
+                            "AND case_id=:case AND repeat_index=:repeat AND "
+                            "generation>:generation"
+                        ),
+                        {
+                            "id": str(id),
+                            "sid": row["snapshot"],
+                            "case": row["case_id"],
+                            "repeat": row["repeat_index"],
+                            "generation": row["generation"],
+                        },
+                    )
+                ).first()
+                if newer or row["status"] not in ("error", "interrupted"):
+                    raise RevisionConflict(
+                        "only latest failed trial attempts can be retried"
+                    )
+                exists = (
+                    await conn.execute(
+                        text(
+                            "SELECT 1 FROM experiment_events WHERE experiment=:id "
+                            "AND type='trial_retry_authorized' "
+                            "AND json_extract(payload_json,'$.trial_id')=:trial"
+                        ),
+                        {"id": str(id), "trial": str(trial)},
+                    )
+                ).first()
+                if not exists:
+                    await self._event(
+                        conn, id, "trial_retry_authorized", {"trial_id": str(trial)}
+                    )
+
+    async def _consume_trial_retry(
+        self, conn: AsyncConnection, id: UUID, trial: str, replacement: str
+    ) -> None:
+        events = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT type FROM experiment_events WHERE experiment=:id AND "
+                        "type IN ('trial_retry_authorized','trial_retry_consumed') AND "
+                        "json_extract(payload_json,'$.trial_id')=:trial"
+                    ),
+                    {"id": str(id), "trial": trial},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if "trial_retry_authorized" not in events or "trial_retry_consumed" in events:
+            raise RevisionConflict("trial retry requires explicit authorization")
+        await self._event(
+            conn,
+            id,
+            "trial_retry_consumed",
+            {
+                "trial_id": trial,
+                "replacement_trial_id": replacement,
+            },
+        )
+
     async def recover_ready(self, id: UUID, owner: UUID) -> None:
         async with self._transaction() as conn:
             await self._require_owner(conn, id, owner)
@@ -1118,7 +1444,8 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 await conn.execute(
                     text(
                         "SELECT reservation_id FROM experiment_usage WHERE "
-                        "experiment=:id AND status!='settled' LIMIT 1"
+                        "experiment=:id AND status NOT IN ('settled','conservative') "
+                        "LIMIT 1"
                     ),
                     {"id": str(id)},
                 )
@@ -1135,50 +1462,7 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 ),
                 {"id": str(id)},
             )
-            accepted = (
-                await self._accepted_snapshot_id(conn, await self._get(conn, id))
-                if (await self._get(conn, id)).manifest.schema_version == 2
-                else None
-            )
-            sealed = (
-                await conn.execute(
-                    text(
-                        "SELECT initial_snapshot FROM experiment_search_seals WHERE "
-                        "experiment=:id"
-                    ),
-                    {"id": str(id)},
-                )
-            ).scalar_one_or_none()
-            retry_ids = []
-            if accepted:
-                rows = (
-                    (
-                        await conn.execute(
-                            text(
-                                "SELECT id FROM experiment_trials t WHERE "
-                                "experiment=:id AND snapshot IN (:sid,:initial) AND "
-                                "status IN "
-                                "('error','interrupted') AND NOT EXISTS (SELECT 1 "
-                                "FROM experiment_trials n WHERE "
-                                "n.experiment=t.experiment AND n.snapshot=t.snapshot "
-                                "AND n.case_id=t.case_id AND "
-                                "n.repeat_index=t.repeat_index AND "
-                                "n.generation>t.generation)"
-                            ),
-                            {
-                                "id": str(id),
-                                "sid": str(accepted),
-                                "initial": sealed or str(accepted),
-                            },
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                retry_ids = list(rows)
-            await self._event(
-                conn, id, "explicit_resume", {"retry_trial_ids": retry_ids}
-            )
+            await self._event(conn, id, "recovery_completed", {})
 
     async def _require_owner(
         self, conn: AsyncConnection, id: UUID, owner: UUID
@@ -1649,7 +1933,7 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
             resumed = False
             for event in events:
                 payload = json.loads(event.payload_json)
-                if event.type == "explicit_resume":
+                if event.type in ("explicit_resume", "recovery_completed"):
                     resumed = True
                 if event.type == "role_saved" and payload.get("role_id") == str(
                     old.role_id
@@ -2075,17 +2359,20 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
         ]
         if not rows:
             return
-        resumes = await self.events(id, "explicit_resume")
-        authorized = resumes[-1].get("retry_trial_ids", []) if resumes else []
+        authorizations = await self.events(id, "trial_retry_authorized")
+        consumed = await self.events(id, "trial_retry_consumed")
+        authorized = {e["trial_id"] for e in authorizations} - {
+            e["trial_id"] for e in consumed
+        }
         if (
             len(rows) != 1
             or rows[0]["status"] not in ("error", "interrupted")
             or rows[0]["key"] != key
-            or not resumes
-            or not isinstance(authorized, list)
             or rows[0]["id"] not in authorized
         ):
-            raise RevisionConflict("trial retry requires explicit compatible recovery")
+            raise RevisionConflict(
+                "trial retry requires explicit compatible authorization"
+            )
 
     @staticmethod
     def _seal_record(row: RowMapping) -> SearchSeal:

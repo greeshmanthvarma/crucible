@@ -21,6 +21,7 @@ from crucible.improvement.trials import IsolatedTrialRunner
 from crucible.improvement.worktree import OwnedWorktree
 
 StopReason = Literal[
+    "stage_complete",
     "round_limit",
     "no_actionable_weakness",
     "insufficient_evidence",
@@ -62,7 +63,12 @@ class SearchController:
                 if r.status in ("decided", "interrupted")
             ),
             ready_for_final=reason
-            not in ("operator_stopped", "infrastructure_error", "budget_limit"),
+            not in (
+                "operator_stopped",
+                "infrastructure_error",
+                "budget_limit",
+                "stage_complete",
+            ),
         )
         await self.store.record_event(
             id, "search_outcome", outcome.model_dump(mode="json")
@@ -73,7 +79,9 @@ class SearchController:
         # Lifecycle recovery reconciles only; this call explicitly resumes work.
         return await self.run(experiment_id)
 
-    async def run(self, experiment_id: UUID) -> SearchOutcome:
+    async def run(
+        self, experiment_id: UUID, *, stop_after: Literal["mining", "search"] = "search"
+    ) -> SearchOutcome:
         from crucible.improvement.store import BudgetDenied
 
         id = experiment_id
@@ -137,6 +145,8 @@ class SearchController:
                 mining = await self.execution.mine(active)
                 if mining.disposition != "actionable":
                     return await self._outcome(id, mining.disposition)
+                if stop_after == "mining":
+                    return await self._outcome(id, "stage_complete")
                 decision = await self.execution.candidate(active)
                 run = await self.store.require_search_open(id)
                 await self.store.record_decision(active.id, decision, run.revision)

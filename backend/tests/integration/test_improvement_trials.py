@@ -19,7 +19,7 @@ def test_selection_schedule_excludes_final_and_has_three_repeats():
 
 
 @pytest.fixture
-async def trial_setup(tmp_path, case_fixture, monkeypatch):
+async def trial_setup(tmp_path, case_fixture, monkeypatch, request):
     import hashlib
     import json
     import shutil
@@ -142,6 +142,8 @@ async def trial_setup(tmp_path, case_fixture, monkeypatch):
     manifest = make_manifest().model_copy(
         update={
             "cases": tuple(refs),
+            "schema_version": getattr(request, "param", 1),
+            "worker_protocol_version": getattr(request, "param", None),
             "grader": config,
             "initial_commit": case_fixture.base_commit,
             "budget": make_manifest().budget.model_copy(
@@ -396,3 +398,55 @@ async def test_host_quota_termination_preserves_patch_for_grading(
     assert result.solver.termination == "budget_exhausted"
     assert result.grade.verdict == "pass"
     assert grader.calls == 1
+
+
+async def test_behavioral_failure_remains_independently_graded(trial_setup):
+    runner, store, manifest, snapshot, worker, grader = trial_setup
+    worker.termination = "behavior_error"
+    result = await runner.run(
+        manifest.experiment_id, snapshot.snapshot_id, "development", 0
+    )
+    assert result.status == "complete"
+    assert result.grade.verdict == "fail"
+    assert result.solver.termination == "behavior_error"
+    assert grader.calls == 1
+
+
+@pytest.mark.parametrize("trial_setup", [2], indirect=True)
+async def test_recovery_reuses_three_completed_trials_and_only_retries_named_failure(
+    trial_setup,
+):
+    from uuid import UUID
+
+    from tests.integration.test_improvement_search import recover
+
+    runner, store, manifest, snapshot, worker, grader = trial_setup
+    for repeat in range(3):
+        result = await runner.run(
+            manifest.experiment_id, snapshot.snapshot_id, "development", repeat
+        )
+        assert result.status == "complete"
+    worker.termination = "provider_error"
+    failed = await runner.run(
+        manifest.experiment_id, snapshot.snapshot_id, "selection-validation", 0
+    )
+    assert failed.status == "error"
+    original = tuple(await store.trials(manifest.experiment_id))
+    await recover(store, manifest.experiment_id)
+    worker.termination = "budget_exhausted"
+    with pytest.raises(ValueError, match="explicit compatible authorization"):
+        await runner.run_selection_baseline(
+            manifest.experiment_id, snapshot.snapshot_id
+        )
+    assert worker.calls == 4
+    failed_id = UUID(str(next(r["id"] for r in original if r["status"] == "error")))
+    await store.authorize_trial_retries(manifest.experiment_id, (failed_id,))
+    results = await runner.run_selection_baseline(
+        manifest.experiment_id, snapshot.snapshot_id
+    )
+    assert len(results) == 6 and all(r.status == "complete" for r in results)
+    assert worker.calls == 7 and grader.calls == 6
+    assert len(await store.trials(manifest.experiment_id)) == 7
+    assert len(await store.selected_trials(manifest.experiment_id)) == 6
+    rows = {r["id"]: r for r in await store.trials(manifest.experiment_id)}
+    assert all(rows[r["id"]] == r for r in original)
