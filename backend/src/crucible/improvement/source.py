@@ -291,6 +291,7 @@ _SOLVER_FILES = frozenset(
         "improvement/worker.py",
         "improvement/worker_trace.py",
         "improvement/role_worker.py",
+        "improvement/role_prompts.py",
         "improvement/check_probe.py",
         "improvement/worker_commands.py",
         "improvement/worker_gateway.py",

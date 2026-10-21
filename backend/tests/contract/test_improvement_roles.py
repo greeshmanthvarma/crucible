@@ -92,6 +92,7 @@ def test_role_runtime_export_contains_import_closure():
 
     for name in (
         "improvement/role_worker.py",
+        "improvement/role_prompts.py",
         "improvement/worker.py",
         "improvement/worker_protocol.py",
         "application/worker_container.py",

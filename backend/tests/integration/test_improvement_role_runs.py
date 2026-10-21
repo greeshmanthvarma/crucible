@@ -136,19 +136,24 @@ async def test_mining_checkpoints_original_output(
             await runner.mine(round.id, view, correction_of=result.role_id)
 
 
-async def test_role_uses_ordinary_engine_with_read_only_registry(database, tmp_path):
+@pytest.mark.parametrize("kind", ["mining", "format_correction", "proposal"])
+async def test_role_uses_ordinary_engine_with_read_only_registry(
+    database, tmp_path, kind
+):
     from crucible.application.worker_container import create_worker_engine
     from crucible.domain.run import RunStatus
     from crucible.engine.gateway import (
+        ModelRole,
         ModelStop,
         ModelStopReason,
         ModelUsage,
         TextDelta,
     )
+    from crucible.improvement.role_prompts import role_system_prompt
     from crucible.improvement.worker import seed_task
     from tests.contract.test_improvement_roles import role_job
 
-    job = role_job()
+    job = role_job(kind)
     job = job.model_copy(
         update={
             "model": job.model.model_copy(update={"input_limit": 20000}),
@@ -190,12 +195,22 @@ async def test_role_uses_ordinary_engine_with_read_only_registry(database, tmp_p
     assert run.status == RunStatus.COMPLETED, run.outcome_code
     assert run.settings_snapshot.sandbox_image == job.command_image
     assert len(requests) == 1
-    assert {tool.name for tool in requests[0].tools} == {
+    assert any(
+        message.role == ModelRole.SYSTEM
+        and any(
+            role_system_prompt(kind) in (part.text_content or "")
+            for part in message.parts
+        )
+        for message in requests[0].messages
+    )
+    tool_names = {tool.name for tool in requests[0].tools}
+    assert {
         "list_files",
         "read_file",
         "read_file_chunk",
         "search_files",
-    }
+    } <= tool_names
+    assert ("write_file" in tool_names) == (kind == "proposal")
 
 
 async def test_partial_proposal_transfer_is_owned_but_user_edit_is_not(tmp_path):

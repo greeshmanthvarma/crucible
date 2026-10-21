@@ -63,17 +63,20 @@ def create_worker_engine(
         artifacts,
         journal=journal,
     )
+    harness_policy = "Follow harness safety and execution policy."
     if isinstance(job, RoleJob):
+        from crucible.improvement.role_prompts import role_system_prompt
         from crucible.improvement.role_worker import role_registry
 
         registry = role_registry(job.job_kind, cast(Tool, command))
+        harness_policy = role_system_prompt(job.job_kind)
     else:
         registry = default_registry(cast(Tool, command))
     context = ContextManager(
         uow,
         clock,
         LocalTokenEstimator(tools=registry.definitions),
-        harness_policy="Follow harness safety and execution policy.",
+        harness_policy=harness_policy,
         tool_contract="Use only the structured tools supplied by the harness.",
         model=job.model.model_id,
         input_limit=job.model.input_limit,

@@ -116,19 +116,9 @@ async def run_role_worker(job: RoleJob, token: str) -> None:
     if len(raw) > 1_048_576 or hashlib.sha256(raw).hexdigest() != job.input_digest:
         raise ValueError("role input identity drift")
     prompt = (
-        "Read input.json and the supplied development index and source. "
-        "Evidence supports hypotheses, not causal proof. Return one strict JSON object "
-        "as your final assistant text, without markdown fences. "
-        "Begin with index.json for trial outcomes and evidence paths. Use "
-        "read_file_chunk for bounded evidence and source reads; follow its byte "
-        "next_offset only when more detail is needed. A truncated read_file result "
-        "is not the whole file; switch to read_file_chunk to inspect further. "
-        + (
-            "Edit source/ for one supplied weakness. Preserve passing behavior. "
-            if job.job_kind == "proposal"
-            else "Read only. Do not edit files or run commands. "
-        )
-        + raw.decode("utf-8")
+        "Perform the role specified by the system instructions using this "
+        "controller input (also available in input.json). Return JSON matching "
+        "output_schema.\n" + raw.decode("utf-8")
     )
     gateway = WorkerModelGateway(
         WorkerCredential(token, "http://relay:8080/internal/improvement/model"),

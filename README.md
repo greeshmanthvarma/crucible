@@ -532,6 +532,12 @@ each UTF-8 page contains at most 8192 bytes and returns a byte `next_offset`
 for relevant details, rather than loading every trace. Role `read_file`, search,
 and file-list output are also capped at 8192 bytes. This changes role evidence
 access, not the ordinary coding solver's tools or the export's existing byte caps.
+Mining, format correction, and proposal have separate controller-owned system
+instructions in `backend/src/crucible/improvement/role_prompts.py`, frozen with
+the experiment source. They distinguish harness improvements from benchmark
+solutions, require evidence-backed hypotheses and honest uncertainty, and forbid
+benchmark-specific shortcuts or weakening protected gates. The proposer must
+leave actual scoped edits for controller evaluation; its claims are not proof.
 Candidate checks must pass before paid trial dispatch. Both
 baseline and candidate run three repeats for each development/selection-validation
 case, using the same isolated path and independent protected grading. Worker success
