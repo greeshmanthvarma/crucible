@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 
 from crucible.improvement.worker_protocol import WorkerJob, read_worker_observation
-from crucible.improvement.worker_supervisor import worker_container_arguments
+from crucible.improvement.worker_supervisor import labels, worker_container_arguments
 from tests.unit.test_improvement_manifest import make_manifest
 
 
@@ -156,22 +156,29 @@ async def test_cleanup_attempts_other_resources_after_failure(tmp_path):
             raise ValueError("command cleanup failed")
 
     class Docker:
+        removed = set()
+
         async def invoke(self, *args):
+            if args[0] == "ps":
+                name = "bad-worker" if "bad" in args[-1] else "good-relay"
+                return "" if name in self.removed else name
+            if args[0] == "rm":
+                self.removed.add(args[-1])
+                return ""
             name = args[-1]
             if name == "bad-worker":
                 raise ValueError("inspect failed")
             return json.dumps(
                 [
                     {
-                        "Config": {
-                            "Labels": {"crucible.improvement.job": str(job.job_id)}
-                        },
+                        "Config": {"Labels": labels(job)},
                         "State": {"Running": False},
                     }
                 ]
             )
 
     job = make_job()
+
     supervisor = WorkerSupervisor(
         Store(),
         Broker(),
@@ -198,6 +205,7 @@ async def test_cleanup_attempts_other_resources_after_failure(tmp_path):
         None,
         "preflight",
         "budget",
+        "network_create",
         "output_limit",
         "output_limit_cleanup",
         "create",
@@ -242,6 +250,23 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(tmp_path, fa
             self.credentials = []
 
         async def invoke(self, *args):
+            import re
+
+            if args[:2] == ("network", "ls") or args[0] == "ps":
+                resources = self.networks if args[0] == "network" else self.containers
+                pattern = args[args.index("--filter") + 1].removeprefix("name=")
+                return "\n".join(
+                    n
+                    for n in resources
+                    if re.fullmatch(pattern, ("" if args[0] == "network" else "/") + n)
+                )
+            if args[:2] == ("network", "rm"):
+                assert not self.containers
+                del self.networks[args[-1]]
+                return ""
+            if args[0] == "rm":
+                del self.containers[args[-1]]
+                return ""
             if args[:2] == ("image", "inspect"):
                 if fault == "preflight":
                     raise OSError("image unavailable SECRET_CANARY")
@@ -249,13 +274,15 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(tmp_path, fa
                     [{"RepoDigests": [args[2]], "Os": "linux", "Architecture": "amd64"}]
                 )
             if args[:2] == ("network", "create"):
+                if fault == "network_create":
+                    raise ValueError("address pools exhausted")
                 name = args[-1]
                 self.networks[name] = {
                     "Internal": True,
                     "Options": {
                         "com.docker.network.bridge.gateway_mode_ipv4": "isolated"
                     },
-                    "Labels": {"crucible.improvement.job": str(job.job_id)},
+                    "Labels": labels(job),
                 }
                 assert "com.docker.network.bridge.gateway_mode_ipv4=isolated" in args
                 return name
@@ -266,7 +293,7 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(tmp_path, fa
             if args[0] == "create":
                 name = args[args.index("--name") + 1]
                 self.containers[name] = {
-                    "Config": {"Labels": {"crucible.improvement.job": str(job.job_id)}},
+                    "Config": {"Labels": labels(job)},
                     "State": {"Running": False},
                 }
                 if name.startswith("improvement-worker") and fault == "create":
@@ -409,6 +436,7 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(tmp_path, fa
                 assert result.outcome.cleanup_failure.category == "cleanup"
             return
         if fault in (
+            "network_create",
             "create",
             "worker_exit",
             "cancel",
@@ -443,6 +471,8 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(tmp_path, fa
             assert docker.credentials[0]
         if fault not in ("cleanup", "stream_cleanup"):
             assert all(not c["State"]["Running"] for c in docker.containers.values())
+            assert not docker.containers
+            assert not docker.networks
         assert not any(
             p.name == "credential" for p in (tmp_path / "controller").rglob("*")
         )

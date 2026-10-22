@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -44,6 +43,7 @@ from crucible.improvement.worker_supervisor import (
     DockerRuntime,
     WorkerSupervisor,
     read_regular_artifact,
+    remove_owned_effect,
 )
 from crucible.improvement.worktree import ExperimentWorktree, OwnedWorktree
 from crucible.models.responses_gateway import LiteLLMResponsesGateway
@@ -987,42 +987,7 @@ class ExperimentService:
                             raise RecoveryRequired("grader remains running")
                 else:
                     name = intent["name"]
-                    if kind == "network":
-                        matches = await self.docker.invoke(
-                            "network",
-                            "ls",
-                            "--filter",
-                            "name=^" + re.escape(name) + "$",
-                            "--format",
-                            "{{.ID}}",
-                        )
-                        if matches:
-                            info = json.loads(
-                                await self.docker.invoke("network", "inspect", name)
-                            )[0]
-                            if any(
-                                info["Labels"].get(k) != v for k, v in expected.items()
-                            ):
-                                raise RecoveryRequired("network ownership ambiguous")
-                    else:
-                        matches = await self.docker.invoke(
-                            "ps", "-aq", "--filter", "name=^/" + re.escape(name) + "$"
-                        )
-                        if matches:
-                            info = json.loads(
-                                await self.docker.invoke("inspect", name)
-                            )[0]
-                            if any(
-                                info["Config"]["Labels"].get(k) != v
-                                for k, v in expected.items()
-                            ):
-                                raise RecoveryRequired("container ownership ambiguous")
-                            if info["State"]["Running"]:
-                                await self.docker.invoke("kill", name)
-                            if json.loads(await self.docker.invoke("inspect", name))[0][
-                                "State"
-                            ]["Running"]:
-                                raise RecoveryRequired("container remains running")
+                    await remove_owned_effect(self.docker, kind, name, expected)
                 await self.store.effect_state(eid, "stopped")
             except Exception as error:
                 await self.store.effect_state(eid, "uncertain")

@@ -239,12 +239,16 @@ async def test_crash_after_container_create_reconciles_without_duplicate_trial(
 
     class Docker:
         running = True
+        removed = False
         calls = []
 
         async def invoke(self, *args):
             self.calls.append(args)
             if args[0] == "ps":
-                return "owned-worker"
+                return "" if self.removed else "owned-worker"
+            if args[0] == "rm":
+                self.removed = True
+                return ""
             if args[0] == "kill":
                 self.running = False
                 return ""

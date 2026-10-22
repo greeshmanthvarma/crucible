@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import signal
 import stat
 import time
@@ -231,6 +232,44 @@ async def verify_stopped(docker: DockerPort, identity: str, job: WorkerRequest) 
     data = json.loads(await docker.invoke("inspect", identity))
     if data[0]["State"]["Running"]:
         raise ValueError("container cleanup uncertain")
+
+
+async def remove_owned_effect(
+    docker: DockerPort, kind: str, name: str, expected_labels: dict[str, str]
+) -> None:
+    """Remove only an exactly named, ownership-verified effect; prove absence."""
+    network = kind == "network"
+    listing = (
+        (
+            "network",
+            "ls",
+            "--filter",
+            "name=^" + re.escape(name) + "$",
+            "--format",
+            "{{.ID}}",
+        )
+        if network
+        else ("ps", "-aq", "--filter", "name=^/" + re.escape(name) + "$")
+    )
+    identities = (await docker.invoke(*listing)).split()
+    if not identities:
+        return  # Successful listing distinguishes absence from a daemon failure.
+    if len(identities) != 1 or not expected_labels:
+        raise ValueError("ambiguous Docker ownership")
+    identity = identities[0]
+    inspection = ("network", "inspect", identity) if network else ("inspect", identity)
+    data = json.loads(await docker.invoke(*inspection))
+    if len(data) != 1:
+        raise ValueError("ambiguous Docker inspection")
+    actual = data[0]["Labels"] if network else data[0]["Config"]["Labels"]
+    if not actual or any(actual.get(k) != v for k, v in expected_labels.items()):
+        raise ValueError("Docker ownership drift")
+    if not network and data[0]["State"]["Running"]:
+        await docker.invoke("kill", identity)
+    removal = ("network", "rm", identity) if network else ("rm", identity)
+    await docker.invoke(*removal)
+    if (await docker.invoke(*listing)).strip():
+        raise ValueError("Docker removal unconfirmed")
 
 
 class DockerCommands:
@@ -842,14 +881,7 @@ class WorkerSupervisor:
             failures.append(error)
         for effect, kind, name, job in reversed(self.owned.get(job_id, [])):
             try:
-                if kind != "network":
-                    await verify_stopped(self.docker, name, job)
-                else:
-                    data = json.loads(
-                        await self.docker.invoke("network", "inspect", name)
-                    )
-                    if data[0]["Labels"].get(LABEL) != str(job_id):
-                        raise ValueError("network ownership drift")
+                await remove_owned_effect(self.docker, kind, name, labels(job))
                 await self.store.effect_state(effect, "stopped")
             except Exception as error:
                 await self.store.effect_state(effect, "uncertain")
