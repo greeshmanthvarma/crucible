@@ -270,6 +270,13 @@ worktree; reads/outputs are bounded; writes are atomic; a complete batch is
 validated before any call begins. `execute_command` is the Docker-only command
 boundary.
 
+`search_files` returns bounded excerpts, workspace-relative paths and UTF-8 byte
+offsets, including for long single-line JSON. Continue a truncated search by passing
+`next_cursor` as `cursor` with the same query and path. Searches are not snapshots;
+restart if files change. A timeout or scan-output limit is an incomplete search,
+not proof of no matches. Match transport, retained stderr and serialized results
+are independently bounded; oversized matches require a narrower expression.
+
 Opt-in live connectivity smoke:
 
 ```sh

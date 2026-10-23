@@ -76,20 +76,61 @@
           "schema_version": 1
         },
         {
-          "description": "Search workspace text with ripgrep.",
+          "description": "Search workspace text with a ripgrep regular expression. Returns bounded matching excerpts with workspace-relative paths, line numbers and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged with the same query and path to continue when truncated. No matches is conclusive only when truncated is false and there is no error. A snippet may omit part of a large match; use its offsets for bounded reads. Search is not a snapshot: restart without a cursor if files change.",
           "input_schema": {
+            "$defs": {
+              "SearchCursor": {
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "title": "Path",
+                    "type": "string"
+                  },
+                  "byte_offset": {
+                    "minimum": 1,
+                    "title": "Byte Offset",
+                    "type": "integer"
+                  },
+                  "query_digest": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "title": "Query Digest",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path",
+                  "byte_offset",
+                  "query_digest"
+                ],
+                "title": "SearchCursor",
+                "type": "object"
+              }
+            },
             "additionalProperties": false,
             "properties": {
-              "path": {
-                "default": ".",
-                "title": "Path",
-                "type": "string"
-              },
               "query": {
                 "maxLength": 500,
                 "minLength": 1,
                 "title": "Query",
                 "type": "string"
+              },
+              "path": {
+                "default": ".",
+                "title": "Path",
+                "type": "string"
+              },
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SearchCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               }
             },
             "required": [
@@ -315,20 +356,61 @@
           "schema_version": 1
         },
         {
-          "description": "Search workspace text with ripgrep.",
+          "description": "Search workspace text with a ripgrep regular expression. Returns bounded matching excerpts with workspace-relative paths, line numbers and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged with the same query and path to continue when truncated. No matches is conclusive only when truncated is false and there is no error. A snippet may omit part of a large match; use its offsets for bounded reads. Search is not a snapshot: restart without a cursor if files change.",
           "input_schema": {
+            "$defs": {
+              "SearchCursor": {
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "title": "Path",
+                    "type": "string"
+                  },
+                  "byte_offset": {
+                    "minimum": 1,
+                    "title": "Byte Offset",
+                    "type": "integer"
+                  },
+                  "query_digest": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "title": "Query Digest",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path",
+                  "byte_offset",
+                  "query_digest"
+                ],
+                "title": "SearchCursor",
+                "type": "object"
+              }
+            },
             "additionalProperties": false,
             "properties": {
-              "path": {
-                "default": ".",
-                "title": "Path",
-                "type": "string"
-              },
               "query": {
                 "maxLength": 500,
                 "minLength": 1,
                 "title": "Query",
                 "type": "string"
+              },
+              "path": {
+                "default": ".",
+                "title": "Path",
+                "type": "string"
+              },
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SearchCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               }
             },
             "required": [
@@ -584,20 +666,61 @@
           "schema_version": 1
         },
         {
-          "description": "Search workspace text with ripgrep.",
+          "description": "Search workspace text with a ripgrep regular expression. Returns bounded matching excerpts with workspace-relative paths, line numbers and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged with the same query and path to continue when truncated. No matches is conclusive only when truncated is false and there is no error. A snippet may omit part of a large match; use its offsets for bounded reads. Search is not a snapshot: restart without a cursor if files change.",
           "input_schema": {
+            "$defs": {
+              "SearchCursor": {
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "title": "Path",
+                    "type": "string"
+                  },
+                  "byte_offset": {
+                    "minimum": 1,
+                    "title": "Byte Offset",
+                    "type": "integer"
+                  },
+                  "query_digest": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "title": "Query Digest",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path",
+                  "byte_offset",
+                  "query_digest"
+                ],
+                "title": "SearchCursor",
+                "type": "object"
+              }
+            },
             "additionalProperties": false,
             "properties": {
-              "path": {
-                "default": ".",
-                "title": "Path",
-                "type": "string"
-              },
               "query": {
                 "maxLength": 500,
                 "minLength": 1,
                 "title": "Query",
                 "type": "string"
+              },
+              "path": {
+                "default": ".",
+                "title": "Path",
+                "type": "string"
+              },
+              "cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SearchCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               }
             },
             "required": [

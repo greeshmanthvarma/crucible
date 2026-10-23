@@ -23,9 +23,16 @@ class ListFilesArguments(ToolArguments):
     path: str = "."
 
 
+class SearchCursor(ToolArguments):
+    path: str = Field(min_length=1, max_length=4096)
+    byte_offset: int = Field(ge=1)
+    query_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class SearchFilesArguments(ToolArguments):
     query: str = Field(min_length=1, max_length=500)
     path: str = "."
+    cursor: SearchCursor | None = None
 
 
 class ReadFileArguments(ToolArguments):

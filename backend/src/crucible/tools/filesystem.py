@@ -1,4 +1,3 @@
-import asyncio
 import os
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from crucible.tools.definitions import (
     ToolContext,
     ToolOutcome,
 )
+from crucible.tools.search_io import search_workspace
 from crucible.tools.workspace_authority import WorkspacePathResolver
 
 
@@ -130,53 +130,11 @@ class SearchFilesTool:
 
     async def invoke(self, context: ToolContext, arguments: object) -> ToolOutcome:
         args = SearchFilesArguments.model_validate(arguments)
-        resolver = WorkspacePathResolver(context.workspace)
-        target = resolver.resolve(args.path)
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "rg",
-                "--line-number",
-                "--no-heading",
-                "--color=never",
-                "--glob=!.git",
-                "--",
-                args.query,
-                str(target),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError:
-            return ToolOutcome(
-                {}, "ripgrep is unavailable", error_code="tool_unavailable"
-            )
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-            return ToolOutcome({}, "Search timed out", error_code="timeout")
-        if process.returncode not in (0, 1):
-            return ToolOutcome(
-                {},
-                stderr[:1000].decode(errors="replace"),
-                error_code="search_failed",
-            )
-        raw_lines = stdout.decode(errors="replace").splitlines()
-        matches: list[str] = []
-        used = 0
-        truncated = False
-        for line in raw_lines:
-            normalized = line.replace(str(resolver.root) + os.sep, "", 1)
-            size = len(normalized.encode())
-            if len(matches) >= self.max_matches or used + size > self.max_bytes:
-                truncated = True
-                break
-            matches.append(normalized)
-            used += size
-        return ToolOutcome(
-            {"matches": matches, "truncated": truncated},
-            "\n".join(matches),
-            truncated,
+        return await search_workspace(
+            context.workspace,
+            args,
+            max_matches=self.max_matches,
+            max_bytes=self.max_bytes,
         )
 
 
