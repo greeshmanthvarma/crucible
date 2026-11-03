@@ -95,3 +95,33 @@ async def test_status_never_creates_missing_state(tmp_path):
         == 2
     )
     assert not root.exists()
+
+
+def test_offline_commands_have_no_paid_authorization_flag():
+    arguments = parser(require_state_root=False).parse_args(
+        ["evidence-verify", "--package", "/tmp/export"]
+    )
+    assert arguments.operation == "evidence-verify"
+    assert arguments.state_root is None
+    with pytest.raises(SystemExit):
+        parser(require_state_root=False).parse_args(
+            ["evidence-verify", "--package", "/tmp/export", "--authorize-paid"]
+        )
+
+
+async def test_missing_evidence_package_has_bounded_error(
+    tmp_path, capsys, monkeypatch
+):
+    from crucible.improvement.cli import run_cli
+    from crucible.improvement.store import ExperimentStore
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("write store opened")
+
+    monkeypatch.setattr(ExperimentStore, "open", forbidden)
+    package = tmp_path / "secret-path-canary"
+    assert await run_cli(["evidence-verify", "--package", str(package)]) == 2
+    error = capsys.readouterr().err
+    assert "artifact_drift" in error
+    assert "secret-path-canary" not in error
+    assert not package.exists()

@@ -191,15 +191,11 @@ def decode_solver_trace(
             if target in anchors:
                 raise TrajectoryError("identity_mismatch", "duplicate part reference")
             anchors.append(target)
-    # Admission and completion each have their own ordering, never timestamp merged.
-    for records, anchors in (
-        (wire.tool_calls, anchored_calls),
-        (wire.tool_results, anchored_results),
-    ):
-        if [r.id for r in records if r.id in anchors] != anchors:
-            raise TrajectoryError(
-                "ambiguous_order", "anchors disagree with source order"
-            )
+    # Assistant call parts describe admission order. Tool-result presentation can
+    # differ from parallel completion order within the same step. Keep both;
+    # validate step grouping below rather than inventing a global chronology.
+    if [c.id for c in wire.tool_calls if c.id in anchored_calls] != anchored_calls:
+        raise TrajectoryError("ambiguous_order", "call anchors disagree with admission")
     steps = [m.step_id for m in wire.messages if m.step_id is not None]
     compressed = [s for i, s in enumerate(steps) if not i or s != steps[i - 1]]
     if len(set(compressed)) != len(compressed):

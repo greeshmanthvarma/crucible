@@ -11,15 +11,26 @@ from uuid import UUID
 
 from sqlalchemy.exc import NoResultFound
 
-from crucible.improvement.lifecycle import ExperimentService, RecoveryRequired
 from crucible.improvement.manifest import ManifestDrift
 from crucible.improvement.store import ExperimentStore, RevisionConflict
 
 
-def parser() -> argparse.ArgumentParser:
+def parser(*, require_state_root: bool = True) -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog="crucible improve")
-    command.add_argument("--state-root", type=Path, required=True)
+    command.add_argument("--state-root", type=Path, required=require_state_root)
     operations = command.add_subparsers(dest="operation", required=True)
+    export = operations.add_parser(
+        "evidence-export", help="offline development evidence export"
+    )
+    export.add_argument("--source-state-root", type=Path, required=True)
+    export.add_argument("--experiment", type=UUID, required=True)
+    export.add_argument("--snapshot", type=UUID, required=True)
+    export.add_argument("--selection-file", type=Path, required=True)
+    export.add_argument("--output", type=Path, required=True)
+    verify = operations.add_parser(
+        "evidence-verify", help="offline package verification"
+    )
+    verify.add_argument("--package", type=Path, required=True)
     start = operations.add_parser("start")
     start.add_argument("--config", type=Path, required=True)
     start.add_argument("--idempotency-key", required=True)
@@ -70,7 +81,14 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
             root = arguments[index : index + 2]
             del arguments[index : index + 2]
             arguments = root + arguments
-    args = parser().parse_args(arguments)
+    offline = bool(arguments and arguments[0] in ("evidence-export", "evidence-verify"))
+    args = parser(require_state_root=not offline).parse_args(arguments)
+    if args.operation in ("evidence-export", "evidence-verify"):
+        from crucible.improvement.trajectory_export import run_evidence_command
+
+        return run_evidence_command(args)
+    from crucible.improvement.lifecycle import ExperimentService, RecoveryRequired
+
     path = args.state_root / "experiments.sqlite3"
     if args.operation != "start" and not path.exists():
         print("Improvement state does not exist.", file=sys.stderr)

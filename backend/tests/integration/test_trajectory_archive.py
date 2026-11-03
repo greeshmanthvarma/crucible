@@ -512,3 +512,131 @@ async def test_usage_requires_hash_verified_controller_artifact(archive_fixture)
     usage.write_text("{}")
     with pytest.raises(ValueError, match="artifact_drift"):
         load(archive_fixture)
+
+
+async def test_evidence_export_never_opens_write_store_or_gateway(
+    archive_fixture, tmp_path, monkeypatch
+):
+    from crucible.improvement.cli import run_cli
+    from crucible.improvement.store import ExperimentStore
+    from crucible.improvement.worker_supervisor import DockerRuntime, WorkerSupervisor
+    from crucible.repair.gateway import ScopedModelGateway
+    from crucible.sandbox.docker import DockerSandboxBackend
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("offline exporter crossed execution boundary")
+
+    monkeypatch.setattr(ExperimentStore, "open", forbidden)
+    monkeypatch.setattr(WorkerSupervisor, "__init__", forbidden)
+    monkeypatch.setattr(ScopedModelGateway, "__init__", forbidden)
+    monkeypatch.setattr(DockerSandboxBackend, "__init__", forbidden)
+    monkeypatch.setattr(DockerRuntime, "__init__", forbidden)
+    selection_file = tmp_path / "selection.json"
+    selection_file.write_text(archive_fixture.selection.model_dump_json())
+    output = tmp_path / "view"
+    assert (
+        await run_cli(
+            [
+                "evidence-export",
+                "--source-state-root",
+                str(archive_fixture.root),
+                "--experiment",
+                str(archive_fixture.experiment_id),
+                "--snapshot",
+                str(archive_fixture.snapshot_id),
+                "--selection-file",
+                str(selection_file),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert (
+        verify_trajectory_package(output).selected_trial_ids
+        == archive_fixture.selection.trial_ids
+    )
+    assert await run_cli(["evidence-verify", "--package", str(output)]) == 0
+
+
+@pytest.mark.parametrize("mutation", ["missing", "tampered", "extra", "source-mode"])
+async def test_missing_or_tampered_detail_fails_verification(
+    archive_fixture, tmp_path, mutation
+):
+    output = tmp_path / "view"
+    export_trajectory_package(load(archive_fixture), output, ExportLimits())
+    detail = next(output.glob("trials/*/details/*.message.json"))
+    if mutation == "missing":
+        detail.unlink()
+    elif mutation == "tampered":
+        detail.write_text("{}")
+    elif mutation == "extra":
+        (output / "extra.json").write_text("{}")
+    else:
+        next(p for p in (output / "source").rglob("*") if p.is_file()).chmod(0o755)
+    with pytest.raises(ValueError, match="artifact_drift"):
+        verify_trajectory_package(output)
+    from crucible.improvement.cli import run_cli
+
+    assert await run_cli(["evidence-verify", "--package", str(output)]) == 2
+
+
+async def test_all_index_records_resolve_without_full_trace_read(
+    archive_fixture, tmp_path
+):
+    output = tmp_path / "view"
+    package = export_trajectory_package(load(archive_fixture), output, ExportLimits())
+    locator = json.loads((output / package.record_locator_ref).read_bytes())
+    for trial_id in package.selected_trial_ids:
+        prefix = f"trials/{trial_id}/"
+        overview = json.loads(
+            (output / package.trial_overview_refs[trial_id]).read_bytes()
+        )
+        for line in (output / prefix / overview["index_ref"]).read_bytes().splitlines():
+            record = json.loads(line)
+            target = prefix + record["detail_ref"]
+            matches = [
+                entry
+                for entry in locator
+                if entry["trial_id"] == str(trial_id)
+                and entry["original_record_id"] == record["record_id"]
+                and entry["detail_ref"] == target
+            ]
+            assert len(matches) == 1
+            assert (
+                hashlib.sha256((output / target).read_bytes()).hexdigest()
+                == matches[0]["detail_sha256"]
+            )
+    assert not list(output.rglob("trace.json"))
+
+
+async def test_export_does_not_require_provider_credentials(
+    archive_fixture, tmp_path, monkeypatch
+):
+    import os
+
+    from crucible.improvement.cli import run_cli
+
+    for key in list(os.environ):
+        if key.endswith(("API_KEY", "TOKEN", "SECRET", "PASSWORD")):
+            monkeypatch.delenv(key)
+    selection = tmp_path / "selection.json"
+    selection.write_text(archive_fixture.selection.model_dump_json())
+    assert (
+        await run_cli(
+            [
+                "evidence-export",
+                "--source-state-root",
+                str(archive_fixture.root),
+                "--experiment",
+                str(archive_fixture.experiment_id),
+                "--snapshot",
+                str(archive_fixture.snapshot_id),
+                "--selection-file",
+                str(selection),
+                "--output",
+                str(tmp_path / "view"),
+            ]
+        )
+        == 0
+    )

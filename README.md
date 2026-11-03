@@ -514,6 +514,75 @@ crucible improve --state-root /absolute/private/experiment-state resume EXPERIME
 crucible improve --state-root /absolute/private/experiment-state close EXPERIMENT_UUID
 ```
 
+#### Offline development trajectory evidence
+
+Export selected development trials without opening the experiment write store,
+resuming a run, starting Docker, or requesting a model:
+
+```sh
+crucible improve evidence-export \
+  --source-state-root /absolute/private/experiment-state \
+  --experiment EXPERIMENT_UUID --snapshot SNAPSHOT_UUID \
+  --selection-file /absolute/private/selection.json \
+  --output /absolute/export/trajectory-package
+crucible improve evidence-verify --package /absolute/export/trajectory-package
+```
+
+Both commands return 0 for a verified package and 2 for preparation/verification
+failure. Neither accepts paid authorization or retries. The output must be fresh,
+outside the historical state and investigation source/worktree, with no symlink
+components. An exclusive directory reservation prevents competing exports from
+overwriting each other; a crash may leave an empty reservation or an
+`.incomplete-trajectory-*` sibling requiring explicit operator cleanup.
+
+The strict selection file is `{"mode":"explicit-three-repeat","trial_ids":[
+"TRIAL_UUID_0","TRIAL_UUID_1","TRIAL_UUID_2"]}`: three repeats of one development
+task, including a failure. Alternatively `{"mode":"failed-family-v1","trial_ids":[]}`
+selects the first failed development case/repeat deterministically, then passing
+and remaining failed repeats of the same task, up to three. The resulting ordered
+IDs are frozen in the manifest; supplying IDs in automatic mode asserts that exact
+selection. No eligible failure is an explicit error.
+
+SQLite opens only a temporary private copy of the database and WAL. Two identical
+bounded reads and a final metadata/membership check reject changes during capture;
+there are no automatic snapshot retries. Originals are never opened by SQLite,
+which otherwise can create/change WAL/SHM sidecars even in read-only mode. Each DB
+or WAL input is capped at 256 MiB; a nonempty rollback journal requires separate
+offline reconciliation. A normally read-only transaction queries the private copy.
+Only selected development artifacts and the verified positive runtime source
+export are loaded. Hidden outcomes/traces, grader contents, reference patches,
+controller state and credentials are excluded from the package. Environment secret
+values, credential fields/patterns, file URLs and private host paths are redacted
+before deriving detail content. No trace-supplied path or artifact ID is followed.
+
+The separately versioned package contains `index.json`, verified `source/`, and
+`trials/TRIAL_UUID/{overview.json,trajectory.jsonl,details-manifest.json,details/}`.
+`record-locator.json` maps original trial/artifact/record identities and JSON
+pointers to bounded details and derived hashes. `package-manifest.json` registers
+all other files and seals the manifest without its own `bundle_digest`; verification
+checks source bytes/modes, the file registry, limits and record/detail relationships.
+Retain the sealed digest when admitting downstream work: internal hash consistency
+alone does not establish external provenance.
+
+Original `EvidenceRef.sha256` values identify unsanitized historical artifacts.
+Detail `content_sha256` identifies canonical sanitized content before truncation;
+the file registry hashes the final derived bytes. Investigation source commit,
+source digest and export digest describe the historical harness that generated the
+trials, separately from the executing exporter source. Display sequence is navigation
+only: conversation anchors, call admission order and result completion order remain
+separate. Missing results/references and unavailable instructions, usage, step
+records, context manifests, compactions and per-step usage stay explicit.
+
+UTF-8 byte caps include metadata and separators: overview 8 KiB, each index record
+1 KiB, trial index 256 KiB, each detail (envelope plus excerpt) 1 MiB, and aggregate
+evidence 16 MiB including the package manifest. Shared source uses existing runtime
+export bounds and is excluded from the evidence total. Oversized details retain
+valid JSON envelopes with explicitly incomplete UTF-8 excerpts and original
+sanitized size/digest; index or aggregate overflow fails without event selection.
+Complete trace input is bounded at 8 MiB and validated before truncation; legacy
+trace conversion is unsupported. The measured view defaults and `MiningResult`
+contract are unchanged. This exporter performs no analyst/synthesis orchestration.
+
 `start.json` has exactly `schema_version: 1`, `manifest_file`, `repository`,
 `registry_root`, and `protected_suite_root`; paths must be absolute. The strict
 `improvement.contracts.ExperimentManifest` defines the separately supplied manifest.

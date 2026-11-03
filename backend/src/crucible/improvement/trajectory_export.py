@@ -1,9 +1,11 @@
 """Offline positive export with a sealed file registry and atomic publication."""
 
+import argparse
 import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -30,9 +32,13 @@ from crucible.improvement.trajectory_contracts import (
     ExportLimits,
     TrajectoryRecord,
     TrialOverview,
+    TrialSelection,
     VerifiedDevelopmentInputs,
 )
-from crucible.improvement.verified_evidence import owned_artifact
+from crucible.improvement.verified_evidence import (
+    DevelopmentArchiveReader,
+    owned_artifact,
+)
 from crucible.improvement.worker_supervisor import read_regular_artifact
 from crucible.repair.identity import canonical_json, digest
 
@@ -60,9 +66,10 @@ def _clean(value: object, roots: tuple[Path, ...]) -> object:
         result = {
             str(_clean(str(k), roots)): (
                 "[REDACTED]"
-                if str(k).lower()
+                if str(k).lower().replace("-", "_")
                 in {
                     "api_key",
+                    "token",
                     "apikey",
                     "password",
                     "secret",
@@ -464,3 +471,35 @@ def _verify(output: Path) -> EvidencePackage:
     if files["index.json"] != canonical_json(expected_index):
         raise TrajectoryError("artifact_drift", "package index")
     return package
+
+
+def run_evidence_command(args: argparse.Namespace) -> int:
+    """Offline-only CLI boundary; no write store or execution constructors."""
+    try:
+        if args.operation == "evidence-export":
+            selection = TrialSelection.model_validate_json(
+                read_regular_artifact(args.selection_file, 4096)
+            )
+            inputs = DevelopmentArchiveReader(args.source_state_root).load(
+                args.experiment, args.snapshot, selection
+            )
+            package = export_trajectory_package(inputs, args.output, ExportLimits())
+        else:
+            package = verify_trajectory_package(args.package)
+        print(
+            canonical_json(
+                {
+                    "schema_version": 1,
+                    "bundle_digest": package.bundle_digest,
+                    "selected_trial_ids": package.selected_trial_ids,
+                    "verified": True,
+                }
+            ).decode()
+        )
+        return 0
+    except TrajectoryError as error:
+        print("Evidence preparation failed: " + error.code, file=sys.stderr)
+        return 2
+    except (ValueError, OSError, TypeError):
+        print("Evidence preparation failed: invalid_input", file=sys.stderr)
+        return 2

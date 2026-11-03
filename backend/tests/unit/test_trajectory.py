@@ -497,3 +497,33 @@ def test_invalid_solution_utf8_uses_bounded_error(parallel_trace, verified_trial
             replace(verified_trial, solution_bytes=b"\xff"),
             ExportLimits(),
         )
+
+
+def test_result_message_order_is_independent_of_parallel_completion(
+    parallel_records, verified_trial
+):
+    import json
+
+    from crucible.improvement.trajectory import build_trajectory
+    from crucible.improvement.trajectory_contracts import ExportLimits
+
+    message = parallel_records["messages"][2]
+    # Conversation presents A/B while recorded completion is B/A, as the engine
+    # can emit result messages in admission order after awaiting parallel work.
+    parts = tuple(
+        replace(p, part_sequence=i) for i, p in enumerate(reversed(message.parts), 1)
+    )
+    parallel_records["messages"] = (
+        *parallel_records["messages"][:2],
+        replace(message, parts=parts),
+    )
+    trace = decode(canonical_json(parallel_records), verified_trial)
+    assert [r.tool_call_id for r in trace.tool_results] == [uid(11), uid(10)]
+    bundle = build_trajectory(trace, verified_trial, ExportLimits())
+    records = [
+        json.loads(line) for line in bundle.files["trajectory.jsonl"].splitlines()
+    ]
+    completions = [
+        r["completion_sequence"] for r in records if r["kind"] == "tool_result"
+    ]
+    assert completions == [2, 1]
