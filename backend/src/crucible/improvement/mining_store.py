@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 from pydantic import TypeAdapter
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from crucible.benchmarks.contracts import Sha256, TrialLimits
 from crucible.improvement.contracts import (
@@ -669,6 +669,7 @@ VALUES (:attempt,:slot,:ordinal,:job,:kind,'running',:json,:sha,
         outcome_ref: str | None = None,
         error_code: str | None = None,
         final_disposition: str | None = None,
+        artifact_hashes: dict[str, str] | None = None,
     ) -> None:
         """Checkpoint host-observed termination; report acceptance is a later gate."""
         if status not in (
@@ -702,6 +703,9 @@ VALUES (:attempt,:slot,:ordinal,:job,:kind,'running',:json,:sha,
             slot = await self._slot(conn, UUID(attempt["slot"]))
             id = UUID(slot["diagnostic"])
             job = RoleJob.model_validate_json(attempt["job_json"])
+            before = await self._get(conn, id)
+            if before.status in ("stopping", "interrupted"):
+                status, normal_completion = "interrupted", False
             if status in ("complete", "invalid", "incomplete"):
                 await self._require_certain(conn, id)
                 await self._require_reconciled(conn, id)
@@ -738,6 +742,7 @@ outcome_ref=:outcome WHERE id=:id
                             cleanup_confirmed=cleanup_confirmed,
                             error_code=error_code,
                             final_disposition=final_disposition,
+                            artifact_hashes=artifact_hashes,
                         )
                     ),
                 ),
@@ -786,6 +791,7 @@ satisfied_attempt_id=:attempt WHERE id=:slot
                     and cleanup_confirmed
                     and tool_call_count is not None
                     and not slot["correction_used"]
+                    and not before.stop_requested
                 ):
                     await conn.execute(
                         text("UPDATE mining_runs SET status='ready' WHERE id=:id"),
@@ -839,6 +845,31 @@ satisfied_attempt_id=:attempt WHERE id=:slot
             run = await self._get(conn, diagnostic_id)
             if run.stop_requested or run.status != "ready":
                 raise RevisionConflict("recover before authorizing retries")
+            remaining = (await self._slot_usage(conn, slot, run.manifest))["remaining"]
+            used_tools = (
+                await conn.execute(
+                    text(
+                        "SELECT COALESCE(SUM(tool_call_count),0) "
+                        "FROM mining_attempts WHERE slot=:slot"
+                    ),
+                    {"slot": str(slot_id)},
+                )
+            ).scalar_one()
+            if (
+                used_tools
+                >= TrialLimits.model_validate_json(slot["limits_json"]).max_tool_calls
+            ):
+                raise QuotaExhausted("retry cannot fit remaining tool allowance")
+            if (
+                min(
+                    remaining.tokens,
+                    remaining.requests,
+                    remaining.active_seconds,
+                    remaining.worker_wall_seconds,
+                )
+                <= 0
+            ):
+                raise QuotaExhausted("retry cannot fit remaining slot allowance")
             existing = (
                 await conn.execute(
                     text(
@@ -1028,17 +1059,35 @@ s.diagnostic=:id
                     {"id": str(id)},
                 )
             ).first()
+            next_action = (
+                "continue"
+                if row["status"] in ("ready", "running")
+                else "none"
+                if row["status"] in ("complete", "closed")
+                else "recover"
+            )
+            pending = next((slot for slot in values if slot.status != "complete"), None)
+            if row["status"] == "ready" and pending is not None and pending.attempts:
+                authorization = (
+                    await conn.execute(
+                        text("""SELECT id FROM mining_retry_authorizations
+                    WHERE slot=:slot AND failed_attempt=:attempt
+                    AND status='available'"""),
+                        {
+                            "slot": str(pending.slot_id),
+                            "attempt": str(pending.attempts[-1].attempt_id),
+                        },
+                    )
+                ).first()
+                if authorization is None:
+                    next_action = "authorize-retry"
             return MiningDiagnosticStatus(
                 diagnostic_id=id,
                 status=row["status"],
                 phase=row["phase"],
                 selected_trial_ids=run.manifest.selected_trial_ids,
                 slots=tuple(values),
-                next_action="continue"
-                if row["status"] in ("ready", "running")
-                else "none"
-                if row["status"] == "complete"
-                else "recover",
+                next_action=next_action,
                 final_disposition=(
                     await conn.execute(
                         text("""
@@ -1050,7 +1099,7 @@ ORDER BY a.ordinal DESC LIMIT 1
                         {"id": str(id)},
                     )
                 ).scalar_one_or_none()
-                if row["status"] == "complete"
+                if row["status"] in ("complete", "closed")
                 else None,
                 cleanup_confirmed=not bool(uncertain or failed_cleanup),
                 config_digest=row["config_digest"],
@@ -1080,7 +1129,11 @@ ORDER BY a.ordinal DESC LIMIT 1
         await self.fail_run(id, code)
         async with self._transaction() as conn:
             await conn.execute(
-                text("UPDATE mining_runs SET error_code=:code WHERE id=:id"),
+                text(
+                    "UPDATE mining_runs SET status='blocked',error_code=:code,"
+                    "revision=revision+1 WHERE id=:id "
+                    "AND status NOT IN ('complete','closed')"
+                ),
                 {"id": str(id), "code": code},
             )
 
@@ -1121,3 +1174,164 @@ ORDER BY a.ordinal DESC LIMIT 1
             await self._event(
                 conn, id, "mining_diagnostic_complete", {"sha256": output_sha}
             )
+
+    @classmethod
+    async def open_readonly(cls, path: Path) -> Self:
+        """No schema creation, migration, WAL-mode change, or write transaction."""
+        if (
+            not path.is_absolute()
+            or path.name != "accounting.sqlite3"
+            or any(p.is_symlink() for p in (path, *path.parents))
+            or not path.is_file()
+        ):
+            raise ValueError("existing private diagnostic ledger required")
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+            if conn.execute("PRAGMA user_version").fetchone()[0] != 3 or conn.execute(
+                "SELECT schema_version FROM mining_metadata"
+            ).fetchall() != [(1,)]:
+                raise ValueError("unsupported diagnostic ledger")
+            for (raw,) in conn.execute("SELECT manifest_json FROM experiment_runs"):
+                MiningDiagnosticManifest.model_validate_json(raw)
+        return cls(
+            create_async_engine(
+                "sqlite+aiosqlite:///" + path.as_uri() + "?mode=ro&uri=true"
+            )
+        )
+
+    async def retry_authorization(self, slot_id: UUID) -> UUID | None:
+        async with self.engine.connect() as conn:
+            value = (
+                await conn.execute(
+                    text("""
+SELECT r.id FROM mining_retry_authorizations r JOIN mining_slots s ON r.slot=s.id
+JOIN mining_runs m ON m.id=s.diagnostic WHERE r.slot=:slot AND r.status='available'
+AND r.config_digest=m.config_digest AND r.failed_attempt=(SELECT id FROM mining_attempts
+WHERE slot=:slot ORDER BY ordinal DESC LIMIT 1)
+"""),
+                    {"slot": str(slot_id)},
+                )
+            ).scalar_one_or_none()
+            return UUID(value) if value else None
+
+    async def recovery_ready(self, id: UUID, owner: UUID) -> None:
+        async with self._transaction() as conn:
+            await self._require_owner(conn, id, owner)
+            await self._require_certain(conn, id)
+            await self._require_reconciled(conn, id)
+        await self.recover_ready(id, owner)
+
+    async def reconcile_attempt(
+        self, attempt_id: UUID, count: int | None, *, cleanup_confirmed: bool = True
+    ) -> None:
+        """Restore only provable counts and cleanup, never accept an orphan report."""
+        row = await self.attempt_record(attempt_id)
+        if row["status"] == "running":
+            await self.finish_attempt(
+                attempt_id,
+                "interrupted",
+                tool_call_count=count,
+                normal_completion=False,
+                cleanup_confirmed=cleanup_confirmed,
+            )
+            return
+        async with self._transaction() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text("SELECT * FROM mining_attempts WHERE id=:id"),
+                        {"id": str(attempt_id)},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            validation = json.loads(row["validation_json"] or "{}")
+            validation["cleanup_confirmed"] = cleanup_confirmed
+            if (
+                row["tool_call_count"] is not None
+                and count is not None
+                and count != row["tool_call_count"]
+            ):
+                raise ValueError("recovered tool count drift")
+            await conn.execute(
+                text("""UPDATE mining_attempts SET
+                tool_call_count=COALESCE(tool_call_count,:count),validation_json=:json
+                WHERE id=:id"""),
+                {"id": str(attempt_id), "count": count, "json": json.dumps(validation)},
+            )
+
+    async def close_diagnostic(self, id: UUID) -> None:
+        async with self._transaction() as conn:
+            await self._require_reconciled(conn, id)
+            if (
+                await conn.execute(
+                    text("""SELECT a.id FROM mining_attempts a
+                JOIN mining_slots s ON a.slot=s.id
+                WHERE s.diagnostic=:id AND a.status='running'"""),
+                    {"id": str(id)},
+                )
+            ).first():
+                raise RevisionConflict(
+                    "active attempt requires recovery before closing"
+                )
+            await conn.execute(
+                text(
+                    "UPDATE mining_runs SET status='closed',phase='finished',"
+                    "revision=revision+1 WHERE id=:id"
+                ),
+                {"id": str(id)},
+            )
+            await conn.execute(
+                text(
+                    "UPDATE experiment_runs SET status='closed',stage='finished',"
+                    "stop_requested=1,"
+                    "revision=revision+1 WHERE id=:id"
+                ),
+                {"id": str(id)},
+            )
+            await self._event(conn, id, "mining_diagnostic_closed", {})
+
+    async def final_checkpoint(self, id: UUID) -> tuple[str | None, str | None]:
+        async with self.engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT final_output_ref,final_output_sha "
+                        "FROM mining_runs WHERE id=:id"
+                    ),
+                    {"id": str(id)},
+                )
+            ).one()
+            return row[0], row[1]
+
+    async def attempt_usage(self, attempt_id: UUID) -> tuple[RowMapping, ...]:
+        async with self.engine.connect() as conn:
+            return tuple(
+                (
+                    await conn.execute(
+                        text("""SELECT u.* FROM experiment_usage u
+                JOIN mining_usage_scopes s ON s.reservation_id=u.reservation_id
+                WHERE s.attempt=:id"""),
+                        {"id": str(attempt_id)},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+
+    async def request_diagnostic_stop(self, id: UUID) -> None:
+        async with self._transaction() as conn:
+            await self._get(conn, id)
+            await conn.execute(
+                text("""UPDATE experiment_runs SET status='interrupted',
+                stop_requested=1,error_code='operator_stopped',revision=revision+1
+                WHERE id=:id AND status!='closed'"""),
+                {"id": str(id)},
+            )
+            await conn.execute(
+                text("""UPDATE mining_runs SET status='interrupted',
+                error_code='operator_stopped',revision=revision+1
+                WHERE id=:id AND status NOT IN ('complete','closed')"""),
+                {"id": str(id)},
+            )
+            await self._event(conn, id, "mining_diagnostic_stopped", {})

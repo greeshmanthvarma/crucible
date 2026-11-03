@@ -7,11 +7,14 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
 from pydantic import TypeAdapter
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import NoResultFound
 
 from crucible.benchmarks.contracts import TrialLimits
@@ -56,12 +59,17 @@ from crucible.improvement.trajectory_contracts import EvidencePackage, TrialOver
 from crucible.improvement.trajectory_export import verify_trajectory_package
 from crucible.improvement.worker_protocol import (
     IsolatedRoleExecution,
+    JobOutcome,
     RoleJob,
     read_role_observation,
 )
 from crucible.improvement.worker_supervisor import (
+    DockerPort,
+    DockerRuntime,
     WorkerSupervisor,
+    labels,
     read_regular_artifact,
+    remove_owned_effect,
 )
 from crucible.repair.identity import canonical_json
 
@@ -254,9 +262,12 @@ class MiningDiagnosticRunner:
         store: MiningDiagnosticStore,
         root: Path,
         supervisor: WorkerSupervisor | None,
+        *,
+        docker: DockerPort | None = None,
     ) -> None:
         safe_path(root)
         self.store, self.root, self.supervisor = store, root, supervisor
+        self.docker = docker
 
     def _frozen(
         self, id: UUID
@@ -311,17 +322,23 @@ class MiningDiagnosticRunner:
             raise ValueError(
                 "continuation requires an explicitly supplied execution runtime"
             )
+        with self._lifecycle_lock():
+            return await self._continue(diagnostic_id)
+
+    @contextmanager
+    def _lifecycle_lock(self) -> Iterator[None]:
         safe_path(self.root / "continue.lock")
-        # Independent invocations cannot both construct or dispatch a next intent.
         with (self.root / "continue.lock").open("a+b") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
-                raise ValueError("diagnostic continuation already active") from error
-            return await self._continue(diagnostic_id)
+                raise ValueError(
+                    "diagnostic lifecycle operation already active"
+                ) from error
+            yield
 
-    async def _continue(self, id: UUID) -> MiningDiagnosticStatus:
-        prepared, manifest, snapshot = self._frozen(id)
+    async def initialize(self, id: UUID) -> MiningDiagnosticStatus:
+        prepared, manifest, _ = self._frozen(id)
         assignments = TypeAdapter(tuple[AnalystAssignment, ...]).validate_json(
             read_regular_artifact(self.root / "frozen/assignments.json", 65536),
             strict=True,
@@ -329,16 +346,25 @@ class MiningDiagnosticRunner:
         try:
             run = await self.store.get(id)
         except NoResultFound:
-            await self.store.create_diagnostic(
+            return await self.store.create_diagnostic(
                 manifest, prepared.config_digest, prepared.package_digest, assignments
             )
-        else:
-            if (
-                run.manifest != manifest
-                or (await self.store.diagnostic_status(id)).config_digest
-                != prepared.config_digest
-            ):
-                raise ValueError("ledger frozen identity drift")
+        if (
+            run.manifest != manifest
+            or (await self.store.diagnostic_status(id)).config_digest
+            != prepared.config_digest
+        ):
+            raise ValueError("ledger frozen identity drift")
+        return await self.store.diagnostic_status(id)
+
+    async def _continue(self, id: UUID) -> MiningDiagnosticStatus:
+        prepared, manifest, snapshot = self._frozen(id)
+        assignments = TypeAdapter(tuple[AnalystAssignment, ...]).validate_json(
+            read_regular_artifact(self.root / "frozen/assignments.json", 65536),
+            strict=True,
+        )
+        await self.initialize(id)
+        await self.validate(id)
         status = await self.store.diagnostic_status(id)
         if status.status not in ("ready", "running"):
             return status
@@ -349,14 +375,18 @@ class MiningDiagnosticRunner:
                 return current
             slot = current.slots[slot.ordinal]
             if slot.status == "complete":
-                # Task 5 adds execution-free recovery. Never replay existing work.
                 await self._accepted(slot)
                 continue
-            if slot.attempts:
-                await self.store.block_diagnostic(id, "recovery_required")
+            authorization = (
+                await self.store.retry_authorization(slot.slot_id)
+                if slot.attempts
+                else None
+            )
+            if slot.attempts and authorization is None:
+                await self.store.block_diagnostic(id, "retry_authorization_required")
                 return await self.store.diagnostic_status(id)
             raw, attempt_status = await self._execute_slot(
-                slot, manifest, snapshot, assignments
+                slot, manifest, snapshot, assignments, authorization
             )
             if attempt_status != "complete":
                 return await self.store.diagnostic_status(id)
@@ -374,16 +404,412 @@ class MiningDiagnosticRunner:
         await self.store.complete_diagnostic(id, "synthesis-report.json", _sha(output))
         return await self.store.diagnostic_status(id)
 
+    def _attempt_artifacts(self, row: RowMapping) -> tuple[RoleJob, Path]:
+        # Store rows are read by callers; the job binds every private path.
+        job = RoleJob.model_validate_json(row["job_json"])
+        directory = self.root / "attempts" / str(job.job_id)
+        if (
+            RoleJob.model_validate_json(
+                read_regular_artifact(directory / "job.json", 65536)
+            )
+            != job
+        ):
+            raise ValueError("recorded job drift")
+        workspace = directory / "workspace"
+        if _sha(
+            read_regular_artifact(workspace / "input.json", 1_048_576)
+        ) != job.input_digest or _registry(workspace) != json.loads(
+            read_regular_artifact(
+                directory / "workspace-registry.json", 2 * 1024 * 1024
+            )
+        ):
+            raise ValueError("recorded workspace drift")
+        validation = json.loads(row["validation_json"] or "{}")
+        hashes = validation.get("artifact_hashes") or {}
+        for name, sha in hashes.items():
+            if name not in {
+                "observation.json",
+                "assistant.txt",
+                "trace.json",
+                "inspection-receipts.json",
+                "outcome.json",
+            }:
+                raise ValueError("unknown recorded artifact")
+            if _sha(read_regular_artifact(directory / name, 1_048_576)) != sha:
+                raise ValueError("recorded artifact drift")
+        return job, directory
+
     async def _accepted(self, slot: MiningSlotStatus) -> bytes:
-        path = self.root / "reports" / (str(slot.slot_id) + ".json")
-        raw = read_regular_artifact(path, 1_048_576)
-        digest = read_regular_artifact(path.with_suffix(".sha256"), 64).decode()
         if not slot.attempts or slot.attempts[-1].status != "complete":
             raise ValueError("missing completed report checkpoint")
         attempt = await self.store.attempt_record(slot.attempts[-1].attempt_id)
-        if _sha(raw) != attempt["output_sha"] or _sha(raw) != digest:
+        job, directory = self._attempt_artifacts(attempt)
+        validation = json.loads(attempt["validation_json"] or "{}")
+        if (
+            not validation.get("normal_completion")
+            or not validation.get("cleanup_confirmed")
+            or attempt["tool_call_count"] is None
+            or set(validation.get("artifact_hashes") or {})
+            != {
+                "observation.json",
+                "assistant.txt",
+                "trace.json",
+                "inspection-receipts.json",
+                "outcome.json",
+            }
+        ):
+            raise ValueError("unverified report checkpoint")
+        outcome = json.loads(
+            read_regular_artifact(directory / "outcome.json", 1_048_576)
+        )
+        if (
+            outcome["termination"] != "completed"
+            or outcome["failure"]
+            or outcome["cleanup_failure"]
+            or not outcome["cleanup_confirmed"]
+            or outcome["job_id"] != str(job.job_id)
+        ):
+            raise ValueError("report was not normally completed")
+        observation = read_role_observation(
+            read_regular_artifact(directory / "observation.json", 1_048_576), job
+        )
+        if (
+            observation.termination != "completed"
+            or observation.tool_call_count != attempt["tool_call_count"]
+        ):
+            raise ValueError("report observation drift")
+        events = await self.store.events(job.experiment_id, "usage_reserved")
+        ids = {
+            str(e["reservation_id"])
+            for e in events
+            if e.get("job_id") == str(job.job_id)
+        }
+        if any(
+            str(r["reservation_id"]) in ids
+            and r["status"] not in ("settled", "conservative")
+            for r in await self.store.usage_records(job.experiment_id)
+        ):
+            raise ValueError("report accounting unresolved")
+        raw = read_regular_artifact(directory / "assistant.txt", 1_048_576)
+        path = self.root / "reports" / (str(slot.slot_id) + ".json")
+        if (
+            _sha(raw) != attempt["output_sha"]
+            or read_regular_artifact(path, 1_048_576) != raw
+            or read_regular_artifact(path.with_suffix(".sha256"), 64).decode()
+            != _sha(raw)
+        ):
             raise ValueError("validated report drift")
+        primary = (
+            await self.store.attempt_record(UUID(attempt["correction_of"]))
+            if attempt["correction_of"]
+            else attempt
+        )
+        primary_job, primary_directory = self._attempt_artifacts(primary)
+        primary_observation = read_role_observation(
+            read_regular_artifact(primary_directory / "observation.json", 1_048_576),
+            primary_job,
+        )
+        assert primary_observation.inspection_receipts_sha256 is not None
+        receipts = read_inspection_receipts(
+            read_regular_artifact(
+                primary_directory / "inspection-receipts.json", 1_048_576
+            ),
+            job_id=primary_job.job_id,
+            expected_sha256=primary_observation.inspection_receipts_sha256,
+            kind=primary_job.job_kind,
+        )
+        workspace = primary_directory / "workspace"
+        extra = {
+            p.relative_to(workspace).as_posix(): read_regular_artifact(p, 1_048_576)
+            for p in workspace.rglob("*")
+            if p.is_file()
+            and (
+                p.relative_to(workspace).as_posix() == "input.json"
+                or p.relative_to(workspace).parts[0] == "reports"
+            )
+        }
+        package = load_inspection_package(
+            self.root / "frozen/package",
+            job_id=primary_job.job_id,
+            workspace_files=extra,
+        )
+        if slot.kind == "trial_analysis":
+            assert slot.trial_id is not None
+            assignment = AnalystAssignment(
+                slot_id=slot.slot_id,
+                trial_id=slot.trial_id,
+                package_digest=package.bundle_digest,
+                investigation_source_digest=package.source.source_digest,
+            )
+            if not validate_analysis_report(
+                raw, assignment, package, receipts
+            ).investigation_complete:
+                raise ValueError("incomplete checkpoint")
+        else:
+            validate_synthesis_report(raw, package, receipts)
         return raw
+
+    async def validate(self, id: UUID) -> MiningDiagnosticStatus:
+        prepared, manifest, _ = self._frozen(id)
+        run = await self.store.get(id)
+        status = await self.store.diagnostic_status(id)
+        if run.manifest != manifest or status.config_digest != prepared.config_digest:
+            raise ValueError("ledger frozen identity drift")
+        for slot in status.slots:
+            if slot.status == "complete":
+                await self._accepted(slot)
+        final_ref, final_sha = await self.store.final_checkpoint(id)
+        if final_ref is not None:
+            if (
+                final_ref != "synthesis-report.json"
+                or _sha(read_regular_artifact(self.root / final_ref, 1_048_576))
+                != final_sha
+            ):
+                raise ValueError("final checkpoint drift")
+            final = json.loads(
+                read_regular_artifact(self.root / "final-manifest.json", 4096)
+            )
+            if set(final) != {"synthesis-report.json", "mining-result.json"}:
+                raise ValueError("final output registry drift")
+            for name, sha in final.items():
+                if _sha(read_regular_artifact(self.root / name, 1_048_576)) != sha:
+                    raise ValueError("final output drift")
+            report = SynthesisReport.model_validate_json(
+                await self._accepted(status.slots[3])
+            )
+            if read_regular_artifact(
+                self.root / "synthesis-report.json", 1_048_576
+            ) != canonical_json(report) or read_regular_artifact(
+                self.root / "mining-result.json", 1_048_576
+            ) != canonical_json(report.result):
+                raise ValueError("final output differs from accepted checkpoint")
+        return status
+
+    async def _reconcile(self, id: UUID) -> bool:
+        """Only exact ledger-owned Docker names and labels may be removed."""
+        jobs = {
+            str(a.job_id): RoleJob.model_validate_json(
+                (await self.store.attempt_record(a.attempt_id))["job_json"]
+            )
+            for slot in (await self.store.diagnostic_status(id)).slots
+            for a in slot.attempts
+        }
+        clean = True
+        for effect in reversed(await self.store.effects(id)):
+            if effect["status"] == "stopped":
+                continue
+            eid = UUID(str(effect["id"]))
+            try:
+                expected = json.loads(str(effect["ownership_labels_json"]))
+                job = jobs.get(expected.get("crucible.improvement.job"))
+                if (
+                    job is None
+                    or expected != labels(job)
+                    or effect["kind"] not in ("network", "relay", "worker")
+                ):
+                    raise ValueError("unrecognized diagnostic effect ownership")
+                kind = str(effect["kind"])
+                expected_name = "improvement-" + kind + "-" + str(job.job_id)
+                if json.loads(str(effect["intent_json"])) != {"name": expected_name}:
+                    raise ValueError("diagnostic effect name drift")
+                docker = self.docker or DockerRuntime()
+                await remove_owned_effect(docker, kind, expected_name, expected)
+                await self.store.effect_state(eid, "stopped")
+            except Exception:
+                clean = False
+                await self.store.effect_state(eid, "uncertain")
+        return clean
+
+    async def _recover_worker_artifacts(self, attempt_id: UUID) -> int | None:
+        """Collect a stopped worker's durable outputs without accepting its report."""
+        row = await self.store.attempt_record(attempt_id)
+        job, directory = self._attempt_artifacts(row)
+        root = self.root / "jobs" / str(job.job_id)
+        outcome_raw = read_regular_artifact(root / "job-outcome.json", 1_048_576)
+        outcome = TypeAdapter(JobOutcome).validate_json(outcome_raw, strict=True)
+        if (
+            outcome.job_id != job.job_id
+            or outcome.experiment_id != job.experiment_id
+            or outcome.attempt_id != job.role_id
+            or outcome.harness_digest != job.harness_digest
+            or outcome.repeat_index is not None
+            or not outcome.cleanup_confirmed
+            or outcome.cleanup_failure
+        ):
+            raise ValueError("unverified durable worker outcome")
+        state = root / "state"
+        observation = read_role_observation(
+            read_regular_artifact(state / "observation.json", 1_048_576), job
+        )
+        names = (
+            "observation.json",
+            "assistant.txt",
+            "trace.json",
+            "inspection-receipts.json",
+        )
+        files = {name: read_regular_artifact(state / name, 1_048_576) for name in names}
+        assert observation.inspection_receipts_sha256 is not None
+        read_inspection_receipts(
+            files["inspection-receipts.json"],
+            job_id=job.job_id,
+            expected_sha256=observation.inspection_receipts_sha256,
+            kind=job.job_kind,
+        )
+        if row["output_sha"] and _sha(files["assistant.txt"]) != row["output_sha"]:
+            raise ValueError("durable worker output drift")
+        hashes = json.loads(row["validation_json"] or "{}").get("artifact_hashes") or {}
+        for name, raw in {**files, "outcome.json": outcome_raw}.items():
+            if name in hashes and _sha(raw) != hashes[name]:
+                raise ValueError("durable worker artifact differs from checkpoint")
+        for name, raw in files.items():
+            _write(directory / name, raw)
+        _write(directory / "outcome.json", outcome_raw)
+        intent = json.loads(
+            read_regular_artifact(directory / "artifact-reservation.json", 4096)
+        )
+        if intent.get("job_id") != str(job.job_id):
+            raise ValueError("artifact reservation intent drift")
+        reservation = next(
+            (
+                r
+                for r in await self.store.attempt_usage(attempt_id)
+                if r["reservation_id"] == intent.get("reservation_id")
+            ),
+            None,
+        )
+        if (
+            reservation is None
+            or reservation["kind"] != "worker"
+            or UsageAmounts.model_validate_json(reservation["requested_json"])
+            != UsageAmounts(output_bytes=4 * 1_048_576)
+        ):
+            raise ValueError("artifact reservation scope mismatch")
+        if reservation["status"] == "reserved":
+            await self.store.settle_usage(
+                UUID(reservation["reservation_id"]),
+                UsageAmounts(output_bytes=sum(map(len, files.values()))),
+            )
+        # An already uncertain exposure is retained; recovery never rewrites it.
+        return observation.tool_call_count
+
+    async def recover(self, id: UUID) -> MiningDiagnosticStatus:
+        with self._lifecycle_lock():
+            status = await self.validate(id)
+            if status.status in ("complete", "closed"):
+                return status
+            stopped = await self.store.request_stop(id)
+            owner = await self.store.claim_recovery(
+                id,
+                stopped.revision,
+                await self.store.execution_owner(id),
+                os.getpid(),
+                None,
+            )
+            try:
+                if self.supervisor is not None:
+                    for slot in status.slots:
+                        for attempt in slot.attempts:
+                            if attempt.status != "complete":
+                                try:
+                                    await self.supervisor.stop(attempt.job_id)
+                                except Exception:
+                                    row = await self.store.attempt_record(
+                                        attempt.attempt_id
+                                    )
+                                    await self.store.reconcile_attempt(
+                                        attempt.attempt_id,
+                                        row["tool_call_count"],
+                                        cleanup_confirmed=False,
+                                    )
+                                    await self.store.block_diagnostic(
+                                        id, "credential_cleanup_uncertain"
+                                    )
+                                    return await self.store.diagnostic_status(id)
+                if not await self._reconcile(id):
+                    await self.store.block_diagnostic(id, "cleanup_uncertain")
+                    return await self.store.diagnostic_status(id)
+                for slot in status.slots:
+                    for attempt in slot.attempts:
+                        if attempt.status == "complete":
+                            continue
+                        row = await self.store.attempt_record(attempt.attempt_id)
+                        job, directory = self._attempt_artifacts(row)
+                        count = row["tool_call_count"]
+                        try:
+                            count = await self._recover_worker_artifacts(
+                                attempt.attempt_id
+                            )
+                        except (OSError, ValueError):
+                            pass  # Missing proof retains exposure and unknown counts.
+                        # A real observation can recover counts, never completion.
+                        observation_path = directory / "observation.json"
+                        if observation_path.exists():
+                            count = read_role_observation(
+                                read_regular_artifact(observation_path, 1_048_576), job
+                            ).tool_call_count
+                        await self.store.reconcile_attempt(attempt.attempt_id, count)
+                try:
+                    await self.store.recovery_ready(id, owner)
+                except BudgetDenied:
+                    await self.store.block_diagnostic(id, "accounting_uncertain")
+                return await self.store.diagnostic_status(id)
+            finally:
+                if await self.store.execution_owner(id) == str(owner):
+                    await self.store.release_execution(
+                        id, owner, (await self.store.get(id)).stage
+                    )
+
+    async def authorize_retry(
+        self, id: UUID, slot_id: UUID, failed_attempt_id: UUID
+    ) -> UUID:
+        with self._lifecycle_lock():
+            await self.validate(id)
+            remaining = UsageAmounts.model_validate(
+                (await self.store.usage_summary(id))["remaining"]
+            )
+            if (
+                min(
+                    remaining.tokens,
+                    remaining.requests,
+                    remaining.active_seconds,
+                    remaining.worker_wall_seconds,
+                    remaining.output_bytes,
+                )
+                <= 0
+            ):
+                raise BudgetDenied("retry cannot fit remaining diagnostic allowance")
+            return await self.store.authorize_retry(id, slot_id, failed_attempt_id)
+
+    async def stop(self, id: UUID) -> MiningDiagnosticStatus:
+        # A drifted investigation must still be stoppable; ownership comes only
+        # from the private ledger, never from model output or changed inputs.
+        prepared = PreparedMiningDiagnostic.model_validate_json(
+            read_regular_artifact(self.root / "prepared.json", 65536)
+        )
+        if prepared.diagnostic_id != id or prepared.root != self.root:
+            raise ValueError("diagnostic stop identity mismatch")
+        status = await self.store.diagnostic_status(id)
+        if status.status in ("complete", "closed"):
+            return status
+        await self.store.request_diagnostic_stop(id)
+        if self.supervisor is not None:
+            for slot in status.slots:
+                for attempt in slot.attempts:
+                    if attempt.status == "running":
+                        await self.supervisor.stop(attempt.job_id)
+        try:
+            with self._lifecycle_lock():
+                if not await self._reconcile(id):
+                    await self.store.block_diagnostic(id, "cleanup_uncertain")
+        except ValueError:
+            pass  # Active continuation observes the durable stop and performs cleanup.
+        return await self.store.diagnostic_status(id)
+
+    async def close(self, id: UUID) -> MiningDiagnosticStatus:
+        with self._lifecycle_lock():
+            await self.validate(id)
+            await self.store.close_diagnostic(id)
+            return await self.store.diagnostic_status(id)
 
     async def _workspace(
         self,
@@ -503,6 +929,7 @@ class MiningDiagnosticRunner:
         manifest: MiningDiagnosticManifest,
         snapshot: HarnessSnapshot,
         assignments: tuple[AnalystAssignment, ...],
+        retry_authorization: UUID | None = None,
     ) -> tuple[bytes, SlotStatus]:
         analysis_slots = (
             await self.store.diagnostic_status(manifest.experiment_id)
@@ -526,12 +953,18 @@ class MiningDiagnosticRunner:
                 await self.store.block_diagnostic(
                     manifest.experiment_id, "budget_exhausted"
                 )
-                assert primary_job is not None
                 return b"", "budget_exhausted"
+            used_tools = 0
+            for previous_attempt in slot.attempts:
+                used_tools += (
+                    await self.store.attempt_record(previous_attempt.attempt_id)
+                )["tool_call_count"] or 0
             limits = TrialLimits(
                 max_model_tokens=remaining.tokens,
                 max_steps=min(slot.limits.max_steps, remaining.requests),
-                max_tool_calls=1 if correction else slot.limits.max_tool_calls,
+                max_tool_calls=1
+                if correction
+                else slot.limits.max_tool_calls - used_tools,
                 max_active_seconds=remaining.active_seconds,
                 wall_timeout_seconds=remaining.worker_wall_seconds,
             )
@@ -579,7 +1012,10 @@ class MiningDiagnosticRunner:
             _write(directory / "job.json", job.model_dump_json().encode())
             try:
                 attempt = await self.store.register_attempt(
-                    slot.slot_id, job, job.input_digest
+                    slot.slot_id,
+                    job,
+                    job.input_digest,
+                    retry_authorization if opportunity == 0 else None,
                 )
             except BudgetDenied:
                 await self.store.block_diagnostic(
@@ -608,6 +1044,10 @@ class MiningDiagnosticRunner:
                     error_code="artifact_quota_denied",
                 )
                 return b"", "budget_exhausted"
+            _json(
+                directory / "artifact-reservation.json",
+                {"job_id": job.job_id, "reservation_id": artifact_reservation},
+            )
             artifacts_known = False
             artifact_bytes = 0
             execution: IsolatedRoleExecution | None = None
@@ -828,6 +1268,17 @@ class MiningDiagnosticRunner:
                 if execution and execution.outcome
                 else None,
                 error_code=error_code,
+                artifact_hashes={
+                    name: _sha(read_regular_artifact(directory / name, 1_048_576))
+                    for name in (
+                        "observation.json",
+                        "assistant.txt",
+                        "trace.json",
+                        "inspection-receipts.json",
+                        "outcome.json",
+                    )
+                    if (directory / name).is_file()
+                },
                 final_disposition=SynthesisReport.model_validate_json(
                     raw
                 ).result.disposition
@@ -836,7 +1287,13 @@ class MiningDiagnosticRunner:
             )
             if failure is not None and not isinstance(failure, Exception):
                 raise failure
-            if status == "invalid" and opportunity == 0 and normal and cleanup:
+            if (
+                status == "invalid"
+                and opportunity == 0
+                and normal
+                and cleanup
+                and not any(a.kind == "format_correction" for a in slot.attempts)
+            ):
                 correction = {
                     "original_output": raw.decode("utf-8", errors="replace"),
                     "validation_errors": [error_code or "invalid_report"],

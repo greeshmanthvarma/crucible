@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import signal
+import sqlite3
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -12,7 +13,7 @@ from uuid import UUID
 from sqlalchemy.exc import NoResultFound
 
 from crucible.improvement.manifest import ManifestDrift
-from crucible.improvement.store import ExperimentStore, RevisionConflict
+from crucible.improvement.store import BudgetDenied, ExperimentStore, RevisionConflict
 
 
 def parser(*, require_state_root: bool = True) -> argparse.ArgumentParser:
@@ -31,6 +32,29 @@ def parser(*, require_state_root: bool = True) -> argparse.ArgumentParser:
         "evidence-verify", help="offline package verification"
     )
     verify.add_argument("--package", type=Path, required=True)
+    diagnostic = operations.add_parser("mining-diagnostic")
+    controls = diagnostic.add_subparsers(dest="control", required=True)
+    prepare = controls.add_parser("prepare")
+    prepare.add_argument("--config", type=Path, required=True)
+    prepare.add_argument("--output", type=Path, required=True)
+    for control in (
+        "status",
+        "continue",
+        "stop",
+        "recover",
+        "authorize-retry",
+        "report",
+        "close",
+    ):
+        item = controls.add_parser(control)
+        item.add_argument("--root", type=Path, required=True)
+        if control == "continue":
+            item.add_argument("--authorize-paid-models", action="store_true")
+        elif control == "authorize-retry":
+            item.add_argument("--slot", type=UUID, required=True)
+            item.add_argument("--failed-attempt", type=UUID, required=True)
+        elif control == "report":
+            item.add_argument("--output", type=Path, required=True)
     start = operations.add_parser("start")
     start.add_argument("--config", type=Path, required=True)
     start.add_argument("--idempotency-key", required=True)
@@ -81,8 +105,12 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
             root = arguments[index : index + 2]
             del arguments[index : index + 2]
             arguments = root + arguments
-    offline = bool(arguments and arguments[0] in ("evidence-export", "evidence-verify"))
+    offline = "mining-diagnostic" in arguments or bool(
+        arguments and arguments[0] in ("evidence-export", "evidence-verify")
+    )
     args = parser(require_state_root=not offline).parse_args(arguments)
+    if args.operation == "mining-diagnostic":
+        return await _run_mining_command(args)
     if args.operation in ("evidence-export", "evidence-verify"):
         from crucible.improvement.trajectory_export import run_evidence_command
 
@@ -194,6 +222,179 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
             loop.remove_signal_handler(sig)
             signal.signal(sig, handler)
         await store.close()
+
+
+async def _run_mining_command(args: argparse.Namespace) -> int:
+    # This gate precedes store, runtime and provider construction.
+    if args.control == "continue" and not args.authorize_paid_models:
+        print(
+            "Diagnostic continuation requires --authorize-paid-models.", file=sys.stderr
+        )
+        return 2
+    from crucible.improvement.mining_contracts import (
+        MiningDiagnosticConfig,
+        PreparedMiningDiagnostic,
+    )
+    from crucible.improvement.mining_diagnostic import (
+        MiningDiagnosticRunner,
+        freeze_mining_diagnostic,
+    )
+    from crucible.improvement.mining_store import MiningDiagnosticStore
+    from crucible.improvement.worker_supervisor import read_regular_artifact
+
+    store = None
+    runner = None
+    id = None
+    loop = asyncio.get_running_loop()
+    current = asyncio.current_task()
+    previous = {}
+    if current:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous[sig] = signal.getsignal(sig)
+            loop.add_signal_handler(sig, current.cancel)
+    try:
+        if args.control == "prepare":
+            config = MiningDiagnosticConfig.model_validate_json(
+                read_regular_artifact(args.config, 1_048_576)
+            )
+            prepared = freeze_mining_diagnostic(config, args.output)
+            store = await MiningDiagnosticStore.open(
+                prepared.root / "accounting.sqlite3"
+            )
+            runner = MiningDiagnosticRunner(store, prepared.root, None)
+            await runner.initialize(prepared.diagnostic_id)
+            print(prepared.model_dump_json())
+            return 0
+        prepared = PreparedMiningDiagnostic.model_validate_json(
+            read_regular_artifact(args.root / "prepared.json", 65536)
+        )
+        id = prepared.diagnostic_id
+        path = args.root / "accounting.sqlite3"
+        if not path.is_file():
+            raise ValueError("diagnostic ledger does not exist")
+        opener = (
+            MiningDiagnosticStore.open_readonly
+            if args.control in ("status", "report")
+            else MiningDiagnosticStore.open
+        )
+        store = await opener(path)
+        runner = MiningDiagnosticRunner(store, args.root, None)
+        state = (
+            await store.diagnostic_status(id)
+            if args.control == "stop"
+            else await runner.validate(id)
+        )
+        if args.control == "continue":
+            if state.status not in ("ready", "running"):
+                print(state.model_dump_json())
+                return (
+                    130
+                    if state.status == "interrupted"
+                    else 3
+                    if state.status == "blocked"
+                    else 0
+                )
+            # Check the loaded host controller BEFORE constructing any provider port.
+            from crucible.domain.clock import SystemClock
+            from crucible.improvement.contracts import EDITABLE_PATHS
+            from crucible.improvement.runtime import execution_runtime
+            from crucible.improvement.source import _digest, inspect_source
+            from crucible.improvement.worker_supervisor import DockerRuntime
+            from crucible.models.responses_gateway import LiteLLMResponsesGateway
+            from crucible.repair.gateway import ScopedModelGateway
+
+            manifest = (await store.get(id)).manifest
+            source = inspect_source(Path(__file__).parents[4], manifest.initial_commit)
+            if (
+                source.changed_paths
+                or source.source_digest != manifest.initial_source_digest
+                or _digest(
+                    {n: v for n, v in source.files.items() if n not in EDITABLE_PATHS}
+                )
+                != manifest.controller_digest
+            ):
+                raise ValueError(
+                    "loaded controller differs from frozen executing source"
+                )
+
+            async def deny_command(job: object, spec: object) -> bool:
+                return False
+
+            gateway = ScopedModelGateway(
+                LiteLLMResponsesGateway(disable_retries=True),
+                clock=SystemClock(),
+                endpoint="http://broker/internal/improvement/model",
+            )
+            async with execution_runtime(
+                store, args.root, manifest, DockerRuntime(), gateway, deny_command
+            ) as supervisor:
+                runner = MiningDiagnosticRunner(store, args.root, supervisor)
+                state = await runner.continue_run(id)
+        elif args.control == "recover":
+            state = await runner.recover(id)
+        elif args.control == "stop":
+            state = await runner.stop(id)
+        elif args.control == "close":
+            state = await runner.close(id)
+        elif args.control == "authorize-retry":
+            authorization = await runner.authorize_retry(
+                id, args.slot, args.failed_attempt
+            )
+            print(json.dumps({"authorization_id": str(authorization)}, sort_keys=True))
+            return 0
+        elif args.control == "report":
+            from crucible.improvement.mining_reporting import write_mining_report
+
+            print(
+                json.dumps(
+                    await write_mining_report(store, id, args.output), sort_keys=True
+                )
+            )
+            return 0
+        print(state.model_dump_json())
+        if args.control in ("status", "close"):
+            return 0
+        if args.control == "stop":
+            return 0 if state.cleanup_confirmed else 3
+        return (
+            130
+            if state.status == "interrupted"
+            else 3
+            if state.status == "blocked"
+            else 0
+        )
+    except asyncio.CancelledError:
+        if runner is not None and id is not None:
+            await runner.stop(id)
+        print("Diagnostic interrupted; explicit recovery required.", file=sys.stderr)
+        return 130
+    except BudgetDenied:
+        print("Diagnostic budget or accounting blocks this operation.", file=sys.stderr)
+        return 3
+    except (
+        ValueError,
+        KeyError,
+        NoResultFound,
+        RevisionConflict,
+        FileNotFoundError,
+        sqlite3.Error,
+    ):
+        print(
+            "Diagnostic configuration or state conflicts with frozen inputs.",
+            file=sys.stderr,
+        )
+        return 2
+    except (OSError, RuntimeError):
+        print(
+            "Diagnostic infrastructure or recovery requires attention.", file=sys.stderr
+        )
+        return 3
+    finally:
+        for sig, handler in previous.items():
+            loop.remove_signal_handler(sig)
+            signal.signal(sig, handler)
+        if store is not None:
+            await store.close()
 
 
 if __name__ == "__main__":
