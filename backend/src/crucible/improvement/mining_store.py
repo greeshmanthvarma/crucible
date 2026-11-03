@@ -663,6 +663,12 @@ VALUES (:attempt,:slot,:ordinal,:job,:kind,'running',:json,:sha,
         tool_call_count: int | None,
         normal_completion: bool,
         cleanup_confirmed: bool,
+        output_ref: str | None = None,
+        output_sha: str | None = None,
+        receipts_ref: str | None = None,
+        outcome_ref: str | None = None,
+        error_code: str | None = None,
+        final_disposition: str | None = None,
     ) -> None:
         """Checkpoint host-observed termination; report acceptance is a later gate."""
         if status not in (
@@ -714,16 +720,24 @@ VALUES (:attempt,:slot,:ordinal,:job,:kind,'running',:json,:sha,
             await conn.execute(
                 text("""
 UPDATE mining_attempts SET status=:status,
-tool_call_count=:calls,validation_json=:validation WHERE id=:id
+tool_call_count=:calls,validation_json=:validation,
+output_ref=:output,output_sha=:sha,receipts_ref=:receipts,
+outcome_ref=:outcome WHERE id=:id
 """),
                 dict(
                     id=str(attempt_id),
                     status=status,
                     calls=tool_call_count,
+                    output=output_ref,
+                    sha=output_sha,
+                    receipts=receipts_ref,
+                    outcome=outcome_ref,
                     validation=json.dumps(
                         dict(
                             normal_completion=normal_completion,
                             cleanup_confirmed=cleanup_confirmed,
+                            error_code=error_code,
+                            final_disposition=final_disposition,
                         )
                     ),
                 ),
@@ -987,7 +1001,9 @@ s.diagnostic=:id
                                 job_id=UUID(a["job_id"]),
                                 kind=a["kind"],
                                 status=a["status"],
-                                error_code=None,
+                                error_code=json.loads(a["validation_json"] or "{}").get(
+                                    "error_code"
+                                ),
                             )
                             for a in attempts
                         ),
@@ -1020,8 +1036,22 @@ s.diagnostic=:id
                 slots=tuple(values),
                 next_action="continue"
                 if row["status"] in ("ready", "running")
+                else "none"
+                if row["status"] == "complete"
                 else "recover",
-                final_disposition=None,
+                final_disposition=(
+                    await conn.execute(
+                        text("""
+SELECT json_extract(a.validation_json,'$.final_disposition')
+FROM mining_attempts a JOIN mining_slots s ON a.slot=s.id
+WHERE s.diagnostic=:id AND s.ordinal=3 AND a.status='complete'
+ORDER BY a.ordinal DESC LIMIT 1
+"""),
+                        {"id": str(id)},
+                    )
+                ).scalar_one_or_none()
+                if row["status"] == "complete"
+                else None,
                 cleanup_confirmed=not bool(uncertain or failed_cleanup),
                 config_digest=row["config_digest"],
                 investigation_source=run.manifest.investigation_source,
@@ -1031,4 +1061,63 @@ s.diagnostic=:id
                     controller_digest=run.manifest.controller_digest,
                     dependency_lock_digest=run.manifest.dependency_lock_digest,
                 ),
+            )
+
+    async def attempt_record(self, attempt_id: UUID) -> RowMapping:
+        async with self.engine.connect() as conn:
+            return (
+                (
+                    await conn.execute(
+                        text("SELECT * FROM mining_attempts WHERE id=:id"),
+                        {"id": str(attempt_id)},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+    async def block_diagnostic(self, id: UUID, code: str) -> None:
+        await self.fail_run(id, code)
+        async with self._transaction() as conn:
+            await conn.execute(
+                text("UPDATE mining_runs SET error_code=:code WHERE id=:id"),
+                {"id": str(id), "code": code},
+            )
+
+    async def complete_diagnostic(
+        self, id: UUID, output_ref: str, output_sha: str
+    ) -> None:
+        async with self._transaction() as conn:
+            run = await self._get(conn, id)
+            if run.stop_requested or run.status not in ("ready", "running"):
+                raise BudgetDenied("diagnostic stopped before final checkpoint")
+            await self._require_certain(conn, id)
+            await self._require_reconciled(conn, id)
+            slots = (
+                (
+                    await conn.execute(
+                        text("SELECT status FROM mining_slots WHERE diagnostic=:id"),
+                        {"id": str(id)},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if slots != ["complete"] * 4:
+                raise RevisionConflict("all four validated slots required")
+            await conn.execute(
+                text("""UPDATE mining_runs SET status='complete',phase='finished',
+                final_output_ref=:ref,final_output_sha=:sha,
+                revision=revision+1 WHERE id=:id"""),
+                {"id": str(id), "ref": output_ref, "sha": output_sha},
+            )
+            await conn.execute(
+                text(
+                    "UPDATE experiment_runs SET status='closed',stage='finished',"
+                    "revision=revision+1 WHERE id=:id"
+                ),
+                {"id": str(id)},
+            )
+            await self._event(
+                conn, id, "mining_diagnostic_complete", {"sha256": output_sha}
             )
