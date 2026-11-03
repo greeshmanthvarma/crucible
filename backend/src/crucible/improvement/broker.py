@@ -23,7 +23,12 @@ from crucible.engine.gateway import (
     ModelUsage,
     PreparedModelRequest,
 )
-from crucible.improvement.contracts import ExecutionManifest, UsageAmounts
+from crucible.improvement.contracts import (
+    ExecutionManifest,
+    MiningDiagnosticManifest,
+    UsageAmounts,
+)
+from crucible.improvement.mining_store import MiningDiagnosticStore
 from crucible.improvement.store import ExecutionStore, QuotaExhausted
 from crucible.improvement.worker_protocol import (
     CommandRecord,
@@ -124,11 +129,18 @@ class ImprovementBroker:
         validate_job_manifest(job, manifest)
         if job.job_id in self.sessions or self.gateway is None:
             raise ValueError("job already issued or model gateway unavailable")
+        max_requests = manifest.budget.max_model_requests
+        if isinstance(manifest, MiningDiagnosticManifest):
+            if not isinstance(self.store, MiningDiagnosticStore) or not isinstance(
+                job, RoleJob
+            ):
+                raise ValueError("diagnostic credentials require their dedicated store")
+            max_requests = self.store.take_job_admission(job, manifest).max_requests
         credential = self.gateway.issue(
             job.job_id,
             manifest.model.model_id,
             {
-                "max_requests": manifest.budget.max_model_requests,
+                "max_requests": max_requests,
                 "max_tokens": job.limits.max_model_tokens,
             },
             timedelta(seconds=job.wall_deadline_seconds),

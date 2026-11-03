@@ -4,7 +4,7 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncIterator, Generic, Literal, Self, cast
+from typing import TYPE_CHECKING, AsyncIterator, Generic, Literal, Self, Union, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -24,6 +24,7 @@ from crucible.improvement.roles import RoleExecution, SelectionDecision
 from crucible.repair.identity import digest
 
 if TYPE_CHECKING:
+    from crucible.improvement.mining_store import MiningDiagnosticStore
     from crucible.improvement.publication import PublicationRecord
 
 Status = Literal["ready", "running", "stopping", "interrupted", "error", "closed"]
@@ -466,78 +467,92 @@ revision=revision+1,updated_at=CURRENT_TIMESTAMP WHERE id=:id"""),
     ) -> UUID:
         request = UsageAmounts.model_validate_json(request.model_dump_json())
         async with self._transaction() as conn:
-            record = await self._get(conn, id)
-            if record.stop_requested or record.status not in ("ready", "running"):
-                raise BudgetDenied("experiment is stopped")
-            if trial_id is not None:
-                trial = (
-                    await conn.execute(
-                        text(
-                            "SELECT experiment,status FROM experiment_trials "
-                            "WHERE id=:trial"
-                        ),
-                        {"trial": str(trial_id)},
-                    )
-                ).first()
-                if (
-                    trial is None
-                    or trial.experiment != str(id)
-                    or trial.status in ("complete", "error", "interrupted")
-                ):
-                    raise BudgetDenied("trial generation is no longer active")
-            totals = {name: 0 for name in UsageAmounts.model_fields}
-            rows = (
+            return await self._reserve_usage_in_transaction(
+                conn, id, trial_id, request, kind=kind, job_id=job_id
+            )
+
+    async def _reserve_usage_in_transaction(
+        self,
+        conn: AsyncConnection,
+        id: UUID,
+        trial_id: UUID | None,
+        request: UsageAmounts,
+        *,
+        kind: Literal["model", "command", "worker"],
+        job_id: UUID | None,
+    ) -> UUID:
+        record = await self._get(conn, id)
+        if record.stop_requested or record.status not in ("ready", "running"):
+            raise BudgetDenied("experiment is stopped")
+        if trial_id is not None:
+            trial = (
                 await conn.execute(
                     text(
-                        "SELECT requested_json,settled_json,status FROM "
-                        "experiment_usage WHERE experiment=:id"
+                        "SELECT experiment,status FROM experiment_trials "
+                        "WHERE id=:trial"
                     ),
-                    {"id": str(id)},
+                    {"trial": str(trial_id)},
                 )
-            ).all()
-            for row in rows:
-                if row.status == "uncertain":
-                    raise BudgetDenied("uncertain usage requires explicit recovery")
-                amounts = UsageAmounts.model_validate_json(
-                    row.settled_json
-                    if row.status in ("settled", "conservative")
-                    else row.requested_json
-                )
-                for name in totals:
-                    totals[name] += getattr(amounts, name)
-            caps = dict(
-                tokens=record.manifest.budget.max_reported_and_reserved_tokens,
-                requests=record.manifest.budget.max_model_requests,
-                active_seconds=record.manifest.budget.max_active_seconds,
-                output_bytes=record.manifest.budget.max_total_output_bytes,
-                trial_starts=record.manifest.budget.max_trial_starts,
-                worker_wall_seconds=record.manifest.budget.max_worker_wall_seconds,
-            )
-            if any(totals[name] + getattr(request, name) > caps[name] for name in caps):
-                raise QuotaExhausted("frozen experiment budget exceeded")
-            reservation = uuid4()
+            ).first()
+            if (
+                trial is None
+                or trial.experiment != str(id)
+                or trial.status in ("complete", "error", "interrupted")
+            ):
+                raise BudgetDenied("trial generation is no longer active")
+        totals = {name: 0 for name in UsageAmounts.model_fields}
+        rows = (
             await conn.execute(
-                text("""INSERT INTO experiment_usage
+                text(
+                    "SELECT requested_json,settled_json,status FROM "
+                    "experiment_usage WHERE experiment=:id"
+                ),
+                {"id": str(id)},
+            )
+        ).all()
+        for row in rows:
+            if row.status == "uncertain":
+                raise BudgetDenied("uncertain usage requires explicit recovery")
+            amounts = UsageAmounts.model_validate_json(
+                row.settled_json
+                if row.status in ("settled", "conservative")
+                else row.requested_json
+            )
+            for name in totals:
+                totals[name] += getattr(amounts, name)
+        caps = dict(
+            tokens=record.manifest.budget.max_reported_and_reserved_tokens,
+            requests=record.manifest.budget.max_model_requests,
+            active_seconds=record.manifest.budget.max_active_seconds,
+            output_bytes=record.manifest.budget.max_total_output_bytes,
+            trial_starts=record.manifest.budget.max_trial_starts,
+            worker_wall_seconds=record.manifest.budget.max_worker_wall_seconds,
+        )
+        if any(totals[name] + getattr(request, name) > caps[name] for name in caps):
+            raise QuotaExhausted("frozen experiment budget exceeded")
+        reservation = uuid4()
+        await conn.execute(
+            text("""INSERT INTO experiment_usage
 (reservation_id,experiment,trial,kind,requested_json,status) VALUES
 (:rid,:id,:trial,:kind,:request,'reserved')"""),
-                {
-                    "rid": str(reservation),
-                    "id": str(id),
-                    "trial": str(trial_id) if trial_id else None,
-                    "kind": kind,
-                    "request": request.model_dump_json(),
-                },
-            )
-            await self._event(
-                conn,
-                id,
-                "usage_reserved",
-                {
-                    "reservation_id": str(reservation),
-                    **({"job_id": str(job_id)} if job_id else {}),
-                },
-            )
-            return reservation
+            {
+                "rid": str(reservation),
+                "id": str(id),
+                "trial": str(trial_id) if trial_id else None,
+                "kind": kind,
+                "request": request.model_dump_json(),
+            },
+        )
+        await self._event(
+            conn,
+            id,
+            "usage_reserved",
+            {
+                "reservation_id": str(reservation),
+                **({"job_id": str(job_id)} if job_id else {}),
+            },
+        )
+        return reservation
 
     async def settle_usage(self, reservation_id: UUID, actual: UsageAmounts) -> None:
         actual = UsageAmounts.model_validate_json(actual.model_dump_json())
@@ -2808,4 +2823,4 @@ class CalibrationStore(ExperimentStore[CalibrationManifest]):
             return trial
 
 
-ExecutionStore = ExperimentStore | CalibrationStore
+ExecutionStore = Union[ExperimentStore, CalibrationStore, "MiningDiagnosticStore"]

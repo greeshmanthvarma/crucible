@@ -705,3 +705,149 @@ async def test_failed_responses_adapter_preserves_usage_through_broker(
                 assert summary["conservative"]["tokens"] >= input_tokens
     finally:
         await store.close()
+
+
+async def setup_diagnostic_broker(tmp_path, upstream):
+    import json
+    from uuid import uuid4
+
+    from crucible.domain.clock import SystemClock
+    from crucible.improvement.contracts import MiningDiagnosticManifest
+    from crucible.improvement.mining_contracts import AnalystAssignment
+    from crucible.improvement.mining_store import MiningDiagnosticStore
+    from crucible.repair.gateway import ScopedModelGateway
+    from tests.contract.test_mining_diagnostic import diagnostic_payload
+    from tests.unit.test_mining_store import make_role
+
+    manifest = MiningDiagnosticManifest.model_validate_json(
+        json.dumps(diagnostic_payload())
+    )
+    store = await MiningDiagnosticStore.open(tmp_path / "accounting.sqlite3")
+    try:
+        assignments = tuple(
+            AnalystAssignment(
+                slot_id=uuid4(),
+                trial_id=trial,
+                package_digest=manifest.package_digest,
+                investigation_source_digest=manifest.investigation_source.source_digest,
+            )
+            for trial in manifest.selected_trial_ids
+        )
+        status = await store.create_diagnostic(
+            manifest, "a" * 64, manifest.package_digest, assignments
+        )
+        job = make_role(manifest, status.slots[0])
+        await store.register_attempt(status.slots[0].slot_id, job, job.input_digest)
+        broker = ImprovementBroker(
+            store,
+            ScopedModelGateway(upstream, clock=SystemClock(), endpoint="unused"),
+            None,
+        )
+        credential = broker.issue(
+            job,
+            manifest,
+            WorkspaceBinding(tmp_path, manifest.worker_image, manifest.worker_platform),
+        )
+        return store, broker, job, credential
+    except BaseException:
+        await store.close()
+        raise
+
+
+async def test_diagnostic_request_cap_and_restart_cannot_reset_allowance(tmp_path):
+    from uuid import uuid4, uuid5
+
+    from crucible.domain.clock import SystemClock
+    from crucible.engine.gateway import (
+        ModelError,
+        ModelStop,
+        ModelStopReason,
+        ModelUsage,
+        PreparedModelRequest,
+    )
+    from crucible.improvement.mining_store import MiningDiagnosticStore
+    from crucible.improvement.store import BudgetDenied
+    from crucible.repair.gateway import ScopedModelGateway
+
+    class Upstream:
+        calls = 0
+
+        async def stream(self, request):
+            self.calls += 1
+            yield ModelUsage(1, 1)
+            yield ModelStop(ModelStopReason.COMPLETE)
+
+    upstream = Upstream()
+    store, broker, job, credential = await setup_diagnostic_broker(tmp_path, upstream)
+    reopened = None
+    try:
+        session = broker.sessions[job.job_id]
+        request = PreparedModelRequest(
+            uuid5(job.job_id, "run"), uuid4(), job.model.model_id, (), (), 100
+        )
+        for _ in range(10):
+            assert not any(
+                isinstance(e, ModelError)
+                for e in [
+                    e async for e in broker.model(credential.token, job.job_id, request)
+                ]
+            )
+        events = [e async for e in broker.model(credential.token, job.job_id, request)]
+        assert events == [
+            ModelError("improvement_budget_exhausted", "Model quota exhausted")
+        ]
+        assert upstream.calls == 10
+        assert (await store.slot_usage(job.budget_slot_id))["remaining"].requests == 0
+        # A different gateway instance cannot mint a credential for the same job.
+        restarted = ImprovementBroker(
+            store,
+            ScopedModelGateway(upstream, clock=SystemClock(), endpoint="unused"),
+            None,
+        )
+        with pytest.raises(BudgetDenied, match="admission"):
+            restarted.issue(job, session.manifest, session.binding)
+        reopened = await MiningDiagnosticStore.open(tmp_path / "accounting.sqlite3")
+        restarted = ImprovementBroker(
+            reopened,
+            ScopedModelGateway(upstream, clock=SystemClock(), endpoint="unused"),
+            None,
+        )
+        with pytest.raises(BudgetDenied, match="admission"):
+            restarted.issue(job, session.manifest, session.binding)
+        assert upstream.calls == 10
+    finally:
+        if reopened:
+            await reopened.close()
+        await store.close()
+
+
+async def test_rejected_diagnostic_reservation_never_calls_provider(tmp_path):
+    from uuid import uuid4, uuid5
+
+    from crucible.engine.gateway import ModelError, PreparedModelRequest
+    from crucible.improvement.contracts import UsageAmounts
+
+    class Upstream:
+        calls = 0
+
+        async def stream(self, request):
+            self.calls += 1
+            raise AssertionError("provider must not be called")
+            yield
+
+    upstream = Upstream()
+    store, broker, job, credential = await setup_diagnostic_broker(tmp_path, upstream)
+    try:
+        await store.reserve_usage(
+            job.experiment_id, None, UsageAmounts(tokens=50000), job_id=job.job_id
+        )
+        request = PreparedModelRequest(
+            uuid5(job.job_id, "run"), uuid4(), job.model.model_id, (), (), 100
+        )
+        events = [e async for e in broker.model(credential.token, job.job_id, request)]
+        assert events == [
+            ModelError("improvement_budget_exhausted", "Model quota exhausted")
+        ]
+        assert upstream.calls == 0
+    finally:
+        await store.close()

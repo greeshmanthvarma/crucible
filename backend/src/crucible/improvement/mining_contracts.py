@@ -10,7 +10,7 @@ from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 
-from crucible.benchmarks.contracts import Sha256, TrialLimits
+from crucible.benchmarks.contracts import Commit, Sha256, TrialLimits
 from crucible.improvement.contracts import (
     Contract,
     MiningDiagnosticManifest,
@@ -249,6 +249,15 @@ class MiningSlotStatus(Contract):
     remaining: UsageAmounts
 
 
+class ExecutingSourceIdentity(Contract):
+    """Pinned execution policy, without inventing an unavailable export hash."""
+
+    commit: Commit
+    source_digest: Sha256
+    controller_digest: Sha256
+    dependency_lock_digest: Sha256
+
+
 class MiningDiagnosticStatus(Contract):
     diagnostic_id: UUID
     status: Literal["ready", "running", "blocked", "interrupted", "complete", "closed"]
@@ -268,4 +277,4 @@ class MiningDiagnosticStatus(Contract):
     cleanup_confirmed: bool
     config_digest: Sha256
     investigation_source: SourceIdentity
-    executing_source: SourceIdentity
+    executing_source: ExecutingSourceIdentity
