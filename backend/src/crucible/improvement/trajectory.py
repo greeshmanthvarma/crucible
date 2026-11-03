@@ -1,7 +1,9 @@
 """Pure facts-only reconstruction of complete bounded solver wire records."""
 
+import hashlib
 import json
 from dataclasses import fields
+from types import MappingProxyType
 from typing import Literal
 from uuid import UUID
 
@@ -12,10 +14,16 @@ from crucible.domain.conversation import (
     MessageRole,
 )
 from crucible.domain.tools import ToolCall, ToolResult
+from crucible.improvement.roles import EvidenceRef
 from crucible.improvement.trajectory_contracts import (
+    DetailEntry,
+    ExportLimits,
     SolverTrace,
     TraceCompleteness,
     TraceWire,
+    TrajectoryBundle,
+    TrajectoryRecord,
+    TrialOverview,
     VerifiedTrial,
 )
 from crucible.repair.identity import canonical_json
@@ -56,6 +64,7 @@ def decode_solver_trace(
 ) -> SolverTrace:
     if maximum <= 0 or len(raw) > maximum:
         raise TrajectoryError("export_limit", "input trace cap")
+    prefix: Literal["", "/data"] = ""
     try:
         data = json.loads(
             raw.decode("utf-8"),
@@ -67,6 +76,7 @@ def decode_solver_trace(
             and set(data) == {"trust", "data"}
             and data["trust"] == "untrusted-worker-observation"
         ):
+            prefix = "/data"
             data = data["data"]
         if not isinstance(data, dict) or data.get("schema_version") != 2:
             raise TrajectoryError("unsupported_trace")
@@ -212,4 +222,242 @@ def decode_solver_trace(
             ),
             unresolved_part_refs=tuple(unresolved),
         ),
+        prefix,
+    )
+
+
+def build_trajectory(
+    trace: SolverTrace, trial: VerifiedTrial, limits: ExportLimits
+) -> TrajectoryBundle:
+    """Build navigation bytes; display sequence carries no global runtime claim."""
+    try:
+        solution = trial.solution_bytes.decode("utf-8")
+    except UnicodeError as error:
+        raise TrajectoryError("invalid_trace", "solution encoding") from error
+    files: dict[str, bytes] = {}
+    entries: list[DetailEntry] = []
+
+    def detail(
+        kind: Literal[
+            "message", "arguments", "result", "task_instruction", "solution_diff"
+        ],
+        record_id: UUID | None,
+        content: object,
+        pointer: str | None,
+        artifact: EvidenceRef,
+    ) -> str:
+        name = f"details/{record_id or trial.trial_id}.{kind}.json"
+        raw = canonical_json(content)
+        metadata: dict[str, object] = {
+            "kind": kind,
+            "original_record_id": record_id,
+            "content_sha256": hashlib.sha256(raw).hexdigest(),
+            "original_bytes": len(raw),
+            "truncated": False,
+            "content": content,
+        }
+        envelope = canonical_json(metadata)
+        names: tuple[str, ...] = (name,)
+        truncated = len(envelope) > limits.detail_bytes
+        if truncated:
+            text_name = name.removesuffix(".json") + ".excerpt.txt"
+            metadata.update(
+                truncated=True,
+                content=None,
+                excerpt_ref=text_name,
+                excerpt_encoding="canonical-json-utf8-prefix",
+                excerpt_notice="Incomplete excerpt; not a parseable record",
+            )
+            envelope = canonical_json(metadata)
+            remaining = limits.detail_bytes - len(envelope)
+            if remaining < 1:
+                raise TrajectoryError("export_limit", "detail metadata")
+            files[text_name] = (
+                raw[:remaining].decode("utf-8", errors="ignore").encode("utf-8")
+            )
+            names += (text_name,)
+        files[name] = envelope
+        if len(envelope) > limits.detail_bytes:
+            raise TrajectoryError("export_limit", "detail envelope")
+        entries.append(
+            DetailEntry(
+                ref=name,
+                kind=kind,
+                original_record_id=record_id,
+                original_artifact=artifact,
+                original_json_pointer=trace.original_pointer_prefix + pointer
+                if pointer is not None
+                else None,
+                content_sha256=hashlib.sha256(raw).hexdigest(),
+                original_bytes=len(raw),
+                exported_bytes=sum(len(files[n]) for n in names),
+                truncated=truncated,
+                files=names,
+            )
+        )
+        return name
+
+    details: dict[UUID, str] = {}
+    for i, message in enumerate(trace.messages):
+        content = json.loads(canonical_json(message))
+        # Structured payloads live once. Retain the surrounding independent text parts.
+        for part in content["parts"]:
+            if part["kind"] in ("tool_call", "tool_result"):
+                part["text_content"] = None
+                part["reasoning_content"] = None
+        details[message.id] = detail(
+            "message", message.id, content, f"/messages/{i}", trial.trace_ref
+        )
+    for i, call in enumerate(trace.tool_calls):
+        details[call.id] = detail(
+            "arguments",
+            call.id,
+            dict(call.arguments),
+            f"/tool_calls/{i}/arguments",
+            trial.trace_ref,
+        )
+    for i, result in enumerate(trace.tool_results):
+        details[result.id] = detail(
+            "result",
+            result.id,
+            {"result": dict(result.result), "display_text": result.display_text},
+            f"/tool_results/{i}",
+            trial.trace_ref,
+        )
+    initial = next(
+        (m for m in trace.messages if m.role == MessageRole.USER and m.step_id is None),
+        None,
+    )
+    instruction = None
+    if initial is not None:
+        instruction = detail(
+            "task_instruction",
+            initial.id,
+            [p.text_content for p in initial.parts if p.kind == MessagePartKind.TEXT],
+            f"/messages/{trace.messages.index(initial)}/parts",
+            trial.trace_ref,
+        )
+    detail(
+        "solution_diff",
+        None,
+        solution,
+        None,
+        trial.solution_ref,
+    )
+    calls = {c.id: c for c in trace.tool_calls}
+    results = {r.id: r for r in trace.tool_results}
+    ordered: list[Message | ToolCall | ToolResult] = []
+    seen: set[UUID] = set()
+    for message in trace.messages:
+        ordered.append(message)
+        for part in message.parts:
+            target = (
+                calls.get(part.tool_call_id)
+                if part.tool_call_id
+                else results.get(part.tool_result_id)
+                if part.tool_result_id
+                else None
+            )
+            if target is not None:
+                ordered.append(target)
+                seen.add(target.id)
+    structured: tuple[ToolCall | ToolResult, ...] = (
+        *trace.tool_calls,
+        *trace.tool_results,
+    )
+    unanchored = [r for r in structured if r.id not in seen]
+    ordered.extend(unanchored)
+    lines: list[bytes] = []
+    for sequence, record in enumerate(ordered, 1):
+        record_call: ToolCall | None = None
+        linked: tuple[UUID, ...]
+        if isinstance(record, Message):
+            linked = tuple(
+                linked_target
+                for p in record.parts
+                if (linked_target := p.tool_call_id or p.tool_result_id) is not None
+            )
+        elif isinstance(record, ToolCall):
+            linked = (record.assistant_message_id,)
+            record_call = record
+        else:
+            linked = (record.tool_call_id,)
+            record_call = calls[record.tool_call_id]
+        entry = TrajectoryRecord(
+            sequence=sequence,
+            kind="message"
+            if isinstance(record, Message)
+            else "tool_call"
+            if isinstance(record, ToolCall)
+            else "tool_result",
+            record_id=record.id,
+            step_id=record.step_id,
+            conversation_sequence=record.conversation_sequence
+            if isinstance(record, Message)
+            else None,
+            call_sequence=record.call_sequence
+            if isinstance(record, ToolCall)
+            else None,
+            completion_sequence=record.completion_sequence
+            if isinstance(record, ToolResult)
+            else None,
+            call_id=record_call.id if record_call else None,
+            result_id=record.id if isinstance(record, ToolResult) else None,
+            tool=record_call.name if record_call else None,
+            status=str(record.status),
+            error_code=record.error_code if isinstance(record, ToolResult) else None,
+            execution_mode=record_call.execution_mode.value if record_call else None,
+            detail_ref=details[record.id],
+            linked_ids=linked,
+        )
+        line = canonical_json(entry) + b"\n"
+        if len(line) > limits.index_record_bytes:
+            raise TrajectoryError("export_limit", "index record")
+        lines.append(line)
+    files["trajectory.jsonl"] = b"".join(lines)
+    if len(files["trajectory.jsonl"]) > limits.index_bytes:
+        raise TrajectoryError("export_limit", "index total")
+    files["details-manifest.json"] = canonical_json(entries)
+    if len(files["details-manifest.json"]) > limits.detail_bytes:
+        raise TrajectoryError("export_limit", "details manifest")
+    signatures = [canonical_json([c.name, dict(c.arguments)]) for c in trace.tool_calls]
+    completeness = trace.completeness.model_copy(
+        update={"truncated_detail_refs": tuple(e.ref for e in entries if e.truncated)}
+    )
+    overview = TrialOverview(
+        trial_id=trial.trial_id,
+        case_id=trial.case_id,
+        repeat_index=trial.repeat_index,
+        run_id=trial.run_id,
+        task_id=trial.task_id,
+        source=trial.source,
+        verdict=trial.verdict,
+        termination=trial.termination,
+        task_instruction_ref=instruction,
+        usage=trial.usage,
+        usage_available=trial.usage is not None,
+        task_instruction_available=instruction is not None,
+        ordering_basis="conversation-anchors-with-unanchored-source-order"
+        if unanchored
+        else "conversation-anchors",
+        message_count=len(trace.messages),
+        call_count=len(trace.tool_calls),
+        result_count=len(trace.tool_results),
+        error_result_count=sum(r.status != "succeeded" for r in trace.tool_results),
+        exact_repeated_call_count=len(signatures) - len(set(signatures)),
+        completeness=completeness,
+        index_ref="trajectory.jsonl",
+        details_manifest_ref="details-manifest.json",
+    )
+    files["overview.json"] = canonical_json(overview)
+    if (
+        len(files["overview.json"]) > limits.overview_bytes
+        or sum(map(len, files.values())) > limits.evidence_bytes
+    ):
+        raise TrajectoryError("export_limit", "overview or evidence total")
+    return TrajectoryBundle(
+        trial.trial_id,
+        MappingProxyType(files),
+        overview,
+        (trial.trace_ref, trial.solution_ref),
     )

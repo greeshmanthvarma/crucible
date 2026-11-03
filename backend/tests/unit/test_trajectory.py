@@ -303,3 +303,197 @@ def test_strict_wire_and_link_semantics(mutation, parallel_trace, verified_trial
         data["tool_calls"][0]["assistant_message_id"] = str(uid(20))
     with pytest.raises(TrajectoryError):
         decode(canonical_json(data), verified_trial)
+
+
+def test_detail_truncation_preserves_identity_and_digest(
+    parallel_records, verified_trial
+):
+    import json
+
+    from crucible.improvement.trajectory import build_trajectory
+    from crucible.improvement.trajectory_contracts import ExportLimits
+
+    parallel_records["tool_calls"] = (
+        replace(parallel_records["tool_calls"][0], arguments={"text": "é" * 600_000}),
+        parallel_records["tool_calls"][1],
+    )
+    raw = canonical_json(parallel_records)
+    assert 1_048_576 < len(raw) < 8_388_608
+    bundle = build_trajectory(
+        decode(raw, verified_trial), verified_trial, ExportLimits()
+    )
+    assert bundle.overview.completeness.truncated_detail_refs
+    assert bundle.overview.call_count == 2
+    assert len(bundle.files["trajectory.jsonl"].splitlines()) == 7
+    assert all(
+        len(line) + 1 <= 1024 for line in bundle.files["trajectory.jsonl"].splitlines()
+    )
+    manifest = json.loads(bundle.files["details-manifest.json"])
+    entry = next(e for e in manifest if e["kind"] == "arguments" and e["truncated"])
+    assert entry["original_artifact"]["sha256"] == verified_trial.trace_ref.sha256
+    assert entry["original_bytes"] > 1_048_576
+    assert all(len(bundle.files[f]) <= 1_048_576 for f in entry["files"])
+
+
+def test_exact_limit_includes_metadata_and_newlines(parallel_trace, verified_trial):
+    from crucible.improvement.trajectory import build_trajectory
+    from crucible.improvement.trajectory_contracts import ExportLimits
+
+    trace = decode(parallel_trace, verified_trial)
+    bundle = build_trajectory(trace, verified_trial, ExportLimits())
+    exact = len(bundle.files["trajectory.jsonl"])
+    assert (
+        build_trajectory(trace, verified_trial, ExportLimits(index_bytes=exact)).files
+        == bundle.files
+    )
+    with pytest.raises(TrajectoryError, match="export_limit"):
+        build_trajectory(trace, verified_trial, ExportLimits(index_bytes=exact - 1))
+    assert bundle.files["trajectory.jsonl"].endswith(b"\n")
+
+
+def test_index_overflow_never_drops_events(parallel_trace, verified_trial):
+    from crucible.improvement.trajectory import build_trajectory
+    from crucible.improvement.trajectory_contracts import ExportLimits
+
+    with pytest.raises(TrajectoryError, match="export_limit"):
+        build_trajectory(
+            decode(parallel_trace, verified_trial),
+            verified_trial,
+            ExportLimits(index_bytes=100),
+        )
+
+
+def test_overview_moves_long_instruction_to_detail(parallel_records, verified_trial):
+    from crucible.improvement.trajectory import build_trajectory
+    from crucible.improvement.trajectory_contracts import ExportLimits
+
+    message = parallel_records["messages"][0]
+    parallel_records["messages"] = (
+        replace(message, parts=(replace(message.parts[0], text_content="x" * 20_000),)),
+        *parallel_records["messages"][1:],
+    )
+    bundle = build_trajectory(
+        decode(canonical_json(parallel_records), verified_trial),
+        verified_trial,
+        ExportLimits(),
+    )
+    assert len(bundle.files["overview.json"]) <= 8192
+    assert bundle.overview.task_instruction_ref in bundle.files
+    assert b"x" * 100 not in bundle.files["overview.json"]
+
+
+def test_invalid_utf8_rejected_and_excerpt_edges_preserved(
+    parallel_records, verified_trial
+):
+    from crucible.improvement.trajectory import build_trajectory
+    from crucible.improvement.trajectory_contracts import ExportLimits
+
+    with pytest.raises(TrajectoryError):
+        decode(b"\xff", verified_trial)
+    parallel_records["tool_calls"] = (
+        replace(parallel_records["tool_calls"][0], arguments={"text": "🌱" * 5000}),
+        parallel_records["tool_calls"][1],
+    )
+    bundle = build_trajectory(
+        decode(canonical_json(parallel_records), verified_trial),
+        verified_trial,
+        ExportLimits(detail_bytes=10000),
+    )
+    for name, raw in bundle.files.items():
+        raw.decode("utf-8")
+        if name.endswith(".json"):
+            __import__("json").loads(raw)
+
+
+def test_bundle_is_byte_deterministic(parallel_trace, verified_trial):
+    from crucible.improvement.trajectory import build_trajectory
+    from crucible.improvement.trajectory_contracts import ExportLimits
+
+    trace = decode(parallel_trace, verified_trial)
+    assert (
+        build_trajectory(trace, verified_trial, ExportLimits()).files
+        == build_trajectory(trace, verified_trial, ExportLimits()).files
+    )
+
+
+def test_repeated_calls_count_only_exact_arguments(parallel_records, verified_trial):
+    from crucible.improvement.trajectory import build_trajectory
+    from crucible.improvement.trajectory_contracts import ExportLimits
+
+    assert (
+        build_trajectory(
+            decode(canonical_json(parallel_records), verified_trial),
+            verified_trial,
+            ExportLimits(),
+        ).overview.exact_repeated_call_count
+        == 1
+    )
+    parallel_records["tool_calls"] = (
+        parallel_records["tool_calls"][0],
+        replace(parallel_records["tool_calls"][1], arguments={"path": "./a.py"}),
+    )
+    assert (
+        build_trajectory(
+            decode(canonical_json(parallel_records), verified_trial),
+            verified_trial,
+            ExportLimits(),
+        ).overview.exact_repeated_call_count
+        == 0
+    )
+
+
+def test_absent_usage_and_compaction_are_not_zero_or_fabricated(
+    parallel_trace, verified_trial
+):
+    from crucible.improvement.trajectory import build_trajectory
+    from crucible.improvement.trajectory_contracts import ExportLimits
+
+    overview = build_trajectory(
+        decode(parallel_trace, verified_trial), verified_trial, ExportLimits()
+    ).overview
+    assert overview.usage is None and not overview.usage_available
+    assert overview.completeness.unavailable_fields == (
+        "steps",
+        "context_manifests",
+        "compactions",
+        "per_step_usage",
+    )
+
+
+def test_wrapped_detail_pointers_resolve_original_artifact(
+    parallel_records, verified_trial
+):
+    import json
+
+    from crucible.improvement.trajectory import build_trajectory
+    from crucible.improvement.trajectory_contracts import ExportLimits
+
+    raw = canonical_json(
+        {"trust": "untrusted-worker-observation", "data": parallel_records}
+    )
+    bundle = build_trajectory(
+        decode(raw, verified_trial), verified_trial, ExportLimits()
+    )
+    for entry in json.loads(bundle.files["details-manifest.json"]):
+        pointer = entry["original_json_pointer"]
+        if pointer:
+            value = json.loads(raw)
+            for component in pointer.split("/")[1:]:
+                value = (
+                    value[int(component)]
+                    if isinstance(value, list)
+                    else value[component]
+                )
+            assert value is not None
+
+
+def test_invalid_solution_utf8_uses_bounded_error(parallel_trace, verified_trial):
+    from crucible.improvement.trajectory import build_trajectory
+    from crucible.improvement.trajectory_contracts import ExportLimits
+
+    with pytest.raises(TrajectoryError):
+        build_trajectory(
+            decode(parallel_trace, verified_trial),
+            replace(verified_trial, solution_bytes=b"\xff"),
+            ExportLimits(),
+        )

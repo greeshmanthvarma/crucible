@@ -1,12 +1,15 @@
 """Worker-safe normalized evidence contracts; no storage or execution policy."""
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Mapping, Self
 from uuid import UUID
 
+from pydantic import model_validator
+
+from crucible.benchmarks.contracts import Sha256
 from crucible.domain.conversation import Message
 from crucible.domain.tools import ToolCall, ToolResult
-from crucible.improvement.contracts import Contract, SourceIdentity
+from crucible.improvement.contracts import Contract, Positive, SourceIdentity
 from crucible.improvement.roles import EvidenceRef
 from crucible.repair.gateway import TrustedUsage
 
@@ -51,6 +54,7 @@ class SolverTrace:
     tool_calls: tuple[ToolCall, ...]
     tool_results: tuple[ToolResult, ...]
     completeness: TraceCompleteness
+    original_pointer_prefix: Literal["", "/data"] = ""
 
 
 class TrajectoryRecord(Contract):
@@ -69,3 +73,69 @@ class TrajectoryRecord(Contract):
     execution_mode: Literal["parallel", "sequential"] | None
     detail_ref: str | None
     linked_ids: tuple[UUID, ...]
+
+
+class ExportLimits(Contract):
+    overview_bytes: Positive = 8192
+    index_record_bytes: Positive = 1024
+    index_bytes: Positive = 262144
+    detail_bytes: Positive = 1048576
+    evidence_bytes: Positive = 16777216
+    input_trace_bytes: Positive = 8388608
+
+    @model_validator(mode="after")
+    def bounded(self) -> Self:
+        ceilings = (8192, 1024, 262144, 1048576, 16777216, 8388608)
+        if any(
+            getattr(self, name) > cap
+            for name, cap in zip(type(self).model_fields, ceilings, strict=True)
+        ):
+            raise ValueError("export limits cannot widen frozen defaults")
+        return self
+
+
+class DetailEntry(Contract):
+    ref: str
+    kind: Literal["message", "arguments", "result", "task_instruction", "solution_diff"]
+    original_record_id: UUID | None
+    original_artifact: EvidenceRef
+    original_json_pointer: str | None
+    content_sha256: Sha256
+    original_bytes: int
+    exported_bytes: int
+    truncated: bool
+    files: tuple[str, ...]
+
+
+class TrialOverview(Contract):
+    trial_id: UUID
+    case_id: str
+    repeat_index: Literal[0, 1, 2]
+    run_id: UUID
+    task_id: UUID
+    source: SourceIdentity
+    verdict: Literal["pass", "fail"]
+    termination: Literal["completed", "budget_exhausted", "behavior_error"]
+    task_instruction_ref: str | None
+    usage: TrustedUsage | None
+    usage_available: bool
+    task_instruction_available: bool
+    ordering_basis: Literal[
+        "conversation-anchors", "conversation-anchors-with-unanchored-source-order"
+    ]
+    message_count: int
+    call_count: int
+    result_count: int
+    error_result_count: int
+    exact_repeated_call_count: int
+    completeness: TraceCompleteness
+    index_ref: str
+    details_manifest_ref: str
+
+
+@dataclass(frozen=True)
+class TrajectoryBundle:
+    trial_id: UUID
+    files: Mapping[str, bytes]
+    overview: TrialOverview
+    original_refs: tuple[EvidenceRef, ...]
