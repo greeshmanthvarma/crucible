@@ -90,6 +90,9 @@ async def test_session_refresh_requires_post_cookie_and_exact_origin(
         issued = await client.post("/api/auth/bootstrap", json={"secret": "bootstrap"})
         rejected_get = await client.get("/api/auth/session")
         rejected_post = await client.post("/api/auth/session")
+        wrong_origin = await client.post(
+            "/api/auth/session", headers={"Origin": "http://evil.example"}
+        )
         recovered = await client.post(
             "/api/auth/session", headers={"Origin": "http://127.0.0.1:8000"}
         )
@@ -99,7 +102,10 @@ async def test_session_refresh_requires_post_cookie_and_exact_origin(
     assert rejected_get.status_code == 405
     assert rejected_post.status_code == 403
     assert rejected_post.json()["code"] == "origin_rejected"
+    assert wrong_origin.status_code == 403
+    assert wrong_origin.json()["code"] == "origin_rejected"
     assert recovered.status_code == 200
+    assert recovered.json()["csrfToken"] != issued.json()["csrfToken"]
     assert still_authenticated.status_code != 401
 
 

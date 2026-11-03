@@ -170,18 +170,18 @@ def decode(raw, trial):
     return decode_solver_trace(raw, trial=trial, maximum=8_388_608)
 
 
-def test_parallel_admission_and_completion_are_distinct(parallel_trace, verified_trial):
+def test_decoder_preserves_parallel_identities_links_and_completion_order(
+    parallel_trace, verified_trial
+):
     trace = decode(parallel_trace, verified_trial)
     assert [c.call_sequence for c in trace.tool_calls] == [1, 2]
     assert [r.completion_sequence for r in trace.tool_results] == [1, 2]
     assert trace.tool_results[0].tool_call_id == trace.tool_calls[1].id
-
-
-def test_message_parts_reference_single_tool_payload(parallel_trace, verified_trial):
-    trace = decode(parallel_trace, verified_trial)
     assert trace.messages[1].parts[0].tool_call_id == trace.tool_calls[0].id
     assert trace.messages[2].parts[0].tool_result_id == trace.tool_results[0].id
     assert trace.messages[1].parts[0].text_content is None
+    assert len({c.id for c in trace.tool_calls}) == len(trace.tool_calls) == 2
+    assert trace.tool_calls[0].arguments == trace.tool_calls[1].arguments
 
 
 def test_missing_result_is_explicit(parallel_records, verified_trial):
@@ -203,13 +203,6 @@ def test_cross_run_result_rejected(parallel_records, verified_trial):
     )
     with pytest.raises(TrajectoryError, match="identity_mismatch"):
         decode(canonical_json(parallel_records), verified_trial)
-
-
-def test_equal_text_different_ids_remain_distinct(parallel_trace, verified_trial):
-    trace = decode(parallel_trace, verified_trial)
-    assert len(trace.tool_calls) == 2
-    assert trace.tool_calls[0].arguments == trace.tool_calls[1].arguments
-    assert trace.tool_calls[0].id != trace.tool_calls[1].id
 
 
 def test_untrusted_wrapper_does_not_expand_authority(parallel_records, verified_trial):

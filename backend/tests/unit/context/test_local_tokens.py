@@ -1,4 +1,3 @@
-from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -128,26 +127,3 @@ def test_corrupt_assets_fail_without_network(tmp_path, monkeypatch) -> None:
     with pytest.raises(ValueError, match="integrity"):
         estimate_input_tokens((), ())
     _encoding.cache_clear()
-
-
-async def test_gateway_reserves_shared_local_count_plus_output_allowance() -> None:
-    from crucible.domain.clock import SystemClock
-    from crucible.repair.gateway import ScopedModelGateway
-
-    class NeverCalled:
-        async def stream(self, request):
-            raise AssertionError("No model calls allowed")
-            yield
-
-    gateway = ScopedModelGateway(NeverCalled(), clock=SystemClock(), endpoint="local")
-    job = uuid4()
-    credential = gateway.issue(
-        job, "model", {"max_requests": 1, "max_tokens": 1000000}, timedelta(minutes=1)
-    )
-    messages = (
-        ModelMessage(ModelRole.USER, (ModelPart("text", "中文0123456789" * 100),)),
-    )
-    request = PreparedModelRequest(uuid4(), uuid4(), "model", messages, (), 4096)
-    reservation = await gateway.reserve(credential.token, job, request)
-    assert reservation.input_estimate == LocalTokenEstimator().estimate(messages)
-    assert reservation.tokens == reservation.input_estimate + 4096

@@ -3,7 +3,6 @@ import shutil
 from pathlib import Path
 
 from crucible.evals.cli import run_cli
-from crucible.evals.fake_gateway import DeterministicEvalGateway
 from crucible.sandbox.docker_client import ContainerInfo, VolumeInfo
 
 
@@ -95,7 +94,6 @@ async def test_smoke_suite_reuses_harness_with_fresh_repeated_trials(
         not any("dst=/workspace" in part for part in args)
         for args in docker.eval_mounts
     )
-    assert DeterministicEvalGateway is not None
 
 
 async def test_suite_applies_each_case_budget_independently(

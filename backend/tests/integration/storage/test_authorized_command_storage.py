@@ -68,6 +68,7 @@ async def test_authorized_command_records_round_trip_with_task_ownership(
     async with SqlAlchemyUnitOfWork(database) as uow:
         assert await uow.approvals.get(approval.id) == approval
         assert await uow.approvals.get_for_tool_call(call.id) == approval
+        assert await uow.approvals.list_for_task(task.id) == (approval,)
         assert await uow.artifacts.get(artifact.id) == artifact
         assert await uow.external_resources.get(resource.id) == resource
         assert (await uow.external_resources.list_for_task(task.id))[

@@ -82,9 +82,33 @@ def test_rejects_escape_and_duplicate_suite_members(tmp_path: Path) -> None:
         load_case(EvalPartition.DEVELOPMENT, "tiny", root=tmp_path)
 
 
-def test_development_lookup_cannot_load_held_out_case(tmp_path: Path) -> None:
+def test_default_lookup_keeps_development_and_held_out_roots_separate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crucible.evals import manifests
+
+    monkeypatch.setattr(
+        manifests,
+        "__file__",
+        str(tmp_path / "backend/src/crucible/evals/manifests.py"),
+    )
+    private_manifest = _case(tmp_path / "evals/held-out")
+    private_manifest.write_text(
+        private_manifest.read_text().replace("Write a file", "PRIVATE_CASE_SENTINEL")
+    )
+    private = load_case(EvalPartition.HELD_OUT, "tiny")
+    assert private.prompt == "PRIVATE_CASE_SENTINEL"
     with pytest.raises(FileNotFoundError):
-        load_case(EvalPartition.DEVELOPMENT, "secret", root=tmp_path)
+        load_case(EvalPartition.DEVELOPMENT, "tiny")
+
+    public_manifest = _case(tmp_path / "evals/development")
+    public_manifest.write_text(
+        public_manifest.read_text().replace("Write a file", "PUBLIC_CASE_SENTINEL")
+    )
+    public = load_case(EvalPartition.DEVELOPMENT, "tiny")
+    assert public.prompt == "PUBLIC_CASE_SENTINEL"
+    assert public.partition is EvalPartition.DEVELOPMENT
+    assert public.fixture_path != private.fixture_path
 
 
 def test_case_accepts_budgets_setup_and_validation(tmp_path: Path) -> None:

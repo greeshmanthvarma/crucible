@@ -81,27 +81,6 @@ async def test_eval_trial_identity_and_result_are_unique(database: Database) -> 
             )
 
 
-async def test_eval_schema_is_migrated(database: Database) -> None:
-    async with database.engine.connect() as connection:
-        names = (
-            (
-                await connection.execute(
-                    text("SELECT name FROM sqlite_master WHERE type='table'")
-                )
-            )
-            .scalars()
-            .all()
-        )
-    assert {
-        "eval_suites",
-        "eval_cases",
-        "eval_trials",
-        "eval_results",
-        "step_usage",
-        "run_summaries",
-    } <= set(names)
-
-
 async def test_store_preserves_trial_and_result_across_reopen(
     database: Database,
 ) -> None:

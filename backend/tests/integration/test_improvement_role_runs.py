@@ -7,62 +7,9 @@ from crucible.improvement.roles import parse_mining_output
 pytest_plugins = ["tests.unit.test_improvement_evidence_views"]
 
 
-def test_valid_no_action_has_no_retry():
-    result = parse_mining_output(
-        '{"schema_version":1,"disposition":"no_actionable_weakness",'
-        '"weaknesses":[],"summary":"No supported change."}',
-        (),
-    )
-    assert result.disposition == "no_actionable_weakness"
-
-
 def test_markdown_fences_are_invalid_output():
     with pytest.raises(ValueError):
         parse_mining_output('```json\n{"schema_version":1}\n```', ())
-
-
-async def test_valid_no_action_cannot_request_correction(tmp_path, evidence_setup):
-    import json
-    from uuid import uuid4
-
-    from crucible.improvement.evidence_views import DevelopmentViewBuilder
-    from crucible.improvement.roles import RoleExecution, RoleRunner
-
-    store, root, run, snapshot, ids = evidence_setup
-    round = await store.begin_round(run.id, snapshot.snapshot_id, run.revision)
-    builder = DevelopmentViewBuilder(store, root)
-    view = await builder.build_development_view(
-        run.id, snapshot.snapshot_id, tmp_path / "view"
-    )
-    output = root / "no-action.json"
-    output.write_text(
-        json.dumps(
-            dict(
-                schema_version=1,
-                disposition="no_actionable_weakness",
-                weaknesses=[],
-                summary="No action",
-            )
-        )
-    )
-    execution = RoleExecution(
-        role_id=uuid4(),
-        job_id=uuid4(),
-        experiment_id=run.id,
-        round_id=round.id,
-        kind="mining",
-        accepted_snapshot_id=snapshot.snapshot_id,
-        source_digest=snapshot.source_digest,
-        input_digest="a" * 64,
-        input_ref="input.json",
-        output_ref="no-action.json",
-        output_digest="b" * 64,
-        status="complete",
-    )
-    await store.save_role(execution, 0, (await store.get(run.id)).revision)
-    runner = RoleRunner(store, root, None, builder)
-    with pytest.raises(ValueError, match="invalid mining"):
-        await runner.mine(round.id, view, correction_of=execution.role_id)
 
 
 @pytest.mark.parametrize(
@@ -126,6 +73,12 @@ async def test_mining_checkpoints_original_output(
     with pytest.raises(ValueError):
         await runner.mine(round.id, view)
     if expected == "complete":
+        assert (
+            parse_mining_output(
+                (root / result.output_ref).read_text(), view.evidence_refs
+            ).disposition
+            == "no_actionable_weakness"
+        )
         with pytest.raises(ValueError, match="invalid mining"):
             await runner.mine(round.id, view, correction_of=result.role_id)
     else:
