@@ -91,6 +91,7 @@ async def test_calibration_composition(
     tmp_path, case_fixture, monkeypatch, termination, cleanup, gradable
 ):
     from contextlib import asynccontextmanager
+    from tempfile import TemporaryDirectory
 
     from crucible.benchmarks.contracts import GradeResult
     from crucible.improvement import calibration
@@ -101,12 +102,21 @@ async def test_calibration_composition(
     from crucible.repair.gateway import TrustedUsage
 
     payload = calibration_payload()
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    temporary_root = tmp_path / "platform-temp"
+    temporary_root.mkdir()
+
+    def platform_temporary_directory(*, prefix):
+        return TemporaryDirectory(prefix=prefix, dir=temporary_root)
+
+    monkeypatch.setattr(calibration, "TemporaryDirectory", platform_temporary_directory)
     config = tmp_path / "config.json"
     config.write_text(
         json.dumps(
             dict(
                 manifest=payload,
-                repository=str(tmp_path),
+                repository=str(repository),
                 data_dir=str(tmp_path / "runtime"),
             )
         )
@@ -124,6 +134,8 @@ async def test_calibration_composition(
     )
 
     def stage(repository, commit, destination, paths):
+        assert destination.is_relative_to(temporary_root)
+        assert not destination.is_relative_to(repository)
         (destination / "harness").mkdir(parents=True)
         (destination / "snapshot.json").write_text(snapshot.model_dump_json())
         return snapshot
