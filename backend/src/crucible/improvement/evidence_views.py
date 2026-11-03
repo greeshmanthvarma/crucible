@@ -1,34 +1,28 @@
 """Controller-owned, positive exports of completed development evidence only."""
 
 import hashlib
-import json
 from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import TypeAdapter
-
-from crucible.benchmarks.contracts import TrialResult
 from crucible.benchmarks.evidence import sanitize
-from crucible.improvement.contracts import HarnessSnapshot
 from crucible.improvement.roles import DevelopmentView, EvidenceRef, role_feedback
-from crucible.improvement.source import safe_path, verify_harness_export
+from crucible.improvement.source import safe_path
 from crucible.improvement.store import ExperimentStore
+from crucible.improvement.verified_evidence import (
+    owned_artifact as _owned,
+)
+from crucible.improvement.verified_evidence import (
+    verified_artifact,
+    verified_snapshot,
+    verified_trial_result,
+)
 from crucible.improvement.worker_supervisor import read_regular_artifact
-from crucible.repair.identity import canonical_json, digest
+from crucible.repair.identity import canonical_json
 
 MAX_ARTIFACT = 1_048_576
 MAX_VIEW = 16 * MAX_ARTIFACT
 MARKER = b"\n[TRUNCATED: original digest retained in evidence reference]\n"
-
-
-def _owned(root: Path, ref: str) -> Path:
-    name = Path(ref)
-    if name.is_absolute() or not name.parts or ".." in name.parts:
-        raise ValueError("invalid controller artifact reference")
-    path = root / name
-    safe_path(path)
-    return path
 
 
 def _bounded(raw: bytes, maximum: int = MAX_ARTIFACT) -> bytes:
@@ -97,30 +91,9 @@ class DevelopmentViewBuilder:
         if run.manifest.schema_version != 2 or run.stop_requested:
             raise ValueError("v2 active search required")
         row = await self.store.snapshot(experiment_id, baseline_snapshot_id)
-        snapshot_file = _owned(self.root, str(row["artifact_ref"]))
-        snapshot = HarnessSnapshot.model_validate_json(
-            read_regular_artifact(snapshot_file, 65536)
+        snapshot, harness = verified_snapshot(
+            self.root, row, await self.store.accepted_snapshot_id(experiment_id)
         )
-        if (
-            (
-                str(snapshot.snapshot_id),
-                snapshot.source_digest,
-                snapshot.export_digest,
-                snapshot.parent_commit,
-            )
-            != (
-                str(row["id"]),
-                row["source_digest"],
-                row["export_digest"],
-                row["parent_commit"],
-            )
-            or row["status"] != "verified"
-            or snapshot.snapshot_id
-            != await self.store.accepted_snapshot_id(experiment_id)
-        ):
-            raise ValueError("accepted snapshot registry drift")
-        harness = snapshot_file.parent / "harness"
-        verify_harness_export(harness, snapshot)
         development = {
             case.case_id: case
             for case in run.manifest.cases
@@ -169,54 +142,25 @@ class DevelopmentViewBuilder:
                 )
         index = []
         for (case_id, repeat), trial in sorted(selected.items()):
-            reference = json.loads(str(trial["artifact_ref"]))
-            result_path = _owned(self.root, reference["path"])
-            raw = read_regular_artifact(result_path, 2 * MAX_ARTIFACT)
-            if hashlib.sha256(raw).hexdigest() != reference["sha256"]:
-                raise ValueError("trial evidence digest drift")
-            envelope = json.loads(raw)
-            result = TypeAdapter(TrialResult).validate_json(
-                canonical_json(envelope["result"]), strict=True
+            result, artifact_hashes, directory = verified_trial_result(
+                self.root, trial, development[case_id], snapshot, run.manifest
             )
             identity = result.identity
-            if (
-                (
-                    str(identity.trial_id),
-                    identity.repeat_index,
-                    identity.case_digest,
-                    identity.harness_tree_digest,
-                    identity.model_config_digest,
-                    identity.limits_digest,
-                )
-                != (
-                    trial["id"],
-                    repeat,
-                    development[case_id].case_digest,
-                    snapshot.source_digest,
-                    digest(run.manifest.model),
-                    digest(run.manifest.trial_limits),
-                )
-                or result.status != "complete"
-                or result.grade is None
-                or result.grade.verdict not in ("pass", "fail")
-                or result.solver is None
-                or result.patch is None
-                or result.solver.termination
-                not in ("completed", "budget_exhausted", "behavior_error")
-            ):
-                raise ValueError("incomplete or incomparable development evidence")
+            assert (
+                result.grade is not None
+                and result.solver is not None
+                and result.patch is not None
+            )
             trial_refs = []
             artifacts: tuple[tuple[Literal["trace", "solution_diff"], str], ...] = (
                 ("trace", "trace.json"),
                 ("solution_diff", "solution.diff"),
             )
             for artifact, filename in artifacts:
-                original = read_regular_artifact(
-                    result_path.parent / filename, 8 * MAX_ARTIFACT
+                original = verified_artifact(
+                    directory, artifact_hashes, filename, 8 * MAX_ARTIFACT
                 )
                 original_digest = hashlib.sha256(original).hexdigest()
-                if envelope["artifacts"].get(filename) != original_digest:
-                    raise ValueError("original artifact digest drift")
                 if (
                     artifact == "solution_diff"
                     and result.patch.sha256 != original_digest

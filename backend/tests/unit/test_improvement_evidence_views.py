@@ -309,3 +309,17 @@ async def test_structured_trace_retrieval_is_sanitized_and_bounded(
     assert b'"ok": true' in raw
     assert b"tool-secret-canary" not in raw
     assert b"[TRUNCATED:" in raw
+
+
+async def test_archive_loading_does_not_widen_active_view_lifecycle(
+    evidence_setup, tmp_path
+):
+    from crucible.improvement.evidence_views import DevelopmentViewBuilder
+
+    store, root, run, snapshot, _ = evidence_setup
+    await store.fail_run(run.id, "offline-history")
+    with pytest.raises(ValueError):
+        await DevelopmentViewBuilder(store, root).build_development_view(
+            run.id, snapshot.snapshot_id, tmp_path / "view"
+        )
+    assert not (tmp_path / "view").exists()

@@ -1,10 +1,11 @@
 """Worker-safe normalized evidence contracts; no storage or execution policy."""
 
 from dataclasses import dataclass
-from typing import Literal, Mapping, Self
+from pathlib import Path
+from typing import Annotated, Literal, Mapping, Self
 from uuid import UUID
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from crucible.benchmarks.contracts import Sha256
 from crucible.domain.conversation import Message
@@ -104,7 +105,7 @@ class DetailEntry(Contract):
     original_bytes: int
     exported_bytes: int
     truncated: bool
-    files: tuple[str, ...]
+    files: Annotated[tuple[str, ...], Field(min_length=1, max_length=2)]
 
 
 class TrialOverview(Contract):
@@ -139,3 +140,42 @@ class TrajectoryBundle:
     files: Mapping[str, bytes]
     overview: TrialOverview
     original_refs: tuple[EvidenceRef, ...]
+
+
+class TrialSelection(Contract):
+    mode: Literal["explicit-three-repeat", "failed-family-v1"]
+    trial_ids: Annotated[tuple[UUID, ...], Field(max_length=3)]
+
+    @model_validator(mode="after")
+    def distinct(self) -> Self:
+        if len(set(self.trial_ids)) != len(self.trial_ids):
+            raise ValueError("duplicate selected trial")
+        if self.mode == "explicit-three-repeat" and len(self.trial_ids) != 3:
+            raise ValueError("explicit selection requires three repeats")
+        return self
+
+
+@dataclass(frozen=True)
+class VerifiedDevelopmentInputs:
+    trials: tuple[VerifiedTrial, ...]
+    source: SourceIdentity
+    source_files: Mapping[str, tuple[int, bytes]]
+    selected_trial_ids: tuple[UUID, ...]
+    source_experiment_id: UUID
+    source_snapshot_id: UUID
+    selection: TrialSelection
+    private_roots: tuple[Path, ...] = ()
+
+
+class EvidencePackage(Contract):
+    schema_version: Literal[1]
+    bundle_digest: Sha256
+    source: SourceIdentity
+    source_experiment_id: UUID
+    source_snapshot_id: UUID
+    selected_trial_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=3)]
+    selection: TrialSelection
+    limits: ExportLimits
+    files: dict[str, Sha256]
+    trial_overview_refs: dict[UUID, str]
+    record_locator_ref: str
