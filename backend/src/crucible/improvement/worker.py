@@ -52,22 +52,24 @@ async def seed_task(
     base_revision: str,
     image: str,
     uow_factory: Callable[[], UnitOfWork],
+    *,
+    workspace: Path = Path("/workspace"),
 ) -> UUID:
     clock = SystemClock()
     settings = RepositorySettings(
         sandbox_image=image,
     )
-    repository = Repository(new_id(), Path("/workspace"), clock.now(), settings)
+    repository = Repository(new_id(), workspace, clock.now(), settings)
     task_id, run_id = uuid5(job_id, "task"), uuid5(job_id, "run")
     task = Task.provisioning(
         task_id=task_id,
         repository_id=repository.id,
         source_ref="solver-base",
         base_revision=base_revision,
-        workspace_path=Path("/workspace"),
+        workspace_path=workspace,
         clock=clock,
     )
-    task = task.activate(workspace_path=Path("/workspace"), clock=clock)
+    task = task.activate(workspace_path=workspace, clock=clock)
     run = Run.queued(
         run_id=run_id,
         task_id=task_id,

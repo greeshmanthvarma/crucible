@@ -12,11 +12,13 @@ from pydantic import Field
 from crucible.application.worker_container import create_worker_engine
 from crucible.domain.conversation import MessagePartKind, MessageRole
 from crucible.domain.run import RunStatus
+from crucible.domain.tools import ToolCallStatus
 from crucible.engine.gateway import (
     ModelError,
     ModelToolDefinition,
     PreparedModelRequest,
 )
+from crucible.improvement.mining_contracts import InspectionReceipt
 from crucible.improvement.worker import seed_task
 from crucible.improvement.worker_gateway import WorkerModelGateway
 from crucible.improvement.worker_protocol import RoleJob, RoleObservation
@@ -110,8 +112,15 @@ def role_registry(
     )
 
 
-async def run_role_worker(job: RoleJob, token: str) -> None:
-    with Path("/workspace/input.json").open("rb") as stream:
+async def run_role_worker(
+    job: RoleJob,
+    token: str,
+    *,
+    workspace: Path = Path("/workspace"),
+    state_root: Path = Path("/state"),
+    job_path: Path = Path("/job/request.json"),
+) -> None:
+    with (workspace / "input.json").open("rb") as stream:
         raw = stream.read(1_048_577)
     if len(raw) > 1_048_576 or hashlib.sha256(raw).hexdigest() != job.input_digest:
         raise ValueError("role input identity drift")
@@ -125,28 +134,56 @@ async def run_role_worker(job: RoleJob, token: str) -> None:
         job.job_id,
     )
     provider_failed = False
+    quota_denied = False
+    diagnostic = job.budget_slot_id is not None
+    receipts: list[InspectionReceipt] = []
 
     class CapturingGateway:
         async def stream(self, request: PreparedModelRequest):  # type: ignore[no-untyped-def]
-            nonlocal provider_failed
+            nonlocal provider_failed, quota_denied
             async for event in gateway.stream(request):
                 if isinstance(event, ModelError):
-                    provider_failed = True
+                    if diagnostic and event.code == "improvement_budget_exhausted":
+                        quota_denied = True
+                    else:
+                        provider_failed = True
                 yield event
 
-    database = await Database.create("sqlite+aiosqlite:////state/worker.sqlite3")
+    database = await Database.create(
+        "sqlite+aiosqlite:///" + str(state_root / "worker.sqlite3")
+    )
     async with database.engine.begin() as connection:
         await connection.run_sync(metadata.create_all)
     try:
-        engine, uow = create_worker_engine(database, job, CapturingGateway(), token)
+        engine, uow = create_worker_engine(
+            database,
+            job,
+            CapturingGateway(),
+            token,
+            state_root=state_root,
+            job_path=job_path,
+            inspection_receipts=receipts if diagnostic else None,
+        )
         run_id = await seed_task(
-            job.job_id, prompt, job.harness_digest, job.command_image, uow
+            job.job_id,
+            prompt,
+            job.harness_digest,
+            job.command_image,
+            uow,
+            workspace=workspace,
         )
         async with asyncio.timeout(job.wall_deadline_seconds):
             await engine.execute(run_id)
         async with uow() as unit:
             terminal = await unit.runs.get(run_id)
             messages = await unit.messages.list_for_task(uuid5(job.job_id, "task"))
+            tool_call_count = 0
+            if diagnostic:
+                for step in await unit.steps.list_for_run(run_id):
+                    tool_call_count += sum(
+                        call.status != ToolCallStatus.REJECTED
+                        for call in await unit.tool_calls.list_for_step(step.id)
+                    )
         termination = "infrastructure_error"
         if terminal and terminal.status == RunStatus.COMPLETED:
             termination = "completed"
@@ -154,6 +191,8 @@ async def run_role_worker(job: RoleJob, token: str) -> None:
             termination = "budget_exhausted"
         if provider_failed:
             termination = "provider_error"
+        elif diagnostic and quota_denied:
+            termination = "budget_exhausted"
         trace = canonical_json(messages)
         assistant = [m for m in messages if m.role == MessageRole.ASSISTANT]
         output = (
@@ -170,8 +209,21 @@ async def run_role_worker(job: RoleJob, token: str) -> None:
             or len(output.encode()) > job.output_limit_bytes
         ):
             raise ValueError("role output exceeds cap")
-        Path("/state/trace.json").write_bytes(trace)
-        Path("/state/assistant.txt").write_text(output)
+        (state_root / "trace.json").write_bytes(trace)
+        (state_root / "assistant.txt").write_text(output)
+        diagnostic_fields: dict[str, object] = {}
+        if diagnostic:
+            from crucible.improvement.mining_inspection import RECEIPTS_BYTES
+
+            receipt_bytes = canonical_json(receipts)
+            if len(receipt_bytes) > RECEIPTS_BYTES:
+                raise ValueError("inspection receipts exceed cap")
+            (state_root / "inspection-receipts.json").write_bytes(receipt_bytes)
+            diagnostic_fields = dict(
+                inspection_receipts_ref="inspection-receipts.json",
+                inspection_receipts_sha256=hashlib.sha256(receipt_bytes).hexdigest(),
+                tool_call_count=tool_call_count,
+            )
         observation = RoleObservation.model_validate(
             dict(
                 schema_version=2,
@@ -184,10 +236,11 @@ async def run_role_worker(job: RoleJob, token: str) -> None:
                 assistant_output_ref="assistant.txt",
                 trace_ref="trace.json",
                 detail_code=terminal.outcome_code if terminal else "missing_run",
+                **diagnostic_fields,
             )
         )
-        temporary = Path("/state/observation.tmp")
+        temporary = state_root / "observation.tmp"
         temporary.write_text(observation.model_dump_json())
-        temporary.replace("/state/observation.json")
+        temporary.replace(state_root / "observation.json")
     finally:
         await database.dispose()

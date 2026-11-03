@@ -349,6 +349,23 @@ class RoleObservation(Contract):
     trace_ref: Annotated[str, Field(min_length=1, max_length=256)]
     detail_code: Annotated[str, Field(max_length=200)] | None
 
+    inspection_receipts_ref: (
+        Annotated[str, Field(min_length=1, max_length=256)] | None
+    ) = Field(default=None, exclude_if=lambda value: value is None)
+    inspection_receipts_sha256: Sha256 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    tool_call_count: Annotated[int, Field(ge=0, le=2**53)] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @field_validator("inspection_receipts_ref")
+    @classmethod
+    def receipt_reference(cls, value: str | None) -> str | None:
+        return (
+            WorkerObservation.relative_reference(value) if value is not None else None
+        )
+
     @field_validator("assistant_output_ref", "trace_ref")
     @classmethod
     def relative_reference(cls, value: str) -> str:
@@ -367,6 +384,25 @@ def read_role_observation(raw: bytes, job: RoleJob) -> RoleObservation:
         result.export_digest,
     ) != (job.job_id, job.role_id, job.round_id, job.experiment_id, job.export_digest):
         raise ValueError("role observation identity mismatch")
+    diagnostic = job.budget_slot_id is not None
+    has_receipts = (
+        result.inspection_receipts_ref is not None,
+        result.inspection_receipts_sha256 is not None,
+        result.tool_call_count is not None,
+    )
+    if (diagnostic and not all(has_receipts)) or (not diagnostic and any(has_receipts)):
+        raise ValueError("role observation diagnostic receipt fields mismatch")
+    if diagnostic and (
+        result.inspection_receipts_ref != "inspection-receipts.json"
+        or result.assistant_output_ref != "assistant.txt"
+        or result.trace_ref != "trace.json"
+        or (
+            result.tool_call_count is not None
+            and result.tool_call_count > job.limits.max_tool_calls
+        )
+        or (job.job_kind == "format_correction" and result.tool_call_count != 0)
+    ):
+        raise ValueError("diagnostic observation count or artifact mismatch")
     return result
 
 

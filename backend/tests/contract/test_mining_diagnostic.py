@@ -353,12 +353,12 @@ def test_diagnostic_job_cannot_enter_measured_experiment(diagnostic_manifest):
         validate_job_manifest(job, make_manifest())
 
 
-def test_diagnostic_execution_fails_closed_before_worker_wiring(
+def test_diagnostic_engine_requires_immutable_mounted_job(
     diagnostic_manifest, tmp_path
 ):
     from crucible.application.worker_container import create_worker_engine
     from crucible.improvement.worker_protocol import RoleJob
 
     job = RoleJob.model_validate_json(json.dumps(role_payload(diagnostic_manifest)))
-    with pytest.raises(ValueError, match="diagnostic worker execution"):
+    with pytest.raises(FileNotFoundError):
         create_worker_engine(None, job, None, "unused", job_path=tmp_path / "absent")

@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from crucible.application.approval_service import ApprovalService
 from crucible.application.artifact_service import ArtifactService
@@ -32,6 +32,9 @@ from crucible.tools.definitions import Tool
 from crucible.tools.dispatcher import ToolDispatcher
 from crucible.tools.registry import default_registry
 
+if TYPE_CHECKING:
+    from crucible.improvement.mining_contracts import InspectionReceipt
+
 
 def create_worker_engine(
     database: Database,
@@ -42,14 +45,8 @@ def create_worker_engine(
     reduced_model_budget: int | None = None,
     state_root: Path = Path("/state"),
     job_path: Path = Path("/job/request.json"),
+    inspection_receipts: list["InspectionReceipt"] | None = None,
 ) -> tuple[RunEngine, Callable[[], UnitOfWork]]:
-    # Diagnostic execution is enabled with its audited registry in a later task.
-    # Until then fail closed, including format correction carrying a slot identity.
-    if isinstance(job, RoleJob) and (
-        job.job_kind in ("trial_analysis", "mining_synthesis")
-        or job.budget_slot_id is not None
-    ):
-        raise ValueError("diagnostic worker execution is not enabled")
     # This function is reached only inside the worker. No host identity relaxation.
     if job_path.read_bytes() != job.model_dump_json().encode():
         raise ValueError("worker requires immutable mounted job")
@@ -75,10 +72,21 @@ def create_worker_engine(
         from crucible.improvement.role_prompts import role_system_prompt
         from crucible.improvement.role_worker import role_registry
 
-        if job.job_kind not in ("mining", "format_correction", "proposal"):
-            raise ValueError("unsupported role kind")
-        registry = role_registry(job.job_kind, cast(Tool, command))
-        harness_policy = role_system_prompt(job.job_kind)
+        if job.budget_slot_id is not None:
+            from crucible.improvement.mining_inspection import audited_role_registry
+
+            if inspection_receipts is None:
+                raise ValueError("diagnostic engine requires a protected receipt sink")
+            registry = audited_role_registry(
+                job.job_kind, inspection_receipts, job.job_id
+            )
+        elif job.job_kind in ("mining", "format_correction", "proposal"):
+            registry = role_registry(job.job_kind, cast(Tool, command))
+        else:
+            raise ValueError("diagnostic role requires registered slot identity")
+        harness_policy = role_system_prompt(
+            job.job_kind, correction_target=job.correction_target
+        )
     else:
         registry = default_registry(cast(Tool, command))
     context = ContextManager(

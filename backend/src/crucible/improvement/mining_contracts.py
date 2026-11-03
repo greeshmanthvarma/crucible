@@ -18,7 +18,7 @@ from crucible.improvement.contracts import (
     SourceIdentity,
     UsageAmounts,
 )
-from crucible.improvement.roles import (
+from crucible.improvement.role_contracts import (
     EvidenceRef,
     Identifier,
     MiningResult,
