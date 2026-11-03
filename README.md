@@ -583,6 +583,114 @@ Complete trace input is bounded at 8 MiB and validated before truncation; legacy
 trace conversion is unsupported. The measured view defaults and `MiningResult`
 contract are unchanged. This exporter performs no analyst/synthesis orchestration.
 
+### Opt-in mining diagnostic
+
+`crucible improve mining-diagnostic` is separate from measured experiments. It
+runs three independent, sequential trial analysts and then one synthesizer; it
+cannot propose patches, run candidate trials, grade benchmarks, publish, or push.
+The final `MiningResult` contract is unchanged. Validated precise support remains
+in the private `synthesis-report.json` sidecar beside `mining-result.json`.
+
+Prepare only from a verified saved-development package containing three repeats
+of one task, including a recorded failure. The first planned diagnostic uses all
+three saved repeats of `pytest-dev__pytest-10051`: one fail and two passes. This
+is a selected historical family, not a sample of the full development suite;
+the eligible-corpus denominator is unavailable in this package. Historical trial
+source and current executing worker/controller source are recorded separately.
+
+Supply a strict `mining_contracts.MiningDiagnosticConfig` JSON with
+`schema_version: 1`, absolute `repository` and `package_dir`, and a complete
+`contracts.MiningDiagnosticManifest`. The manifest pins a fresh diagnostic UUID,
+`kind: "mining-diagnostic"`, schema/protocol 2,
+`authorization: "explicit-mining-diagnostic"`, the exact package/selection/source
+identities, explicit model settings, immutable image digests/platform and current
+clean committed executing source/controller/lock digests. Obtain the four content
+policy digests with `mining_diagnostic.diagnostic_policy_digests` on the verified
+package; the configuration schema is available from
+`MiningDiagnosticConfig.model_json_schema()`. Do not copy an old experiment
+manifest unchanged or place historical ledger paths in role input.
+
+Allowances are fixed: each analyst gets 50,000 cumulative tokens, 10 requests,
+20 tool calls, 300 active seconds and 600 worker wall seconds; synthesis gets
+100,000 tokens, 15 requests, 30 tool calls, 600 active seconds and 900 wall seconds.
+The group ceiling is 250,000 tokens, 45 requests, 1,500 active seconds, 2,700 wall
+seconds and 16 MiB output, with zero trial starts. Analyst reports are capped at
+16 KiB; worker artifact streams and the synthesis envelope at 1 MiB each. Unused
+allocation is not transferred. All failed, correction and explicitly retried
+attempts remain charged to their original slot.
+
+Offline commands require no provider key and never start workers. Output roots
+must be new, absolute, nonsymlink paths outside the input package and executing
+source checkout:
+
+```sh
+crucible improve mining-diagnostic prepare \
+  --config /absolute/private/mining-config.json --output /absolute/private/diagnostic
+crucible improve mining-diagnostic status --root /absolute/private/diagnostic
+crucible improve mining-diagnostic report --root /absolute/private/diagnostic \
+  --output /absolute/new-report
+```
+
+Preparation copies verified positive inputs and an immutable runtime into its own
+private storage. Analysts see only their assigned `trial/` and investigation
+`source/`; synthesis sees the selected `trials/`, validated compact reports and
+source. All evidence views are mounted read-only, checksum-checked after execution,
+and have no command/edit tools. Successful bounded reads establish inspection
+receipts; listing/searching and agreement among analysts do not verify a claim.
+Schema/citation checks establish identities, byte access and membership, not
+causality or semantic correctness. No-action dispositions are completed mining,
+not measured improvement.
+
+A paid run is a separate, explicitly authorized action. Do not invoke the next
+command as part of offline verification:
+
+```sh
+crucible improve mining-diagnostic continue --root /absolute/private/diagnostic \
+  --authorize-paid-models
+```
+
+Only normal invalid output can receive one format-only correction per slot,
+within its remaining allowance. Corrections have no tools or new investigation
+and reuse the primary job's receipts. Exhaustion, infrastructure failure and
+incomplete investigation stop the invocation; synthesis requires all three valid,
+normally completed analyses. Missing output never becomes an insufficient-evidence
+success.
+
+Stop and recover are explicit controls. Recovery reconciles exact owned effects,
+verifies frozen inputs/artifacts, revokes known credentials and recovers provable
+counts/accounting without launching anything. Durable orphan output does not
+become an accepted report. Unknown usage stays retained and blocks dispatch;
+recovery never resets an allowance. A recovered failed slot needs an authorization
+bound to its latest failed attempt before a separately authorized continuation:
+
+```sh
+crucible improve mining-diagnostic stop --root /absolute/private/diagnostic
+crucible improve mining-diagnostic recover --root /absolute/private/diagnostic
+crucible improve mining-diagnostic authorize-retry --root /absolute/private/diagnostic \
+  --slot SLOT_UUID --failed-attempt ATTEMPT_UUID
+crucible improve mining-diagnostic close --root /absolute/private/diagnostic
+```
+
+Retry authorization is single-use, creates no new allowance and does not dispatch.
+Changed frozen inputs require a new identity. Close requires reconciled accounting
+and no active/uncertain effects, retains inputs and outputs, and prevents further
+continuation. Exit codes are 0 for successful controls/completed mining, 2 for
+configuration/identity/operator gates, 3 for execution/budget/infrastructure blocks,
+and 130 for interruption. A blocked status is not an automatic retry instruction.
+
+Reports contain deterministic `report.md`, `metrics.json` and
+`report-manifest.json`. They include both source identities, allocation/exposure,
+all attempts, unavailable versus known-zero usage, evidence completeness and
+mechanical validation counts. They exclude raw model/source/task text and precise
+support citations; no dollar estimate is invented without a frozen price basis.
+Any comparison with the former miner is exploratory: non-token limits changed
+and model behavior is stochastic. Measured-loop integration remains deferred: a later integration
+must bind the output/support to the same measured round, development view and
+accepted source, preserving existing proposal, evaluation and publication gates.
+Arbitrary diagnostic JSON is not measured evidence.
+
+### Measured experiment configuration
+
 `start.json` has exactly `schema_version: 1`, `manifest_file`, `repository`,
 `registry_root`, and `protected_suite_root`; paths must be absolute. The strict
 `improvement.contracts.ExperimentManifest` defines the separately supplied manifest.

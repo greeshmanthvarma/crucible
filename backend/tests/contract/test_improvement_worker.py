@@ -498,3 +498,44 @@ def test_old_role_job_wire_bytes_unchanged(kind):
     job = RoleJob.model_validate_json(json.dumps(payload))
     assert job.model_dump_json().encode() == raw
     assert read_worker_job(raw) == job
+
+
+@pytest.mark.parametrize(
+    "kind", ["trial_analysis", "mining_synthesis", "format_correction"]
+)
+def test_diagnostic_worker_evidence_mount_is_readonly(tmp_path, kind):
+    from crucible.improvement.contracts import MiningDiagnosticManifest
+    from crucible.improvement.worker_protocol import RoleJob, validate_job_manifest
+    from tests.contract.test_mining_diagnostic import diagnostic_payload, role_payload
+
+    manifest = MiningDiagnosticManifest.model_validate_json(
+        json.dumps(diagnostic_payload())
+    )
+    payload = role_payload(manifest, kind)
+    if kind == "mining_synthesis":
+        payload.update(
+            limits=manifest.synthesis_limits.model_dump(mode="json"),
+            wall_deadline_seconds=900,
+        )
+    elif kind == "format_correction":
+        payload.update(
+            correction_target="trial_analysis", correction_of_job_id=str(uuid4())
+        )
+    job = RoleJob.model_validate_json(json.dumps(payload))
+    validate_job_manifest(job, manifest)
+    arguments = worker_container_arguments(
+        job,
+        manifest,
+        network="owned-network",
+        harness=tmp_path / "harness",
+        workspace=tmp_path / "workspace",
+        state=tmp_path / "state",
+        job_root=tmp_path / "job",
+        driver=tmp_path / "driver.py",
+    )
+    mounts = [
+        arguments[i + 1] for i, value in enumerate(arguments) if value == "--mount"
+    ]
+    assert any("target=/workspace,readonly" in value for value in mounts)
+    assert any("target=/workspace/.git,readonly" in value for value in mounts)
+    assert "--pull=never" in arguments

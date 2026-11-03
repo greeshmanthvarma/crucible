@@ -32,21 +32,39 @@ def diagnostic_config(harness, verified_trial, tmp_path):
     repo, commit = harness
     files = {"backend/src/crucible/tools/filesystem.py": (0o100644, b"# historical\n")}
     source = verified_trial.source.model_copy(update={"export_digest": _digest(files)})
-    trials = tuple(
-        replace(
-            verified_trial,
-            trial_id=UUID(int=40 + i),
-            repeat_index=i,
-            source=source,
-            trace_ref=verified_trial.trace_ref.model_copy(
-                update={"trial_id": UUID(int=40 + i)}
-            ),
-            solution_ref=verified_trial.solution_ref.model_copy(
-                update={"trial_id": UUID(int=40 + i)}
-            ),
+    trials = []
+    for i in range(3):
+        trial_id, task_id, run_id = (
+            UUID(int=40 + i),
+            UUID(int=100 + i),
+            UUID(int=200 + i),
         )
-        for i in range(3)
-    )
+        trace = json.loads(verified_trial.trace_bytes)
+        for collection in ("messages", "tool_calls", "tool_results"):
+            for record in trace[collection]:
+                record.update(task_id=str(task_id), run_id=str(run_id))
+        raw = json.dumps(trace).encode()
+        trials.append(
+            replace(
+                verified_trial,
+                trial_id=trial_id,
+                task_id=task_id,
+                run_id=run_id,
+                repeat_index=i,
+                source=source,
+                trace_bytes=raw,
+                trace_ref=verified_trial.trace_ref.model_copy(
+                    update={
+                        "trial_id": trial_id,
+                        "sha256": hashlib.sha256(raw).hexdigest(),
+                    }
+                ),
+                solution_ref=verified_trial.solution_ref.model_copy(
+                    update={"trial_id": trial_id}
+                ),
+            )
+        )
+    trials = tuple(trials)
     ids = tuple(t.trial_id for t in trials)
     package = export_trajectory_package(
         VerifiedDevelopmentInputs(
@@ -87,7 +105,9 @@ def diagnostic_config(harness, verified_trial, tmp_path):
     )
 
 
-def test_preparation_reads_no_live_provider(diagnostic_config, tmp_path, monkeypatch):
+def test_preparation_handles_distinct_runtime_tasks_without_live_provider(
+    diagnostic_config, tmp_path, monkeypatch
+):
     from crucible.improvement.worker_supervisor import DockerRuntime
 
     def forbidden(*args, **kwargs):
@@ -99,6 +119,13 @@ def test_preparation_reads_no_live_provider(diagnostic_config, tmp_path, monkeyp
     monkeypatch.setattr(ScopedModelGateway, "__init__", forbidden)
     result = freeze_mining_diagnostic(diagnostic_config, tmp_path / "diagnostic")
     assert result.package_digest == diagnostic_config.manifest.package_digest
+    overviews = [
+        json.loads(path.read_bytes())
+        for path in (result.root / "frozen/package/trials").glob("*/overview.json")
+    ]
+    assert len({o["task_id"] for o in overviews}) == 3
+    assert len({o["run_id"] for o in overviews}) == 3
+    assert {o["case_id"] for o in overviews} == {"development"}
     assert (result.root / "frozen/runtime/harness/backend/uv.lock").exists()
     assert not (result.root / "frozen/runtime/harness/tests").exists()
     assert (

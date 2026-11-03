@@ -179,7 +179,7 @@ def freeze_mining_diagnostic(
         )
         for i in package.selected_trial_ids
     ]
-    if len({(o.case_id, o.task_id) for o in overviews}) != 1 or {
+    if len({o.case_id for o in overviews}) != 1 or {
         o.repeat_index for o in overviews
     } != {0, 1, 2}:
         raise ValueError("requires three repeats of one development task")
