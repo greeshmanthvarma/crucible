@@ -34,6 +34,14 @@ class Contract(BaseModel):
     )
 
 
+class SourceIdentity(Contract):
+    """Investigation source; distinct from the executing harness."""
+
+    commit: Commit
+    source_digest: Sha256
+    export_digest: Sha256
+
+
 class FrozenCaseRef(Contract):
     case_id: Annotated[
         str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", max_length=200)
