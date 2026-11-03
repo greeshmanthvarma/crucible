@@ -43,6 +43,13 @@ def create_worker_engine(
     state_root: Path = Path("/state"),
     job_path: Path = Path("/job/request.json"),
 ) -> tuple[RunEngine, Callable[[], UnitOfWork]]:
+    # Diagnostic execution is enabled with its audited registry in a later task.
+    # Until then fail closed, including format correction carrying a slot identity.
+    if isinstance(job, RoleJob) and (
+        job.job_kind in ("trial_analysis", "mining_synthesis")
+        or job.budget_slot_id is not None
+    ):
+        raise ValueError("diagnostic worker execution is not enabled")
     # This function is reached only inside the worker. No host identity relaxation.
     if job_path.read_bytes() != job.model_dump_json().encode():
         raise ValueError("worker requires immutable mounted job")
@@ -68,6 +75,8 @@ def create_worker_engine(
         from crucible.improvement.role_prompts import role_system_prompt
         from crucible.improvement.role_worker import role_registry
 
+        if job.job_kind not in ("mining", "format_correction", "proposal"):
+            raise ValueError("unsupported role kind")
         registry = role_registry(job.job_kind, cast(Tool, command))
         harness_policy = role_system_prompt(job.job_kind)
     else:

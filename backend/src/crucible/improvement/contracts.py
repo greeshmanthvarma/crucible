@@ -165,7 +165,64 @@ class ExperimentManifest(ExecutionPolicy):
         )
 
 
-ExecutionManifest = ExperimentManifest | CalibrationManifest
+class MiningDiagnosticBudget(ExperimentBudget):
+    max_trial_starts: Literal[0] = 0
+
+
+class MiningDiagnosticManifest(ExecutionPolicy):
+    """Opt-in analysis policy; never authority to execute benchmark trials."""
+
+    kind: Literal["mining-diagnostic"]
+    schema_version: Literal[2]
+    worker_protocol_version: Literal[2]
+    authorization: Literal["explicit-mining-diagnostic"]
+    package_digest: Sha256
+    investigation_source: SourceIdentity
+    selection_digest: Sha256
+    selected_trial_ids: tuple[UUID, UUID, UUID]
+    analyst_limits: TrialLimits
+    synthesis_limits: TrialLimits
+    analyst_max_requests: Literal[10]
+    synthesis_max_requests: Literal[15]
+    report_bytes: Literal[16384]
+    max_format_corrections_per_slot: Literal[1]
+    prompt_digest: Sha256
+    report_schema_digest: Sha256
+    export_config_digest: Sha256
+    budget: MiningDiagnosticBudget
+
+    @model_validator(mode="after")
+    def diagnostic_policy(self) -> Self:
+        if len(set(self.selected_trial_ids)) != 3:
+            raise ValueError("diagnostic requires three distinct trials")
+        for limits, expected in (
+            (self.analyst_limits, (50000, 10, 20, 300, 600)),
+            (self.synthesis_limits, (100000, 15, 30, 600, 900)),
+        ):
+            if (
+                limits.max_model_tokens,
+                limits.max_steps,
+                limits.max_tool_calls,
+                limits.max_active_seconds,
+                limits.wall_timeout_seconds,
+            ) != expected:
+                raise ValueError("diagnostic requires exact frozen allocations")
+        if self.budget != MiningDiagnosticBudget(
+            max_reported_and_reserved_tokens=250000,
+            max_model_requests=45,
+            max_active_seconds=1500,
+            max_worker_wall_seconds=2700,
+            max_total_output_bytes=16 * 1024 * 1024,
+        ):
+            raise ValueError("diagnostic requires exact aggregate budget")
+        if self.command_policy.mode != "interactive":
+            raise ValueError("diagnostic requires interactive command policy")
+        if self.model.output_reserve >= self.model.input_limit:
+            raise ValueError("invalid context limits")
+        return self
+
+
+ExecutionManifest = ExperimentManifest | CalibrationManifest | MiningDiagnosticManifest
 
 
 class ExperimentPaths(Contract):

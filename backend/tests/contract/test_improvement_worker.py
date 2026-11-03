@@ -481,3 +481,20 @@ async def test_create_before_ack_cleanup_and_memory_only_credential(tmp_path, fa
         ) == (fault not in ("cleanup", "stream_cleanup"))
     finally:
         await store.close()
+
+
+@pytest.mark.parametrize("kind", ["mining", "format_correction", "proposal"])
+def test_old_role_job_wire_bytes_unchanged(kind):
+    from crucible.improvement.worker_protocol import RoleJob, read_worker_job
+
+    # Literal pre-diagnostic wire fixture: optional diagnostic identities must
+    # disappear even when explicitly supplied as null, preserving canonical bytes.
+    raw = b'{"schema_version":2,"protocol_version":2,"job_id":"00000000-0000-0000-0000-000000000001","role_id":"00000000-0000-0000-0000-000000000002","round_id":"00000000-0000-0000-0000-000000000003","experiment_id":"00000000-0000-0000-0000-000000000004","job_kind":"mining","harness_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","export_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","model":{"model_id":"provider/model","input_limit":1000,"output_reserve":100,"provider_defaults":"unspecified"},"limits":{"max_steps":5,"max_tool_calls":10,"max_model_tokens":100,"max_active_seconds":60,"wall_timeout_seconds":90},"input_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","workspace":"/workspace","command_image":"worker@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","command_platform":"linux/amd64","output_limit_bytes":1024,"wall_deadline_seconds":90}'  # noqa: E501
+    raw = raw.replace(b'"job_kind":"mining"', ('"job_kind":"' + kind + '"').encode())
+    payload = json.loads(raw)
+    payload.update(
+        budget_slot_id=None, correction_of_job_id=None, correction_target=None
+    )
+    job = RoleJob.model_validate_json(json.dumps(payload))
+    assert job.model_dump_json().encode() == raw
+    assert read_worker_job(raw) == job

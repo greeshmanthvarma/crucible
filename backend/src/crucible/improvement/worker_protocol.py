@@ -19,6 +19,7 @@ from crucible.improvement.contracts import (
     ExecutionManifest,
     ExperimentManifest,
     Image,
+    MiningDiagnosticManifest,
     Positive,
     UsageAmounts,
 )
@@ -70,7 +71,18 @@ class RoleJob(Contract):
     role_id: UUID
     round_id: UUID
     experiment_id: UUID
-    job_kind: Literal["mining", "format_correction", "proposal"]
+    job_kind: Literal[
+        "mining", "format_correction", "proposal", "trial_analysis", "mining_synthesis"
+    ]
+    budget_slot_id: UUID | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    correction_of_job_id: UUID | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    correction_target: Literal["trial_analysis", "mining_synthesis"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     harness_digest: Sha256
     export_digest: Sha256
     model: ModelSettings
@@ -81,6 +93,27 @@ class RoleJob(Contract):
     command_platform: Platform
     output_limit_bytes: Positive
     wall_deadline_seconds: Positive
+
+    @model_validator(mode="after")
+    def diagnostic_identity(self) -> Self:
+        correction = (
+            self.correction_of_job_id is not None or self.correction_target is not None
+        )
+        if self.job_kind in ("trial_analysis", "mining_synthesis"):
+            if self.budget_slot_id is None or correction:
+                raise ValueError(
+                    "diagnostic primary requires slot and no correction identity"
+                )
+        elif self.job_kind == "format_correction" and self.budget_slot_id is not None:
+            if self.correction_of_job_id is None or self.correction_target is None:
+                raise ValueError(
+                    "diagnostic correction requires original job and target"
+                )
+            if self.correction_of_job_id == self.job_id:
+                raise ValueError("diagnostic correction cannot target itself")
+        elif self.budget_slot_id is not None or correction:
+            raise ValueError("diagnostic fields forbidden for ordinary role")
+        return self
 
     @property
     def trial_id(self) -> None:
@@ -96,14 +129,28 @@ def read_worker_job(raw: bytes) -> WorkerRequest:
     if len(raw) > 2 * 1024 * 1024:
         raise ValueError("job exceeds cap")
     kind = json.loads(raw).get("job_kind")
-    return (
-        RoleJob.model_validate_json(raw)
-        if kind in ("mining", "format_correction", "proposal")
-        else WorkerJob.model_validate_json(raw)
-    )
+    if kind in (
+        "mining",
+        "format_correction",
+        "proposal",
+        "trial_analysis",
+        "mining_synthesis",
+    ):
+        return RoleJob.model_validate_json(raw)
+    if kind in (None, "trial"):
+        return WorkerJob.model_validate_json(raw)
+    raise ValueError("unsupported worker job kind")
 
 
 def validate_job_manifest(job: WorkerRequest, manifest: ExecutionManifest) -> None:
+    if isinstance(manifest, MiningDiagnosticManifest):
+        _validate_diagnostic_job(job, manifest)
+        return
+    if isinstance(job, RoleJob) and (
+        job.job_kind in ("trial_analysis", "mining_synthesis")
+        or job.budget_slot_id is not None
+    ):
+        raise ValueError("diagnostic roles require a diagnostic manifest")
     if isinstance(job, RoleJob) and not isinstance(manifest, ExperimentManifest):
         raise ValueError("roles require an experiment manifest")
     limits = (
@@ -131,6 +178,52 @@ def validate_job_manifest(job: WorkerRequest, manifest: ExecutionManifest) -> No
         > min(manifest.command_policy.max_output_bytes_per_call, 8 * 1024 * 1024)
     ):
         raise ValueError("job exceeds frozen output or wall limits")
+
+
+def _validate_diagnostic_job(
+    job: WorkerRequest, manifest: MiningDiagnosticManifest
+) -> None:
+    if (
+        not isinstance(job, RoleJob)
+        or job.job_kind
+        not in ("trial_analysis", "mining_synthesis", "format_correction")
+        or job.budget_slot_id is None
+    ):
+        raise ValueError("diagnostic permits only registered read-only role kinds")
+    target = (
+        job.correction_target if job.job_kind == "format_correction" else job.job_kind
+    )
+    maximum = (
+        manifest.analyst_limits
+        if target == "trial_analysis"
+        else manifest.synthesis_limits
+    )
+    # A pure contract can bound residual ceilings. Durable registration checks the
+    # exact remaining allowance in the store before any credentials are issued.
+    if any(
+        value > maximum.model_dump()[key]
+        for key, value in job.limits.model_dump().items()
+    ):
+        raise ValueError("diagnostic job exceeds frozen slot limits")
+    if (
+        job.experiment_id,
+        job.model,
+        job.protocol_version,
+        job.command_image,
+        job.command_platform,
+    ) != (
+        manifest.experiment_id,
+        manifest.model,
+        manifest.worker_protocol_version,
+        manifest.worker_image,
+        manifest.worker_platform,
+    ):
+        raise ValueError("diagnostic job manifest identity mismatch")
+    if (
+        job.wall_deadline_seconds != job.limits.wall_timeout_seconds
+        or job.output_limit_bytes > 1_048_576
+    ):
+        raise ValueError("diagnostic job exceeds output or wall limits")
 
 
 def job_environment(job: WorkerRequest, manifest: ExecutionManifest) -> tuple[str, str]:
