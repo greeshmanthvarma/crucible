@@ -28,9 +28,15 @@ verified_trial = trace_fixtures.verified_trial
 
 
 @pytest.fixture
-def diagnostic_config(harness, verified_trial, tmp_path):
+def diagnostic_config(harness, verified_trial, tmp_path, request):
     repo, commit = harness
     files = {"backend/src/crucible/tools/filesystem.py": (0o100644, b"# historical\n")}
+    scale = getattr(request, "param", 0)
+    for n in range(scale):
+        files[f"backend/src/crucible/tools/module_{n}.py"] = (
+            0o100644,
+            f"# historical module {n}\n".encode(),
+        )
     source = verified_trial.source.model_copy(update={"export_digest": _digest(files)})
     trials = []
     for i in range(3):
@@ -40,6 +46,11 @@ def diagnostic_config(harness, verified_trial, tmp_path):
             UUID(int=200 + i),
         )
         trace = json.loads(verified_trial.trace_bytes)
+        for n in range(scale):
+            message = json.loads(json.dumps(trace["messages"][0]))
+            message.update(id=str(UUID(int=1000 + n)), conversation_sequence=4 + n)
+            message["parts"][0].update(id=str(UUID(int=5000 + n)))
+            trace["messages"].append(message)
         for collection in ("messages", "tool_calls", "tool_results"):
             for record in trace[collection]:
                 record.update(task_id=str(task_id), run_id=str(run_id))
@@ -81,6 +92,9 @@ def diagnostic_config(harness, verified_trial, tmp_path):
     )
     inspection = inspect_source(repo, commit)
     payload = diagnostic_payload()
+    if scale:
+        payload["model"]["output_reserve"] = 4096
+        payload["model"]["input_limit"] = 128000
     payload.update(
         initial_commit=commit,
         initial_source_digest=inspection.source_digest,
@@ -149,6 +163,242 @@ async def prepared_diagnostic(diagnostic_config, tmp_path):
         await store.close()
 
 
+@pytest.mark.parametrize("diagnostic_config", [180], indirect=True)
+async def test_catalog_lookup_read_and_report_fit_real_cumulative_budget(
+    prepared_diagnostic,
+):
+    from uuid import uuid4
+
+    from pydantic import TypeAdapter
+
+    from crucible.domain.clock import SystemClock
+    from crucible.engine.gateway import (
+        CompleteToolCall,
+        ModelMessage,
+        ModelPart,
+        ModelRole,
+        ModelStop,
+        ModelStopReason,
+        ModelUsage,
+        PreparedModelRequest,
+        TextDelta,
+    )
+    from crucible.improvement.broker import ImprovementBroker, WorkspaceBinding
+    from crucible.improvement.mining_contracts import AnalystAssignment
+    from crucible.improvement.mining_diagnostic import MiningDiagnosticRunner
+    from crucible.improvement.mining_inspection import audited_role_registry
+    from crucible.improvement.mining_validation import (
+        load_inspection_package,
+        validate_analysis_report,
+    )
+    from crucible.improvement.role_prompts import role_system_prompt
+    from crucible.improvement.role_worker import role_input_prompt
+    from crucible.models.token_counting import estimate_input_tokens
+    from crucible.repair.gateway import ScopedModelGateway
+    from crucible.repair.identity import canonical_json
+    from crucible.tools.definitions import ToolContext
+    from tests.unit.test_mining_store import make_role
+
+    prepared, store = prepared_diagnostic
+    runner = MiningDiagnosticRunner(store, prepared.root, None)
+    status = await runner.initialize(prepared.diagnostic_id)
+    manifest = (await store.get(prepared.diagnostic_id)).manifest
+    assignments = TypeAdapter(tuple[AnalystAssignment, ...]).validate_json(
+        (prepared.root / "frozen/assignments.json").read_bytes(), strict=True
+    )
+    directory = prepared.root / "budget-proof"
+    directory.mkdir()
+    workspace, encoded = await runner._workspace(
+        directory, status.slots[0], manifest, assignments, None, status.slots[:3]
+    )
+    inputs = json.loads(encoded)
+    assert len(encoded) < 16384
+    assert isinstance(inputs["record_registry"], str)
+    assert isinstance(inputs["file_hashes"], str)
+    records = [
+        json.loads(line)
+        for line in (workspace / inputs["record_registry"]).read_text().splitlines()
+    ]
+    assert len(records) > 180
+    assert {entry["trial_id"] for entry in records} == {str(assignments[0].trial_id)}
+    from crucible.models.token_counting import _encoding
+
+    # Two pre-fix requests exceed the cumulative slot even before framing/tools.
+    assert len(_encoding().encode_ordinary(json.dumps(records))) > 25000
+    entry = next(entry for entry in records if entry["kind"] == "message")
+    source_path = "backend/src/crucible/tools/filesystem.py"
+    receipts = []
+    job = make_role(
+        manifest, status.slots[0], input_digest=hashlib.sha256(encoded).hexdigest()
+    )
+    await store.register_attempt(status.slots[0].slot_id, job, job.input_digest)
+    readers = audited_role_registry("trial_analysis", receipts, job.job_id)
+    tools = readers.definitions
+    messages = [
+        ModelMessage(
+            ModelRole.SYSTEM, (ModelPart("text", role_system_prompt("trial_analysis")),)
+        ),
+        ModelMessage(ModelRole.USER, (ModelPart("text", role_input_prompt(encoded)),)),
+    ]
+    detail = "trial/" + entry["detail_ref"].split("/", 2)[2]
+    operations = [
+        ("read_file_chunk", dict(path=inputs["index"], limit=1024)),
+        (
+            "search_files",
+            dict(path=inputs["record_registry"], query=entry["original_record_id"]),
+        ),
+        (
+            "search_files",
+            dict(path=inputs["file_hashes"], query="source/" + source_path),
+        ),
+        ("read_file_chunk", dict(path=detail, limit=256)),
+        ("read_file", dict(path="source/" + source_path, start_line=1, end_line=1)),
+    ]
+    report = dict(
+        schema_version=1,
+        trial_id=str(assignments[0].trial_id),
+        package_digest=manifest.package_digest,
+        investigation_source_digest=manifest.investigation_source.source_digest,
+        investigation_complete=True,
+        summary="Read indexed evidence; no causal claim.",
+        observations=[
+            dict(
+                id="o1",
+                observed_behavior="The recorded message is present.",
+                evidence=[
+                    dict(
+                        original=entry["original_artifact"],
+                        record_kind="message",
+                        record_id=entry["original_record_id"],
+                        record_key=entry["detail_ref"],
+                        derived_sha256=entry["detail_sha256"],
+                        start_byte=0,
+                        end_byte=4,
+                    )
+                ],
+                hypothesized_mechanism=None,
+                alternatives=[],
+                contradictory_evidence=[],
+                source=[
+                    dict(
+                        path=source_path,
+                        sha256=hashlib.sha256(
+                            (workspace / "source" / source_path).read_bytes()
+                        ).hexdigest(),
+                        start_line=1,
+                        end_line=1,
+                    )
+                ],
+                limitations="Byte inspection is not causal proof.",
+            )
+        ],
+        open_questions=[],
+        limitations=[],
+    )
+    raw_report = canonical_json(report)
+
+    class Upstream:
+        calls = 0
+        operation = None
+        call_id = None
+
+        async def stream(self, request):
+            self.calls += 1
+            # Charge the real conservative count, not a tiny scripted usage.
+            yield ModelUsage(
+                estimate_input_tokens(request.messages, request.tools), 512
+            )
+            if self.operation is not None:
+                name, arguments = self.operation
+                yield CompleteToolCall(self.call_id, name, arguments)
+                yield ModelStop(ModelStopReason.TOOL_CALLS)
+            else:
+                yield TextDelta(raw_report.decode())
+                yield ModelStop(ModelStopReason.COMPLETE)
+
+    upstream = Upstream()
+    gateway = ScopedModelGateway(
+        upstream, clock=SystemClock(), endpoint="http://broker"
+    )
+    broker = ImprovementBroker(store, gateway, None)
+    credential = broker.issue(
+        job,
+        manifest,
+        WorkspaceBinding(workspace, manifest.worker_image, manifest.worker_platform),
+    )
+    estimates = []
+    for operation in [*operations, None]:
+        upstream.operation, upstream.call_id = operation, uuid4()
+        request = PreparedModelRequest(
+            uuid4(),
+            uuid4(),
+            manifest.model.model_id,
+            tuple(messages),
+            tools,
+            manifest.model.output_reserve,
+        )
+        estimates.append(estimate_input_tokens(request.messages, request.tools))
+        events = [
+            event async for event in broker.model(credential.token, job.job_id, request)
+        ]
+        assert isinstance(events[-1], ModelStop), events
+        if operation is not None:
+            name, arguments = operation
+            result = await readers.get(name).invoke(
+                ToolContext(workspace, tool_call_id=upstream.call_id), arguments
+            )
+            assert result.error_code is None
+            if name == "search_files":
+                assert arguments["query"] in result.display_text
+                assert len(result.display_text.encode()) <= 8192
+            messages.extend(
+                (
+                    ModelMessage(
+                        ModelRole.ASSISTANT,
+                        (
+                            ModelPart(
+                                "tool_call",
+                                tool_call_id=upstream.call_id,
+                                tool_name=name,
+                                arguments=arguments,
+                            ),
+                        ),
+                    ),
+                    ModelMessage(
+                        ModelRole.TOOL,
+                        (
+                            ModelPart(
+                                "tool_result",
+                                canonical_json(result.data).decode(),
+                                tool_call_id=upstream.call_id,
+                            ),
+                        ),
+                    ),
+                )
+            )
+    package = load_inspection_package(
+        prepared.root / "frozen/package",
+        job_id=job.job_id,
+        workspace_files={
+            p.relative_to(workspace).as_posix(): p.read_bytes()
+            for p in workspace.rglob("*")
+            if p.is_file() and ".git" not in p.parts
+        },
+    )
+    returned_report = "".join(
+        event.text for event in events if isinstance(event, TextDelta)
+    ).encode()
+    assert returned_report == raw_report
+    assert validate_analysis_report(
+        returned_report, assignments[0], package, tuple(receipts)
+    ).investigation_complete
+    assert upstream.calls == 6
+    usage = await store.slot_usage(status.slots[0].slot_id)
+    assert usage["spent"].tokens == sum(estimates) + 6 * 512
+    assert usage["remaining"].tokens > 4096
+    assert not await store.unsettled_usage(prepared.diagnostic_id)
+
+
 class ScriptedSupervisor:
     """Replaces only the provider/container boundary, preserving artifact gates."""
 
@@ -199,12 +449,28 @@ class ScriptedSupervisor:
                 reservation, UsageAmounts(tokens=100, requests=1)
             )
         inputs = json.loads((workspace / "input.json").read_bytes())
+        if job.job_kind != "format_correction":
+            records = [
+                json.loads(line)
+                for line in (workspace / inputs["record_registry"])
+                .read_text()
+                .splitlines()
+            ]
+            hashes = {
+                row["path"]: row["sha256"]
+                for row in (
+                    json.loads(line)
+                    for line in (workspace / inputs["file_hashes"])
+                    .read_text()
+                    .splitlines()
+                )
+            }
         if job.job_kind == "trial_analysis":
             assert (workspace / inputs["index"]).exists()
-            assert {r["trial_id"] for r in inputs["record_registry"]} == {
+            assert {r["trial_id"] for r in records} == {
                 inputs["assignment"]["trial_id"]
             }
-            assert all(not p.startswith("trials/") for p in inputs["file_hashes"])
+            assert all(not p.startswith("trials/") for p in hashes)
 
         termination = (
             "budget_exhausted" if self.failure == len(self.jobs) - 1 else "completed"
@@ -246,7 +512,7 @@ class ScriptedSupervisor:
             from crucible.improvement.mining_inspection import audited_role_registry
             from crucible.tools.definitions import ToolContext
 
-            entry = next(r for r in inputs["record_registry"] if r["kind"] == "message")
+            entry = next(r for r in records if r["kind"] == "message")
             source_path = "backend/src/crucible/tools/filesystem.py"
             evidence = dict(
                 original=entry["original_artifact"],
@@ -259,7 +525,7 @@ class ScriptedSupervisor:
             )
             source = dict(
                 path=source_path,
-                sha256=inputs["file_hashes"]["source/" + source_path],
+                sha256=hashes["source/" + source_path],
                 start_line=1,
                 end_line=1,
             )
@@ -281,7 +547,11 @@ class ScriptedSupervisor:
                 registry = audited_role_registry(
                     "mining_synthesis", receipts, job.job_id
                 )
-                for name in (entry["detail_ref"], "source/" + source_path):
+                for name in (
+                    inputs["record_registry"],
+                    entry["detail_ref"],
+                    "source/" + source_path,
+                ):
                     await registry.get("read_file_chunk").invoke(
                         ToolContext(workspace, tool_call_id=uuid4()),
                         dict(path=name, offset=0, limit=64),

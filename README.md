@@ -637,6 +637,11 @@ private storage. Analysts see only their assigned `trial/` and investigation
 source. All evidence views are mounted read-only, checksum-checked after execution,
 and have no command/edit tools. Successful bounded reads establish inspection
 receipts; listing/searching and agreement among analysts do not verify a claim.
+Initial role input contains only paths to the per-view JSONL record/hash catalogs,
+not their full contents. Search those catalogs by record ID or exact source path,
+then read the relevant original detail and source lines. Catalog reads are only
+navigation; they cannot satisfy original-support citation checks. Reading every
+catalog page can still exhaust the unchanged cumulative allowance.
 Schema/citation checks establish identities, byte access and membership, not
 causality or semantic correctness. No-action dispositions are completed mining,
 not measured improvement.

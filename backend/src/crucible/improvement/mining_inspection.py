@@ -30,8 +30,8 @@ DiagnosticKind = Literal["trial_analysis", "mining_synthesis", "format_correctio
 
 
 _READ_ROOTS = {
-    "trial_analysis": ("trial", "source"),
-    "mining_synthesis": ("trials", "source", "reports"),
+    "trial_analysis": ("trial", "source", "catalog"),
+    "mining_synthesis": ("trials", "source", "reports", "catalog"),
 }
 
 

@@ -109,6 +109,32 @@ async def test_synthesis_requires_original_record_inspection(inspection_package)
     assert validated.result.model_dump(mode="json") == report["result"]
 
 
+async def test_catalog_reads_do_not_establish_original_support(inspection_package):
+    from uuid import uuid4
+
+    from crucible.improvement.mining_inspection import audited_role_registry
+    from crucible.tools.definitions import ToolContext
+
+    root, package, report = inspection_package
+    workspace = root.parent / "workspace"
+    catalog = workspace / "catalog/records.jsonl"
+    catalog.parent.mkdir(parents=True)
+    # Even a catalog containing the full report is navigation, not original bytes.
+    raw = json.dumps(report).encode()
+    catalog.write_bytes(raw)
+    package = load_inspection_package(
+        root, job_id=UUID(int=900), workspace_files={"catalog/records.jsonl": raw}
+    )
+    receipts = []
+    reader = audited_role_registry("mining_synthesis", receipts, UUID(int=900))
+    await reader.get("read_file_chunk").invoke(
+        ToolContext(workspace, tool_call_id=uuid4()), dict(path="catalog/records.jsonl")
+    )
+    assert len(receipts) == 1
+    with pytest.raises(ValueError, match="uninspected_support"):
+        validate_synthesis_report(json.dumps(report).encode(), package, tuple(receipts))
+
+
 async def inspect_support(root, report, evidence_path=None):
     from uuid import uuid4
 

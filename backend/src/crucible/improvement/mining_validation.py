@@ -73,7 +73,7 @@ def load_inspection_package(
         ):
             entries[prefix + entry.ref] = entry
     package._files, package._job_id, package._entries = files, job_id, entries
-    # input.json and compact reports are job-view artifacts, not original support.
+    # Input, compact reports and catalogs are job-view artifacts, not support.
     # The coordinator supplies their frozen positive registry when they are read.
     package._workspace_files = dict(workspace_files or {})
     return package
@@ -113,11 +113,13 @@ def _receipts(
         if (
             trial_id is not None
             and path != "input.json"
-            and not path.startswith(("source/", f"trials/{trial_id}/"))
+            and not path.startswith(("source/", "catalog/", f"trials/{trial_id}/"))
         ):
             raise MiningValidationError("invalid_citation")
         raw = package._files.get(path)
-        if raw is None and (path == "input.json" or path.startswith("reports/")):
+        if raw is None and (
+            path == "input.json" or path.startswith(("reports/", "catalog/"))
+        ):
             raw = package._workspace_files.get(path)
         if (
             raw is None

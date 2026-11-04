@@ -112,6 +112,14 @@ def role_registry(
     )
 
 
+def role_input_prompt(raw: bytes) -> str:
+    return (
+        "Perform the role specified by the system instructions using this "
+        "controller input (also available in input.json). Return JSON matching "
+        "output_schema.\n" + raw.decode("utf-8")
+    )
+
+
 async def run_role_worker(
     job: RoleJob,
     token: str,
@@ -124,11 +132,7 @@ async def run_role_worker(
         raw = stream.read(1_048_577)
     if len(raw) > 1_048_576 or hashlib.sha256(raw).hexdigest() != job.input_digest:
         raise ValueError("role input identity drift")
-    prompt = (
-        "Perform the role specified by the system instructions using this "
-        "controller input (also available in input.json). Return JSON matching "
-        "output_schema.\n" + raw.decode("utf-8")
-    )
+    prompt = role_input_prompt(raw)
     gateway = WorkerModelGateway(
         WorkerCredential(token, "http://relay:8080/internal/improvement/model"),
         job.job_id,

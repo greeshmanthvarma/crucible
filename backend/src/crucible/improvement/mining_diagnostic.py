@@ -520,12 +520,14 @@ class MiningDiagnosticRunner:
         )
         workspace = primary_directory / "workspace"
         extra = {
-            p.relative_to(workspace).as_posix(): read_regular_artifact(p, 1_048_576)
+            p.relative_to(workspace).as_posix(): read_regular_artifact(
+                p, 2 * 1024 * 1024
+            )
             for p in workspace.rglob("*")
             if p.is_file()
             and (
                 p.relative_to(workspace).as_posix() == "input.json"
-                or p.relative_to(workspace).parts[0] == "reports"
+                or p.relative_to(workspace).parts[0] in ("reports", "catalog")
             )
         }
         package = load_inspection_package(
@@ -869,9 +871,10 @@ class MiningDiagnosticRunner:
                     "overviews": list(package.trial_overview_refs.values()),
                 }
             payload["output_schema"] = schema.model_json_schema()
-            # Hashes and canonical lookup keys are metadata, never raw trace text.
-            # Without these the read-only model cannot name precise file digests.
-            payload["file_hashes"] = {
+            # Keep high-entropy citation metadata out of repeated model context.
+            # One JSON object per line makes exact IDs/paths searchable with the
+            # ordinary bounded readers; only this role's positive view is listed.
+            file_hashes = {
                 (
                     "trial/" + name.removeprefix(f"trials/{slot.trial_id}/")
                     if name.startswith(f"trials/{slot.trial_id}/")
@@ -893,12 +896,27 @@ class MiningDiagnosticRunner:
                     2 * 1024 * 1024,
                 )
             )
-            payload["record_registry"] = [
+            record_registry = [
                 entry
                 for entry in locators
                 if slot.kind == "mining_synthesis"
                 or entry["trial_id"] == str(slot.trial_id)
             ]
+            catalog = workspace / "catalog"
+            catalog.mkdir()
+            _write(
+                catalog / "file-hashes.jsonl",
+                b"".join(
+                    canonical_json({"path": name, "sha256": sha}) + b"\n"
+                    for name, sha in sorted(file_hashes.items())
+                ),
+            )
+            _write(
+                catalog / "records.jsonl",
+                b"".join(canonical_json(entry) + b"\n" for entry in record_registry),
+            )
+            payload["file_hashes"] = "catalog/file-hashes.jsonl"
+            payload["record_registry"] = "catalog/records.jsonl"
             for name in package.files:
                 if name.startswith("source/"):
                     target = name
@@ -1193,7 +1211,8 @@ class MiningDiagnosticRunner:
                                 if p.is_file()
                                 and (
                                     p.name == "input.json"
-                                    or p.relative_to(workspace).parts[0] == "reports"
+                                    or p.relative_to(workspace).parts[0]
+                                    in ("reports", "catalog")
                                 )
                             }
                             if not correction:
