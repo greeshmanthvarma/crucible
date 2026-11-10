@@ -32,6 +32,13 @@ def parser(*, require_state_root: bool = True) -> argparse.ArgumentParser:
         "evidence-verify", help="offline package verification"
     )
     verify.add_argument("--package", type=Path, required=True)
+    preview = operations.add_parser(
+        "evidence-preview", help="offline case evidence request preview"
+    )
+    preview.add_argument("--package", type=Path, required=True)
+    preview.add_argument("--bundle-digest", required=True)
+    preview.add_argument("--trial", required=True)
+    preview.add_argument("--detail", action="append", default=[])
     diagnostic = operations.add_parser("mining-diagnostic")
     controls = diagnostic.add_subparsers(dest="control", required=True)
     prepare = controls.add_parser("prepare")
@@ -108,7 +115,13 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
     offline = "mining-diagnostic" in arguments or bool(
         arguments and arguments[0] in ("evidence-export", "evidence-verify")
     )
+    operation_index = 2 if arguments[:1] == ["--state-root"] else 0
+    offline = offline or arguments[operation_index : operation_index + 1] == [
+        "evidence-preview"
+    ]
     args = parser(require_state_root=not offline).parse_args(arguments)
+    if args.operation == "evidence-preview":
+        return _run_case_preview(args)
     if args.operation == "mining-diagnostic":
         return await _run_mining_command(args)
     if args.operation in ("evidence-export", "evidence-verify"):
@@ -222,6 +235,45 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
             loop.remove_signal_handler(sig)
             signal.signal(sig, handler)
         await store.close()
+
+
+def _run_case_preview(args: argparse.Namespace) -> int:
+    from crucible.improvement.case_evidence import (
+        CasePacketError,
+        assemble_case_packet,
+        expand_case_packet,
+    )
+    from crucible.repair.identity import canonical_json
+
+    try:
+        try:
+            trial_id = UUID(args.trial)
+        except ValueError:
+            raise CasePacketError("invalid_target") from None
+        prepared = assemble_case_packet(
+            args.package, trial_id, expected_bundle_digest=args.bundle_digest
+        )
+        followup = (
+            expand_case_packet(prepared, tuple(args.detail)) if args.detail else None
+        )
+    except CasePacketError as error:
+        print(f"Evidence preview rejected ({error.code}).", file=sys.stderr)
+        return 2
+    previews = (prepared.initial, followup) if followup else (prepared.initial,)
+    print(
+        canonical_json(
+            {
+                "packet": prepared.packet,
+                "initial": prepared.initial,
+                "followup": followup,
+                "total_reserved_tokens": sum(
+                    preview.input_tokens + preview.output_reserve_tokens
+                    for preview in previews
+                ),
+            }
+        ).decode()
+    )
+    return 0
 
 
 async def _run_mining_command(args: argparse.Namespace) -> int:

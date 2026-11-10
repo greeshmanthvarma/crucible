@@ -1,12 +1,13 @@
 """Case packets assembled from sealed development exports."""
 
 import hashlib
+import json
 from dataclasses import replace
 from uuid import UUID
 
 import pytest
 
-from crucible.domain.tools import ToolResultStatus
+from crucible.domain.tools import ToolExecutionMode, ToolResultStatus
 from crucible.improvement import case_evidence
 from crucible.improvement.case_evidence import CasePacketError, assemble_case_packet
 from crucible.improvement.source import _digest
@@ -157,7 +158,7 @@ def long_package(tmp_path, verified_trial, parallel_records):
             completion_sequence=i + 1,
             status=ToolResultStatus.FAILED if i < 24 else ToolResultStatus.SUCCEEDED,
             error_code="patch_rejected" if i < 24 else None,
-            display_text="Recorded edit result " * 20,
+            display_text="Recorded edit result " * 100,
         )
         for i, call in enumerate(trace["tool_calls"])
     )
@@ -225,3 +226,99 @@ def test_packet_keeps_missing_and_empty_distinct(
         assert packet.submission.changed_paths == ()
         assert packet.submission.paths_complete == (name == "empty")
         assert packet.gaps.missing_result_call_ids == ("E1", "E2")
+
+
+def test_expansion_rejects_foreign_unknown_and_duplicate_refs(long_package):
+    prepared = prepare(long_package, initial_input_tokens=2200)
+    for refs in (
+        (),
+        ("E50", "E50"),
+        ("E50", "E73", "E74", "E97"),
+        ("E14",),
+        ("E999",),
+        ("E1",),
+        ("../details/raw.json",),
+    ):
+        with pytest.raises(CasePacketError, match="invalid_refs"):
+            case_evidence.expand_case_packet(prepared, refs)
+
+
+def test_expansion_counts_resupplied_context_and_caps_details(long_package):
+    prepared = prepare(long_package, initial_input_tokens=2200)
+    refs = ("E97", "E50")
+    expanded = case_evidence.expand_case_packet(prepared, refs)
+    assert expanded.messages[:2] == prepared.initial.messages
+    assert expanded.messages[2].role == "assistant"
+    assert expanded.input_tokens == estimate_input_tokens(expanded.messages, ())
+    assert expanded.input_tokens > prepared.initial.input_tokens
+    assert expanded.output_reserve_tokens == 2000
+    details = json.loads(expanded.messages[3].parts[0].text_content)["details"]
+    assert [detail["id"] for detail in details] == list(refs)
+    assert all("Recorded edit result" in detail["excerpt"] for detail in details)
+    assert all(
+        len(detail["excerpt"]) == 1000 and detail["truncated"] for detail in details
+    )
+    tight = case_evidence.expand_case_packet(
+        prepared, refs, followup_input_tokens=expanded.input_tokens - 1
+    )
+    assert tight.input_tokens < expanded.input_tokens
+    assert tight.input_tokens == estimate_input_tokens(tight.messages, ())
+    clipped = json.loads(tight.messages[3].parts[0].text_content)["details"]
+    assert all(detail["truncated"] for detail in clipped)
+    with pytest.raises(CasePacketError, match="budget_exceeded"):
+        case_evidence.expand_case_packet(
+            prepared, refs, followup_input_tokens=prepared.initial.input_tokens
+        )
+    with pytest.raises(CasePacketError, match="invalid_limit"):
+        case_evidence.expand_case_packet(prepared, refs, followup_input_tokens=12001)
+
+
+@pytest.fixture
+def nonpatch_package(tmp_path, verified_trial, parallel_records):
+    trace = parallel_records
+    first, second = trace["tool_calls"]
+    trace["tool_calls"] = (
+        replace(first, name="list_files", execution_mode=ToolExecutionMode.SEQUENTIAL),
+        replace(
+            second,
+            name="execute_command",
+            arguments={"executable": "check", "reason": "Check the synthetic task"},
+            execution_mode=ToolExecutionMode.SEQUENTIAL,
+        ),
+    )
+    first, second = trace["tool_results"]
+    trace["tool_results"] = (
+        replace(
+            first,
+            status=ToolResultStatus.FAILED,
+            error_code="command_exit_nonzero",
+            result={"exit_code": 1, "termination": "completed"},
+            display_text="RAW_COMMAND_OUTPUT_SENTINEL",
+        ),
+        second,
+    )
+    target = with_evidence(verified_trial, trace, b"")
+    root = tmp_path / "nonpatch"
+    return root, seal(root, (target,)), target.trial_id
+
+
+def test_same_assembler_handles_nonpatch_development_failure(nonpatch_package):
+    prepared = prepare(nonpatch_package)
+    packet = prepared.packet
+    assert packet.verdict == "fail"
+    assert packet.submission.state == "empty"
+    assert [(item.tool, item.status, item.error_code) for item in packet.outcomes] == [
+        ("execute_command", "failed", "command_exit_nonzero"),
+        ("list_files", "succeeded", None),
+    ]
+    assert "E4" not in packet.available_detail_refs
+    assert "E6" in packet.available_detail_refs
+    expanded = case_evidence.expand_case_packet(prepared, ("E6",))
+    wire = canonical_json((packet, expanded))
+    assert b"exit_code" in wire
+    assert b"RAW_COMMAND_OUTPUT_SENTINEL" not in wire
+    assert b"apply_patch" not in wire
+    assert (
+        "A later success alone does not establish recovery"
+        in prepared.initial.messages[0].parts[0].text_content
+    )

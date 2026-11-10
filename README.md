@@ -535,6 +535,25 @@ components. An exclusive directory reservation prevents competing exports from
 overwriting each other; a crash may leave an empty reservation or an
 `.incomplete-trajectory-*` sibling requiring explicit operator cleanup.
 
+Preview the diagnosis request for one failed attempt in a verified development
+export. Use the bundle digest from trusted export provenance and the failed trial
+UUID from that package.
+
+```sh
+crucible improve evidence-preview --package /absolute/export/trajectory-package \
+  --bundle-digest TRUSTED_SHA256 --trial FAILED_TRIAL_UUID
+```
+
+The canonical JSON includes the case packet, the rendered initial request, and its
+local input token estimate. To preview a single follow-up, repeat the command with
+one to three distinct `--detail` arguments from `packet.available_detail_refs`.
+The follow-up count includes the original messages, the simulated detail request,
+and the detail reply. The caps are 8,000 initial input tokens and 12,000 follow-up
+input tokens, each with a separate 2,000-token output reserve. Token counts require
+the installed local tokenizer asset. Valid previews exit 0 and rejected inputs
+exit 2. Treat stdout as private development evidence and keep it local and
+untracked.
+
 The strict selection file is `{"mode":"explicit-three-repeat","trial_ids":[
 "TRIAL_UUID_0","TRIAL_UUID_1","TRIAL_UUID_2"]}`: three repeats of one development
 task, including a failure. Alternatively `{"mode":"failed-family-v1","trial_ids":[]}`
