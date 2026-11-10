@@ -1,6 +1,7 @@
 """Run a bounded, one-case diagnosis exchange."""
 
 import json
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Literal
 
@@ -151,7 +152,8 @@ async def _read_response(gateway: ModelGateway, request: PreparedModelRequest) -
         finally:
             close = getattr(stream, "aclose", None)
             if close is not None:
-                await close()
+                with suppress(Exception):
+                    await close()
     except CaseDiagnosisError:
         raise
     except Exception:

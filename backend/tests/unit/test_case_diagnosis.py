@@ -24,6 +24,7 @@ from crucible.improvement.case_evidence import expand_case_packet
 from tests.unit import test_case_evidence as fixtures
 
 patch_package = fixtures.patch_package
+long_package = fixtures.long_package
 parallel_records = fixtures.parallel_records
 parallel_trace = fixtures.parallel_trace
 verified_trial = fixtures.verified_trial
@@ -164,6 +165,21 @@ async def test_rejects_second_disclosure(prepared):
     assert result.requests_sent == len(gateway.requests) == 2
 
 
+async def test_rejects_citation_to_an_omitted_linked_event(long_package):
+    prepared = fixtures.prepare(long_package, initial_input_tokens=2200)
+    visible = {event.id for event in prepared.packet.events}
+    linked = next(
+        ref
+        for event in prepared.packet.events
+        for ref in (event.call_id, event.result_id)
+        if ref is not None and ref not in visible
+    )
+    gateway = RecordingGateway([completed(diagnosis(refs=(linked,)))])
+    result = await run_case_diagnosis(prepared, gateway=gateway, model="scripted")
+    assert result.error_code == "invalid_citations"
+    assert result.requests_sent == 1
+
+
 async def test_budget_denial_never_dispatches_request(prepared):
     ref = prepared.packet.available_detail_refs[0]
     expanded = expand_case_packet(prepared, (ref,))
@@ -224,6 +240,37 @@ async def test_propagates_cancellation_and_closes_stream(prepared):
                 await asyncio.Future()
             finally:
                 closed.set()
+
+    task = asyncio.create_task(
+        run_case_diagnosis(prepared, gateway=BlockingGateway(), model="scripted")
+    )
+    async with asyncio.timeout(2):
+        await waiting.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert closed.is_set()
+
+
+async def test_cleanup_error_does_not_mask_cancellation(prepared):
+    waiting = asyncio.Event()
+    closed = asyncio.Event()
+
+    class FailingCloseIterator:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            waiting.set()
+            await asyncio.Future()
+
+        async def aclose(self):
+            closed.set()
+            raise RuntimeError("private cleanup detail")
+
+    class BlockingGateway:
+        def stream(self, request):
+            return FailingCloseIterator()
 
     task = asyncio.create_task(
         run_case_diagnosis(prepared, gateway=BlockingGateway(), model="scripted")
