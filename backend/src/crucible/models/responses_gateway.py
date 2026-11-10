@@ -19,6 +19,7 @@ from crucible.engine.gateway import (
     TextDelta,
 )
 from crucible.models.request_payload import response_items as _items
+from crucible.models.request_payload import response_text_options
 from crucible.models.request_payload import response_tool as _tool
 
 ResponseFunction = Callable[..., Awaitable[object]]
@@ -44,6 +45,7 @@ class LiteLLMResponsesGateway:
                 max_output_tokens=request.max_output_tokens,
                 stream=True,
                 store=False,
+                **response_text_options(request.response_format),
                 **(
                     {"num_retries": 0, "max_retries": 0}
                     if self._disable_retries

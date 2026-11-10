@@ -21,6 +21,7 @@ from crucible.improvement.case_diagnosis import (
     run_case_diagnosis,
 )
 from crucible.improvement.case_evidence import expand_case_packet
+from crucible.models.token_counting import estimate_input_tokens
 from tests.unit import test_case_evidence as fixtures
 
 patch_package = fixtures.patch_package
@@ -55,18 +56,20 @@ def completed(text):
 
 
 def disclosure(ref):
-    return json.dumps({"request_details": {"refs": [ref]}})
+    return json.dumps({"result": {"request_details": {"refs": [ref]}}})
 
 
 def diagnosis(relationship="linked", refs=("E7",), **fields):
     return json.dumps(
         {
-            "diagnosis": {
-                "observed_behavior": "An edit failed",
-                "relationship": relationship,
-                "evidence_refs": refs,
-                "uncertainty": "Cause unclear",
-                **fields,
+            "result": {
+                "diagnosis": {
+                    "observed_behavior": "An edit failed",
+                    "relationship": relationship,
+                    "evidence_refs": refs,
+                    "uncertainty": "Cause unclear",
+                    **fields,
+                }
             }
         }
     )
@@ -83,10 +86,10 @@ def parse(text):
     [
         "{",
         ' ```json\n{"request_details":{"refs":["E7"]}}\n``` ',
-        '{"request_details":{"refs":["E7"],"refs":["E7"]}}',
-        '{"diagnosis":{},"request_details":{"refs":["E7"]}}',
-        '{"request_details":{"refs":"E7"}}',
-        '{"request_details":{"refs":[1]}}',
+        '{"result":{"request_details":{"refs":["E7"],"refs":["E7"]}}}',
+        '{"result":{"diagnosis":{},"request_details":{"refs":["E7"]}}}',
+        '{"result":{"request_details":{"refs":"E7"}}}',
+        '{"result":{"request_details":{"refs":[1]}}}',
         diagnosis(observed_behavior=1),
         diagnosis(observed_behavior=float("nan")),
         diagnosis(observed_behavior=" "),
@@ -115,10 +118,10 @@ def test_unknown_and_citation_membership():
 
 
 def test_details_require_distinct_advertised_ids():
-    assert parse('{"request_details":{"refs":["E7"]}}') == DetailRequest(refs=("E7",))
+    assert parse(disclosure("E7")) == DetailRequest(refs=("E7",))
     for refs in ([], ["E7", "E7"], ["E9"], ["../../E7"], ["E7", "E8", "E9", "E10"]):
         with pytest.raises(CaseDiagnosisError, match="^invalid_disclosure$"):
-            parse(json.dumps({"request_details": {"refs": refs}}))
+            parse(json.dumps({"result": {"request_details": {"refs": refs}}}))
 
 
 @pytest.mark.parametrize("relationship, refs", [("linked", ("E6",)), ("unknown", ())])
@@ -134,7 +137,6 @@ async def test_direct_diagnosis_uses_one_request(prepared, relationship, refs):
 
 async def test_discloses_one_advertised_batch(prepared):
     ref = prepared.packet.available_detail_refs[0]
-    expanded = expand_case_packet(prepared, (ref,))
     gateway = RecordingGateway(
         [completed(disclosure(ref)), completed(diagnosis(refs=(ref,)))]
     )
@@ -144,6 +146,9 @@ async def test_discloses_one_advertised_batch(prepared):
     assert result.requests_sent == 2
     assert result.disclosed_refs == (ref,)
     first, second = gateway.requests
+    expanded = expand_case_packet(
+        prepared, (ref,), response_format=second.response_format
+    )
     assert first.messages == prepared.initial.messages
     assert second.messages == expanded.messages
     assert first.tools == second.tools == ()
@@ -151,8 +156,19 @@ async def test_discloses_one_advertised_batch(prepared):
     assert first.model == second.model == "scripted"
     assert first.run_id == second.run_id
     assert first.step_id != second.step_id
+    assert first.response_format["strict"] is second.response_format["strict"] is True
+    initial_schema = first.response_format["schema"]
+    final_schema = second.response_format["schema"]
+    assert initial_schema["type"] == final_schema["type"] == "object"
+    assert len(initial_schema["properties"]["result"]["anyOf"]) == 2
+    assert final_schema["properties"]["result"]["$ref"].endswith("/_DiagnosisEnvelope")
+    assert "_DetailEnvelope" not in final_schema["$defs"]
+    initial_tokens = estimate_input_tokens(
+        first.messages, first.tools, response_format=first.response_format
+    )
+    assert initial_tokens > prepared.initial.input_tokens
     assert result.total_reserved_tokens == (
-        prepared.initial.input_tokens + expanded.input_tokens + 4_000
+        initial_tokens + expanded.input_tokens + 4_000
     )
 
 
@@ -182,9 +198,20 @@ async def test_rejects_citation_to_an_omitted_linked_event(long_package):
 
 async def test_budget_denial_never_dispatches_request(prepared):
     ref = prepared.packet.available_detail_refs[0]
-    expanded = expand_case_packet(prepared, (ref,))
-    initial = prepared.initial.input_tokens + 2_000
-    cumulative = initial + expanded.input_tokens + 2_000
+    replies = [completed(disclosure(ref)), completed(diagnosis(refs=(ref,)))]
+    baseline = RecordingGateway(replies)
+    await run_case_diagnosis(prepared, gateway=baseline, model="scripted")
+    first, second = baseline.requests
+    initial = 2_000 + estimate_input_tokens(
+        first.messages, first.tools, response_format=first.response_format
+    )
+    cumulative = (
+        initial
+        + 2_000
+        + estimate_input_tokens(
+            second.messages, second.tools, response_format=second.response_format
+        )
+    )
     for cap, requests, reserved, error in (
         (0, 0, 0, "invalid_limit"),
         (24_001, 0, 0, "invalid_limit"),

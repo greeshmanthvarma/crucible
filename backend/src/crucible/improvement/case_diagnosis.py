@@ -3,9 +3,9 @@
 import json
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Mapping
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict
 
 from crucible.domain.ids import new_id
 from crucible.engine.gateway import (
@@ -18,10 +18,12 @@ from crucible.engine.gateway import (
     TextDelta,
 )
 from crucible.improvement.case_evidence import (
+    INITIAL_CAP,
     CasePacketError,
     PreparedCasePacket,
     expand_case_packet,
 )
+from crucible.models.token_counting import estimate_input_tokens
 
 _MAX_RESPONSE_BYTES = 16 * 1024
 _MAX_RESERVED_TOKENS = 24_000
@@ -56,9 +58,22 @@ class _DetailEnvelope(_ResponseModel):
     request_details: DetailRequest
 
 
-_RESPONSE: TypeAdapter[_DiagnosisEnvelope | _DetailEnvelope] = TypeAdapter(
-    _DiagnosisEnvelope | _DetailEnvelope
-)
+class _InitialResponse(_ResponseModel):
+    result: _DiagnosisEnvelope | _DetailEnvelope
+
+
+class _FinalResponse(_ResponseModel):
+    result: _DiagnosisEnvelope
+
+
+def _response_format(*, followup: bool) -> Mapping[str, object]:
+    model = _FinalResponse if followup else _InitialResponse
+    return {
+        "type": "json_schema",
+        "name": "case_diagnosis_final" if followup else "case_diagnosis_initial",
+        "strict": True,
+        "schema": model.model_json_schema(),
+    }
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -90,7 +105,7 @@ def parse_case_response(
         json.loads(
             encoded, object_pairs_hook=_unique_object, parse_constant=_reject_constant
         )
-        envelope = _RESPONSE.validate_json(encoded)
+        envelope = _InitialResponse.model_validate_json(encoded).result
     except (ValueError, RecursionError):
         raise CaseDiagnosisError("invalid_response") from None
 
@@ -184,8 +199,17 @@ async def run_case_diagnosis(
     requested_refs: tuple[str, ...] = ()
     disclosed_refs: tuple[str, ...] = ()
     try:
+        response_format = _response_format(followup=False)
+        try:
+            input_tokens = estimate_input_tokens(
+                preview.messages, (), response_format=response_format
+            )
+        except (ValueError, OSError):
+            raise CaseDiagnosisError("tokenizer_unavailable") from None
+        if input_tokens > INITIAL_CAP:
+            raise CaseDiagnosisError("budget_exceeded")
         while True:
-            reservation = preview.input_tokens + preview.output_reserve_tokens
+            reservation = input_tokens + preview.output_reserve_tokens
             if reserved + reservation > total_token_cap:
                 raise CaseDiagnosisError("budget_exceeded")
             request = PreparedModelRequest(
@@ -195,6 +219,7 @@ async def run_case_diagnosis(
                 messages=preview.messages,
                 tools=(),
                 max_output_tokens=preview.output_reserve_tokens,
+                response_format=response_format,
             )
             requests_sent += 1
             reserved += reservation
@@ -211,7 +236,11 @@ async def run_case_diagnosis(
             if requests_sent == 2:
                 raise CaseDiagnosisError("disclosure_exhausted")
             requested_refs = response.refs
-            preview = expand_case_packet(prepared, requested_refs)
+            response_format = _response_format(followup=True)
+            preview = expand_case_packet(
+                prepared, requested_refs, response_format=response_format
+            )
+            input_tokens = preview.input_tokens
     except (CaseDiagnosisError, CasePacketError) as error:
         return CaseDiagnosisResult(
             None, error.code, requests_sent, reserved, disclosed_refs

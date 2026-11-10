@@ -1,8 +1,15 @@
 """Shared Responses wire representation for dispatch and local token counting."""
 
 import json
+from typing import Mapping
 
 from crucible.engine.gateway import ModelMessage, ModelRole, ModelToolDefinition
+
+
+def response_text_options(
+    response_format: Mapping[str, object] | None,
+) -> dict[str, object]:
+    return {"text": {"format": dict(response_format)}} if response_format else {}
 
 
 def response_items(message: ModelMessage) -> list[dict[str, object]]:

@@ -72,6 +72,7 @@ async def test_streams_text_and_function_calls_with_provider_ids() -> None:
     assert captured["model"] == "openai/gpt-6-luna"
     assert captured["stream"] is True
     assert captured["store"] is False
+    assert "text" not in captured
     assert "num_retries" not in captured and "max_retries" not in captured
     assert captured["input"] == [{"role": "user", "content": "Inspect."}]
     assert captured["tools"] == [
@@ -86,6 +87,28 @@ async def test_streams_text_and_function_calls_with_provider_ids() -> None:
             "strict": False,
         }
     ]
+
+
+async def test_forwards_strict_json_schema_as_responses_text_format() -> None:
+    captured: dict[str, object] = {}
+    response_format = {
+        "type": "json_schema",
+        "name": "example",
+        "strict": True,
+        "schema": {"type": "object", "additionalProperties": False},
+    }
+
+    async def events() -> AsyncIterator[dict[str, object]]:
+        yield {"type": "response.completed", "response": {}}
+
+    async def response(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return events()
+
+    prepared = replace(request(), response_format=response_format)
+    items = [item async for item in LiteLLMResponsesGateway(response).stream(prepared)]
+    assert items == [ModelStop(ModelStopReason.COMPLETE)]
+    assert captured["text"] == {"format": response_format}
 
 
 async def test_replays_function_call_and_result_with_matching_provider_id() -> None:

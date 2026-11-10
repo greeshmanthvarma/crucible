@@ -9,11 +9,16 @@ import json
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Mapping
 
 import tiktoken
 
 from crucible.engine.gateway import ModelMessage, ModelToolDefinition
-from crucible.models.request_payload import response_items, response_tool
+from crucible.models.request_payload import (
+    response_items,
+    response_text_options,
+    response_tool,
+)
 
 ENCODING = "o200k_base"
 ASSET_URL = "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
@@ -72,11 +77,18 @@ def _encoding() -> tiktoken.Encoding:
 
 
 def estimate_input_tokens(
-    messages: tuple[ModelMessage, ...], tools: tuple[ModelToolDefinition, ...]
+    messages: tuple[ModelMessage, ...],
+    tools: tuple[ModelToolDefinition, ...],
+    *,
+    response_format: Mapping[str, object] | None = None,
 ) -> int:
     items = [item for message in messages for item in response_items(message)]
     payload = json.dumps(
-        {"input": items, "tools": [response_tool(t) for t in tools]},
+        {
+            "input": items,
+            "tools": [response_tool(t) for t in tools],
+            **response_text_options(response_format),
+        },
         ensure_ascii=False,
         separators=(",", ":"),
     )

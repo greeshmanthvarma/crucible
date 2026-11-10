@@ -45,6 +45,7 @@ class PreparedModelRequest:
     messages: tuple[ModelMessage, ...]
     tools: tuple[ModelToolDefinition, ...]
     max_output_tokens: int
+    response_format: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)

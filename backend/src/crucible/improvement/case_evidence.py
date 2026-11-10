@@ -29,6 +29,7 @@ from crucible.sandbox.protocol import SandboxTermination
 from crucible.tools.workspace_authority import patch_paths
 
 INITIAL_CAP = 8_000
+FOLLOWUP_CAP = 12_000
 OUTPUT_RESERVE = 2_000
 DETAIL_CHARS = 1_000
 EVENT_CHARS = 160
@@ -43,11 +44,12 @@ supported partial contribution, and recovered when the trace shows recovery from
 that behavior. A later success alone does not establish recovery. Use unknown
 when the relationship is unresolved. Report the strongest supported lead and
 what evidence is missing when the cause remains unclear.
-Return exactly one JSON object without extra text: either a diagnosis object
+Return one JSON object with a result field and no extra text. The result is
+either an object with a diagnosis field
 containing observed_behavior (text), relationship (linked, contributing,
 recovered, or unknown), evidence_refs (distinct IDs from events rows, empty
 only for unknown), and uncertainty (text),
-or a request_details object containing refs (1–3 distinct IDs from
+or an object with a request_details field containing refs (1–3 distinct IDs from
 available_detail_refs)."""
 
 # These payloads can carry source bodies, credentials, or raw command output.
@@ -409,9 +411,15 @@ def _message(role: ModelRole, text: str) -> ModelMessage:
     return ModelMessage(role, (ModelPart("text", text),))
 
 
-def _preview(messages: tuple[ModelMessage, ...]) -> CaseRequestPreview:
+def _preview(
+    messages: tuple[ModelMessage, ...],
+    response_format: Mapping[str, object] | None = None,
+) -> CaseRequestPreview:
     try:
-        return CaseRequestPreview(messages, estimate_input_tokens(messages, ()))
+        return CaseRequestPreview(
+            messages,
+            estimate_input_tokens(messages, (), response_format=response_format),
+        )
     except (ValueError, OSError) as error:
         raise CasePacketError("tokenizer_unavailable") from error
 
@@ -581,10 +589,11 @@ def expand_case_packet(
     prepared: PreparedCasePacket,
     refs: tuple[str, ...],
     *,
-    followup_input_tokens: int = 12_000,
+    followup_input_tokens: int = FOLLOWUP_CAP,
+    response_format: Mapping[str, object] | None = None,
 ) -> CaseRequestPreview:
     """Preview one batch using only details advertised in the initial request."""
-    _check_limit(followup_input_tokens, 12_000)
+    _check_limit(followup_input_tokens, FOLLOWUP_CAP)
     if (
         not 1 <= len(refs) <= 3
         or any(not isinstance(ref, str) or ref not in prepared._details for ref in refs)
@@ -597,7 +606,7 @@ def expand_case_packet(
     )
     request = _message(
         ModelRole.ASSISTANT,
-        canonical_json({"request_details": {"refs": refs}}).decode(),
+        canonical_json({"result": {"request_details": {"refs": refs}}}).decode(),
     )
     limit = DETAIL_CHARS
     while True:
@@ -621,7 +630,9 @@ def expand_case_packet(
                 }
             ).decode(),
         )
-        preview = _preview((*prepared.initial.messages, request, reply))
+        preview = _preview(
+            (*prepared.initial.messages, request, reply), response_format
+        )
         if preview.input_tokens <= followup_input_tokens:
             return preview
         if limit == 0:
