@@ -1,11 +1,29 @@
-"""Validate a model's diagnosis or bounded evidence request."""
+"""Run a bounded, one-case diagnosis exchange."""
 
 import json
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
+from crucible.domain.ids import new_id
+from crucible.engine.gateway import (
+    CompleteToolCall,
+    ModelError,
+    ModelGateway,
+    ModelStop,
+    ModelStopReason,
+    PreparedModelRequest,
+    TextDelta,
+)
+from crucible.improvement.case_evidence import (
+    CasePacketError,
+    PreparedCasePacket,
+    expand_case_packet,
+)
+
 _MAX_RESPONSE_BYTES = 16 * 1024
+_MAX_RESERVED_TOKENS = 24_000
 
 
 class CaseDiagnosisError(ValueError):
@@ -91,3 +109,108 @@ def parse_case_response(
     ):
         raise CaseDiagnosisError("invalid_citations")
     return diagnosis
+
+
+@dataclass(frozen=True)
+class CaseDiagnosisResult:
+    diagnosis: Diagnosis | None
+    error_code: str | None
+    requests_sent: int
+    total_reserved_tokens: int
+    disclosed_refs: tuple[str, ...]
+
+
+async def _read_response(gateway: ModelGateway, request: PreparedModelRequest) -> str:
+    chunks: list[str] = []
+    size = 0
+    try:
+        stream = gateway.stream(request)
+        try:
+            async for item in stream:
+                if isinstance(item, TextDelta) and item.text:
+                    remaining = _MAX_RESPONSE_BYTES - size
+                    if len(item.text) > remaining:
+                        raise CaseDiagnosisError("output_limit")
+                    try:
+                        size += len(item.text.encode())
+                    except UnicodeEncodeError:
+                        raise CaseDiagnosisError("invalid_response") from None
+                    if size > _MAX_RESPONSE_BYTES:
+                        raise CaseDiagnosisError("output_limit")
+                    chunks.append(item.text)
+                elif isinstance(item, CompleteToolCall):
+                    raise CaseDiagnosisError("unexpected_tool_call")
+                elif isinstance(item, ModelError):
+                    raise CaseDiagnosisError("gateway_error")
+                elif isinstance(item, ModelStop):
+                    if item.reason == ModelStopReason.COMPLETE:
+                        return "".join(chunks)
+                    if item.reason == ModelStopReason.LENGTH:
+                        raise CaseDiagnosisError("output_limit")
+                    raise CaseDiagnosisError("unexpected_tool_call")
+        finally:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                await close()
+    except CaseDiagnosisError:
+        raise
+    except Exception:
+        raise CaseDiagnosisError("gateway_error") from None
+    raise CaseDiagnosisError("incomplete_response")
+
+
+async def run_case_diagnosis(
+    prepared: PreparedCasePacket,
+    *,
+    gateway: ModelGateway,
+    model: str,
+    total_token_cap: int = _MAX_RESERVED_TOKENS,
+) -> CaseDiagnosisResult:
+    """Send at most two pre-budgeted requests through the supplied gateway."""
+    if (
+        type(total_token_cap) is not int
+        or not 1 <= total_token_cap <= _MAX_RESERVED_TOKENS
+    ):
+        return CaseDiagnosisResult(None, "invalid_limit", 0, 0, ())
+
+    visible_refs = frozenset(event.id for event in prepared.packet.events)
+    detail_refs = frozenset(prepared.packet.available_detail_refs)
+    preview = prepared.initial
+    run_id = new_id()
+    requests_sent = 0
+    reserved = 0
+    requested_refs: tuple[str, ...] = ()
+    disclosed_refs: tuple[str, ...] = ()
+    try:
+        while True:
+            reservation = preview.input_tokens + preview.output_reserve_tokens
+            if reserved + reservation > total_token_cap:
+                raise CaseDiagnosisError("budget_exceeded")
+            request = PreparedModelRequest(
+                run_id=run_id,
+                step_id=new_id(),
+                model=model,
+                messages=preview.messages,
+                tools=(),
+                max_output_tokens=preview.output_reserve_tokens,
+            )
+            requests_sent += 1
+            reserved += reservation
+            disclosed_refs = requested_refs
+            response = parse_case_response(
+                await _read_response(gateway, request),
+                visible_refs=visible_refs,
+                detail_refs=detail_refs,
+            )
+            if isinstance(response, Diagnosis):
+                return CaseDiagnosisResult(
+                    response, None, requests_sent, reserved, disclosed_refs
+                )
+            if requests_sent == 2:
+                raise CaseDiagnosisError("disclosure_exhausted")
+            requested_refs = response.refs
+            preview = expand_case_packet(prepared, requested_refs)
+    except (CaseDiagnosisError, CasePacketError) as error:
+        return CaseDiagnosisResult(
+            None, error.code, requests_sent, reserved, disclosed_refs
+        )
