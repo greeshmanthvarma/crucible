@@ -2,7 +2,7 @@
 
 import asyncio
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID
 
 from crucible.improvement.checks import ProbePort
@@ -19,6 +19,9 @@ from crucible.improvement.selection import EvaluationSet, selection_counts
 from crucible.improvement.store import ExperimentStore, RoundRecord
 from crucible.improvement.trials import IsolatedTrialRunner
 from crucible.improvement.worktree import OwnedWorktree
+
+if TYPE_CHECKING:
+    from crucible.improvement.measured_mining import MeasuredCaseMiner
 
 StopReason = Literal[
     "stage_complete",
@@ -192,12 +195,14 @@ class LocalSearchExecution:
         worktree: OwnedWorktree,
         probes: ProbePort,
         view_root: Path,
+        case_miner: "MeasuredCaseMiner | None" = None,
     ) -> None:
         self.store, self.paths, self.suite_root = store, paths, suite_root
         self.roles, self.trials, self.views = roles, trials, views
         self.promotions, self.worktree, self.probes = promotions, worktree, probes
         self._views: dict[UUID, DevelopmentView] = {}
         self.view_root = view_root
+        self.case_miner = case_miner
 
     async def baseline(self, experiment_id: UUID) -> EvaluationSet:
         from crucible.improvement.trials import build_evaluation_set
@@ -230,10 +235,19 @@ class LocalSearchExecution:
             for r in records
             if r.execution.kind in ("mining", "format_correction")
         ]
-        execution = mining[-1] if mining else await self.roles.mine(round.id, view)
-        if mining and execution.status == "error":
+        if mining:
+            execution = mining[-1]
+        elif self.case_miner is not None:
+            execution = await self.case_miner.mine(round, view)
+        else:
+            execution = await self.roles.mine(round.id, view)
+        if self.case_miner is None and mining and execution.status == "error":
             execution = await self.roles.recover_mining(execution, view)
-        if execution.status == "invalid" and execution.kind == "mining":
+        if (
+            self.case_miner is None
+            and execution.status == "invalid"
+            and execution.kind == "mining"
+        ):
             execution = await self.roles.mine(
                 round.id, view, correction_of=execution.role_id
             )
@@ -253,10 +267,15 @@ class LocalSearchExecution:
         raw = read_regular_artifact(
             owned_artifact(self.paths.root, execution.output_ref), 1_048_576
         )
+        checkpoint = json.loads(raw_input)
         if (
             hashlib.sha256(raw_input).hexdigest() != execution.input_digest
             or hashlib.sha256(raw).hexdigest() != execution.output_digest
-            or json.loads(raw_input)["view_index_digest"] != view.index_digest
+            or checkpoint["view_index_digest"] != view.index_digest
+            or (
+                self.case_miner is not None
+                and checkpoint.get("kind") != "case-mining-v1"
+            )
             or execution.accepted_snapshot_id != round.baseline_snapshot_id
             or execution.source_digest != view.source_digest
         ):

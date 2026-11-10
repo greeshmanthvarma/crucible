@@ -755,19 +755,23 @@ Start requires a clean, current `main`, matching loaded controller source, read-
 remote freshness/PR admission, and exclusive repository ownership. It freezes state
 and prepares a retained `codex/improve/UUID` worktree; it makes no model requests.
 For manual candidate evaluation, edit only the six frozen editable paths in that
-worktree. `search` instead runs bounded mining and proposal roles through the
-accepted Crucible engine; the miner receives only verified development evidence.
-Roles start from the development index and inspect evidence with `read_file_chunk`:
+worktree. In a new measured `search`, the controller packages the accepted
+snapshot's failed development families and runs structured case diagnosis under
+the frozen mining and experiment budgets. The round supports up to ten failed
+families and records a checksummed grouped report. Only groups with a linked or
+contributing diagnosis become leads for the proposer. Uncertain usage requires
+reconciliation, and an incomplete mining role never dispatches again implicitly.
+The isolated proposer receives those leads and the same verified development
+view. It inspects evidence with `read_file_chunk`:
 each UTF-8 page contains at most 8192 bytes and returns a byte `next_offset`
 (`null` at EOF), including for single-line JSON traces. Follow continuation only
 for relevant details, rather than loading every trace. Role `read_file`, search,
 and file-list output are also capped at 8192 bytes. This changes role evidence
 access, not the ordinary coding solver's tools or the export's existing byte caps.
-Mining, format correction, and proposal have separate controller-owned system
-instructions in `backend/src/crucible/improvement/role_prompts.py`, frozen with
-the experiment source. They distinguish harness improvements from benchmark
-solutions, require evidence-backed hypotheses and honest uncertainty, and forbid
-benchmark-specific shortcuts or weakening protected gates. The proposer must
+The case diagnosis and proposal instructions are frozen with the controller
+source. They distinguish harness improvements from benchmark solutions, require
+evidence-backed hypotheses and honest uncertainty, and forbid benchmark-specific
+shortcuts or weakening protected gates. The proposer must
 leave actual scoped edits for controller evaluation; its claims are not proof.
 Candidate checks must pass before paid trial dispatch. Both
 baseline and candidate run three repeats for each development/selection-validation
@@ -779,7 +783,7 @@ A case is one frozen task; each case has repeat indices 0, 1 and 2. Promotion re
 complete evidence for every development and selection-validation case, no decrease
 in any case's pass count, and a strict gain on at least one development case. Two
 rejections still leave the third proposal opportunity. Invalid or unchanged patches
-consume a round; only malformed mining output receives one format correction.
+consume a round.
 Infrastructure errors remain inconclusive and never become behavioral rejections.
 Accepted trials become the next baseline with their original identities intact.
 

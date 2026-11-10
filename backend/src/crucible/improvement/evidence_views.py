@@ -2,13 +2,22 @@
 
 import hashlib
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from crucible.benchmarks.evidence import sanitize
+from crucible.improvement.case_mining import MAX_PACKAGES, PinnedPackage
+from crucible.improvement.contracts import SourceIdentity
 from crucible.improvement.roles import DevelopmentView, EvidenceRef, role_feedback
 from crucible.improvement.source import safe_path
 from crucible.improvement.store import ExperimentStore
+from crucible.improvement.trajectory_contracts import (
+    ExportLimits,
+    TrialSelection,
+    VerifiedDevelopmentInputs,
+    VerifiedTrial,
+)
+from crucible.improvement.trajectory_export import export_trajectory_package
 from crucible.improvement.verified_evidence import (
     owned_artifact as _owned,
 )
@@ -83,6 +92,111 @@ class DevelopmentViewBuilder:
         ):
             raise ValueError("exported evidence digest drift")
         return path
+
+    async def build_case_packages(
+        self, experiment_id: UUID, view: DevelopmentView, output_dir: Path
+    ) -> tuple[PinnedPackage, ...]:
+        """Export complete failed development families from this round's ledger."""
+        self.export_root(view)
+        run = await self.store.require_search_open(experiment_id)
+        row = await self.store.snapshot(experiment_id, view.baseline_snapshot_id)
+        snapshot, harness = verified_snapshot(
+            self.root, row, await self.store.accepted_snapshot_id(experiment_id)
+        )
+        if snapshot.source_digest != view.source_digest:
+            raise ValueError("case mining source drift")
+        development = {
+            case.case_id: case
+            for case in run.manifest.cases
+            if case.split == "development"
+        }
+        selected = [
+            trial
+            for trial in await self.store.selected_trials(experiment_id)
+            if trial["snapshot"] == str(view.baseline_snapshot_id)
+            and str(trial["case_id"]) in development
+        ]
+        failed_cases = {
+            str(trial["case_id"])
+            for trial in selected
+            if trial["grade_verdict"] == "fail"
+        }
+        if not 1 <= len(failed_cases) <= MAX_PACKAGES:
+            raise ValueError("case mining requires 1–10 failed development families")
+        safe_path(output_dir)
+        output_dir.mkdir(mode=0o700)
+        source = SourceIdentity(
+            commit=snapshot.parent_commit,
+            source_digest=snapshot.source_digest,
+            export_digest=snapshot.export_digest,
+        )
+        source_files = {
+            path.relative_to(harness).as_posix(): (
+                0o100755 if path.stat().st_mode & 0o111 else 0o100644,
+                read_regular_artifact(path, 2 * MAX_ARTIFACT),
+            )
+            for path in sorted(harness.rglob("*"))
+            if path.is_file()
+        }
+        refs = {(ref.trial_id, ref.artifact): ref for ref in view.evidence_refs}
+        packages = []
+        for index, case_id in enumerate(sorted(failed_cases)):
+            trials = []
+            family = sorted(
+                (t for t in selected if t["case_id"] == case_id),
+                key=lambda t: int(str(t["repeat_index"])),
+            )
+            if [trial["repeat_index"] for trial in family] != [0, 1, 2]:
+                raise ValueError("complete development family required")
+            for trial in family:
+                result, artifacts, directory = verified_trial_result(
+                    self.root, trial, development[case_id], snapshot, run.manifest
+                )
+                assert result.solver is not None and result.grade is not None
+                identity = result.identity
+                trial_id = identity.trial_id
+                trials.append(
+                    VerifiedTrial(
+                        trial_id,
+                        case_id,
+                        cast(Literal[0, 1, 2], identity.repeat_index),
+                        result.solver.run_id,
+                        result.solver.task_id,
+                        cast(Literal["pass", "fail"], result.grade.verdict),
+                        cast(
+                            Literal["completed", "budget_exhausted", "behavior_error"],
+                            result.solver.termination,
+                        ),
+                        source,
+                        refs[trial_id, "trace"],
+                        verified_artifact(
+                            directory, artifacts, "trace.json", 8 * MAX_ARTIFACT
+                        ),
+                        refs[trial_id, "solution_diff"],
+                        verified_artifact(
+                            directory, artifacts, "solution.diff", 8 * MAX_ARTIFACT
+                        ),
+                        None,
+                    )
+                )
+            ids = tuple(trial.trial_id for trial in trials)
+            path = output_dir / str(index)
+            package = export_trajectory_package(
+                VerifiedDevelopmentInputs(
+                    tuple(trials),
+                    source,
+                    source_files,
+                    ids,
+                    experiment_id,
+                    view.baseline_snapshot_id,
+                    TrialSelection(mode="explicit-three-repeat", trial_ids=ids),
+                    (self.root, harness),
+                ),
+                path,
+                ExportLimits(),
+            )
+            packages.append(PinnedPackage(path, package.bundle_digest))
+        return tuple(packages)
 
     async def build_development_view(
         self, experiment_id: UUID, baseline_snapshot_id: UUID, output_dir: Path

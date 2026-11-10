@@ -566,6 +566,7 @@ class ExperimentService:
         stop_after: Literal["mining", "search"] = "search",
     ) -> dict[str, object]:
         from crucible.improvement.evidence_views import DevelopmentViewBuilder
+        from crucible.improvement.measured_mining import MeasuredCaseMiner
         from crucible.improvement.promotion import PromotionService
         from crucible.improvement.roles import RoleRunner
         from crucible.improvement.search import LocalSearchExecution, SearchController
@@ -589,6 +590,12 @@ class ExperimentService:
                 owned,
                 DockerProbes(self.store, self.docker, record.manifest),
                 view_directory,
+                case_miner=MeasuredCaseMiner(
+                    self.store,
+                    self.root,
+                    views,
+                    LiteLLMResponsesGateway(disable_retries=True),
+                ),
             )
             outcome = await SearchController(self.store, execution).run(
                 id, stop_after=stop_after

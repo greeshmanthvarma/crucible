@@ -157,6 +157,8 @@ async def _read_response(gateway: ModelGateway, request: PreparedModelRequest) -
                 elif isinstance(item, CompleteToolCall):
                     raise CaseDiagnosisError("unexpected_tool_call")
                 elif isinstance(item, ModelError):
+                    if item.code == "improvement_budget_exhausted":
+                        raise CaseDiagnosisError("admission_denied")
                     raise CaseDiagnosisError("gateway_error")
                 elif isinstance(item, ModelStop):
                     if item.reason == ModelStopReason.COMPLETE:
@@ -220,9 +222,18 @@ async def run_case_diagnosis(
             )
             requests_sent += 1
             reserved += reservation
+            try:
+                text = await _read_response(gateway, request)
+            except CaseDiagnosisError as error:
+                if error.code == "admission_denied":
+                    requests_sent -= 1
+                    reserved -= reservation
+                    raise CaseDiagnosisError("budget_exceeded") from None
+                disclosed_refs = requested_refs
+                raise
             disclosed_refs = requested_refs
             response = parse_case_response(
-                await _read_response(gateway, request),
+                text,
                 visible_refs=visible_refs,
                 detail_refs=detail_refs,
             )
