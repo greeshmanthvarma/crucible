@@ -107,7 +107,10 @@ class WireRequest(Versioned):
 
 
 def encode_request(request: PreparedModelRequest) -> dict[str, JsonValue]:
+    if request.response_format is not None:
+        raise ValueError("Structured response formats require the host model gateway")
     payload = json.loads(canonical_json(request))
+    payload.pop("response_format")
     return WireRequest.model_validate(payload).model_dump(mode="json")
 
 
