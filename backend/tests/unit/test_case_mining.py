@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from uuid import UUID
 
+import litellm
 import pytest
 
 from crucible.improvement.case_evidence import CasePacketError
@@ -133,11 +134,13 @@ async def test_cli_requires_opt_in_and_returns_report_without_experiment_state(
 
     def factory(*, disable_retries):
         assert disable_retries
+        assert litellm.suppress_debug_info
         assert not gateway.requests
         constructions.append(True)
         return gateway
 
     monkeypatch.setattr(responses_gateway, "LiteLLMResponsesGateway", factory)
+    monkeypatch.setattr(litellm, "suppress_debug_info", False)
     package = packages[0]
     args = [
         "case-mine",

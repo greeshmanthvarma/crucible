@@ -303,11 +303,15 @@ async def _run_case_mining(args: argparse.Namespace) -> int:
     from collections.abc import AsyncIterator
     from contextlib import aclosing
 
+    import litellm
+
     from crucible.engine.gateway import ModelStreamItem, PreparedModelRequest
     from crucible.improvement.case_mining import PinnedPackage, mine_development_cases
     from crucible.models.responses_gateway import LiteLLMResponsesGateway
     from crucible.repair.identity import canonical_json
 
+    # LiteLLM can print provider help from background work after the report.
+    litellm.suppress_debug_info = True
     upstream = LiteLLMResponsesGateway(disable_retries=True)
 
     class TimedGateway:
