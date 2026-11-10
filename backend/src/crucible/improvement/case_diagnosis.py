@@ -26,7 +26,7 @@ from crucible.improvement.case_evidence import (
 from crucible.models.token_counting import estimate_input_tokens
 
 _MAX_RESPONSE_BYTES = 16 * 1024
-_MAX_RESERVED_TOKENS = 24_000
+CASE_TOKEN_CAP = 24_000
 
 
 class CaseDiagnosisError(ValueError):
@@ -181,13 +181,10 @@ async def run_case_diagnosis(
     *,
     gateway: ModelGateway,
     model: str,
-    total_token_cap: int = _MAX_RESERVED_TOKENS,
+    total_token_cap: int = CASE_TOKEN_CAP,
 ) -> CaseDiagnosisResult:
     """Send at most two pre-budgeted requests through the supplied gateway."""
-    if (
-        type(total_token_cap) is not int
-        or not 1 <= total_token_cap <= _MAX_RESERVED_TOKENS
-    ):
+    if type(total_token_cap) is not int or not 1 <= total_token_cap <= CASE_TOKEN_CAP:
         return CaseDiagnosisResult(None, "invalid_limit", 0, 0, ())
 
     visible_refs = frozenset(event.id for event in prepared.packet.events)

@@ -1,7 +1,7 @@
 """Normalize LiteLLM's Responses stream into Crucible's model protocol."""
 
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from typing import Any, cast
 
 from litellm import aresponses
@@ -34,7 +34,7 @@ class LiteLLMResponsesGateway:
 
     async def stream(
         self, request: PreparedModelRequest
-    ) -> AsyncIterator[ModelStreamItem]:
+    ) -> AsyncGenerator[ModelStreamItem, None]:
         try:
             response = await self._response(
                 model=request.model,

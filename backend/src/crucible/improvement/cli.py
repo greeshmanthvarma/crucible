@@ -39,6 +39,19 @@ def parser(*, require_state_root: bool = True) -> argparse.ArgumentParser:
     preview.add_argument("--bundle-digest", required=True)
     preview.add_argument("--trial", required=True)
     preview.add_argument("--detail", action="append", default=[])
+    case_mining = operations.add_parser(
+        "case-mine", help="diagnose pinned development attempts and group tool failures"
+    )
+    case_mining.add_argument(
+        "--package",
+        action="append",
+        nargs=2,
+        metavar=("PATH", "BUNDLE_DIGEST"),
+        required=True,
+    )
+    case_mining.add_argument("--model", required=True)
+    case_mining.add_argument("--batch-token-cap", type=int, required=True)
+    case_mining.add_argument("--authorize-paid-models", action="store_true")
     diagnostic = operations.add_parser("mining-diagnostic")
     controls = diagnostic.add_subparsers(dest="control", required=True)
     prepare = controls.add_parser("prepare")
@@ -112,16 +125,22 @@ async def run_cli(argv: Sequence[str] | None = None) -> int:
             root = arguments[index : index + 2]
             del arguments[index : index + 2]
             arguments = root + arguments
-    offline = "mining-diagnostic" in arguments or bool(
-        arguments and arguments[0] in ("evidence-export", "evidence-verify")
-    )
     operation_index = 2 if arguments[:1] == ["--state-root"] else 0
-    offline = offline or arguments[operation_index : operation_index + 1] == [
-        "evidence-preview"
-    ]
-    args = parser(require_state_root=not offline).parse_args(arguments)
+    operation = next(iter(arguments[operation_index : operation_index + 1]), "")
+    args = parser(
+        require_state_root=operation
+        not in {
+            "case-mine",
+            "evidence-export",
+            "evidence-preview",
+            "evidence-verify",
+            "mining-diagnostic",
+        }
+    ).parse_args(arguments)
     if args.operation == "evidence-preview":
         return _run_case_preview(args)
+    if args.operation == "case-mine":
+        return await _run_case_mining(args)
     if args.operation == "mining-diagnostic":
         return await _run_mining_command(args)
     if args.operation in ("evidence-export", "evidence-verify"):
@@ -273,6 +292,44 @@ def _run_case_preview(args: argparse.Namespace) -> int:
             }
         ).decode()
     )
+    return 0
+
+
+async def _run_case_mining(args: argparse.Namespace) -> int:
+    if not args.authorize_paid_models:
+        print("Case mining requires --authorize-paid-models.", file=sys.stderr)
+        return 2
+
+    from collections.abc import AsyncIterator
+    from contextlib import aclosing
+
+    from crucible.engine.gateway import ModelStreamItem, PreparedModelRequest
+    from crucible.improvement.case_mining import PinnedPackage, mine_development_cases
+    from crucible.models.responses_gateway import LiteLLMResponsesGateway
+    from crucible.repair.identity import canonical_json
+
+    upstream = LiteLLMResponsesGateway(disable_retries=True)
+
+    class TimedGateway:
+        async def stream(
+            self, request: PreparedModelRequest
+        ) -> AsyncIterator[ModelStreamItem]:
+            async with asyncio.timeout(90):
+                async with aclosing(upstream.stream(request)) as stream:
+                    async for item in stream:
+                        yield item
+
+    try:
+        report = await mine_development_cases(
+            tuple(PinnedPackage(Path(path), pin) for path, pin in args.package),
+            gateway=TimedGateway(),
+            model=args.model,
+            batch_token_cap=args.batch_token_cap,
+        )
+    except ValueError as error:
+        print(f"Case mining rejected ({error}).", file=sys.stderr)
+        return 2
+    print(canonical_json(report).decode())
     return 0
 
 

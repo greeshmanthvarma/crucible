@@ -554,6 +554,29 @@ the installed local tokenizer asset. Valid previews exit 0 and rejected inputs
 exit 2. Treat stdout as private development evidence and keep it local and
 untracked.
 
+Run standalone case mining on one or more verified development packages. It
+verifies every package before sending a request and diagnoses only the selected
+failed attempts. Pass the provider credentials in the environment and redirect
+stdout to a private report file.
+
+```sh
+umask 077
+crucible improve case-mine \
+  --package /absolute/export/trajectory-package TRUSTED_SHA256 \
+  --model PROVIDER/MODEL --batch-token-cap 24000 --authorize-paid-models \
+  > /absolute/private/case-mining-report.json
+```
+
+Repeat `--package PATH TRUSTED_SHA256` for up to ten packages. Each failed
+trial can occur once. The shared cap tracks conservative request reservations
+including schemas and output headroom. Each diagnosis can make one initial
+request and at most one follow-up. Failed dispatched requests retain their
+reservation. The report includes grouped, unresolved, failed, and skipped
+attempts, with distinct task counts and representative evidence per group.
+The command exits 0 when it produces a report, including reports with partial
+results, and 2 on rejected inputs or missing authorization. It does not open
+experiment state, run the proposer, or persist resumable checkpoints.
+
 The strict selection file is `{"mode":"explicit-three-repeat","trial_ids":[
 "TRIAL_UUID_0","TRIAL_UUID_1","TRIAL_UUID_2"]}`: three repeats of one development
 task, including a failure. Alternatively `{"mode":"failed-family-v1","trial_ids":[]}`

@@ -31,6 +31,7 @@ class CitedToolResult:
     tool: str | None
     status: str
     error_code: str | None
+    excerpt: str | None
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,9 @@ def _cited_attempt(packet: CasePacket, diagnosis: Diagnosis) -> DiagnosedAttempt
     if not cited_ids.issubset(event.id for event in packet.events):
         raise ValueError("Diagnosis cites invisible evidence")
     results = tuple(
-        CitedToolResult(event.id, event.tool, event.status, event.error_code)
+        CitedToolResult(
+            event.id, event.tool, event.status, event.error_code, event.excerpt
+        )
         for event in packet.events
         if event.kind == "tool_result" and event.id in cited_ids
     )

@@ -3,11 +3,12 @@
 import hashlib
 import json
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from itertools import groupby
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal, Mapping
+from typing import Iterator, Literal, Mapping
 from uuid import UUID
 
 from pydantic import TypeAdapter
@@ -555,22 +556,15 @@ def _assemble(
     return _fit_initial(packet, details, limit)
 
 
-def assemble_case_packet(
-    package_root: Path,
-    failed_trial_id: UUID,
-    *,
-    expected_bundle_digest: str,
-    initial_input_tokens: int = INITIAL_CAP,
-) -> PreparedCasePacket:
-    """Prepare an initial request from a pinned, verified development package."""
-    _check_limit(initial_input_tokens, INITIAL_CAP)
+@contextmanager
+def _verified_reader(
+    package_root: Path, expected_bundle_digest: str
+) -> Iterator[_PackageReader]:
     try:
         package = verify_trajectory_package(package_root)
         if package.bundle_digest != expected_bundle_digest:
             raise CasePacketError("package_mismatch")
-        return _assemble(
-            _PackageReader(package_root, package), failed_trial_id, initial_input_tokens
-        )
+        yield _PackageReader(package_root, package)
     except CasePacketError:
         raise
     except (
@@ -583,6 +577,31 @@ def assemble_case_packet(
         RecursionError,
     ):
         raise CasePacketError("artifact_drift") from None
+
+
+def assemble_case_packet(
+    package_root: Path,
+    failed_trial_id: UUID,
+    *,
+    expected_bundle_digest: str,
+    initial_input_tokens: int = INITIAL_CAP,
+) -> PreparedCasePacket:
+    """Prepare an initial request from a pinned, verified development package."""
+    _check_limit(initial_input_tokens, INITIAL_CAP)
+    with _verified_reader(package_root, expected_bundle_digest) as reader:
+        return _assemble(reader, failed_trial_id, initial_input_tokens)
+
+
+def assemble_failed_case_packets(
+    package_root: Path, *, expected_bundle_digest: str
+) -> tuple[PreparedCasePacket, ...]:
+    """Verify the package once and prepare only its selected failed attempts."""
+    with _verified_reader(package_root, expected_bundle_digest) as reader:
+        return tuple(
+            _assemble(reader, trial_id, INITIAL_CAP)
+            for trial_id in reader.package.selected_trial_ids
+            if reader.overview(trial_id).verdict == "fail"
+        )
 
 
 def expand_case_packet(
