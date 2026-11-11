@@ -247,6 +247,7 @@
         "schema_version": 1
       }
     ],
-    "max_output_tokens": 1024
+    "max_output_tokens": 1024,
+    "response_format": null
   }
 ]

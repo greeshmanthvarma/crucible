@@ -57,6 +57,7 @@
         }
       ],
       "model": "fake",
+      "response_format": null,
       "tools": [
         {
           "description": "List stable workspace-relative file paths.",
@@ -337,6 +338,7 @@
         }
       ],
       "model": "fake",
+      "response_format": null,
       "tools": [
         {
           "description": "List stable workspace-relative file paths.",
@@ -647,6 +649,7 @@
         }
       ],
       "model": "fake",
+      "response_format": null,
       "tools": [
         {
           "description": "List stable workspace-relative file paths.",
