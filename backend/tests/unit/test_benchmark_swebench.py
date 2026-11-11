@@ -117,6 +117,7 @@ async def test_driver_process_reports(
 from pathlib import Path
 root = Path(sys.argv[1]); mode = sys.argv[2]
 r = json.loads((root / 'request.json').read_text())
+(root / 'eval.sh').write_text('true')
 if mode in ('timeout', 'cancel'): time.sleep(5)
 if mode == 'output': print('x' * 100000)
 if mode == 'missing': sys.exit(0)
@@ -153,6 +154,7 @@ envelope = dict(schema_version=1, evaluation_id=r['evaluation_id'],
         if mode == "launch_failure":
             raise OSError("interpreter unavailable")
         assert not any("KEY" in name or "TOKEN" in name for name in kwargs["env"])
+        kwargs.setdefault("umask", 0o077)
         spawned.set()
         return await real_spawn(
             sys.executable, str(fake), str(tmp_path / "grade"), mode, **kwargs
@@ -178,6 +180,9 @@ envelope = dict(schema_version=1, evaluation_id=r['evaluation_id'],
         case_fixture, patch, uuid4(), tmp_path / "grade"
     )
     assert result.verdict == expected
+    if mode == "pass":
+        assert (tmp_path / "grade/eval.sh").stat().st_mode & 0o777 == 0o644
+        assert (tmp_path / "grade").stat().st_mode & 0o777 == 0o700
     if mode == "timeout":
         assert result.code == "grading_timeout"
     if mode == "output":

@@ -203,6 +203,8 @@ class SwebenchGrader:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
+                # SWE-bench preserves eval.sh's host mode when copying it to Docker.
+                umask=0o022,
             )
         )
         try:
