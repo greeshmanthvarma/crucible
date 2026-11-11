@@ -36,7 +36,7 @@ def _open_contained(root: Path, path: Path) -> int:
 
 
 def _snippet(
-    root: Path, path: Path, offset: int, matched: bytes
+    root: Path, path: Path, offset: int, matched: bytes, *, snippet_bytes: int
 ) -> tuple[str, int, int, bool]:
     descriptor = _open_contained(root, path)
     try:
@@ -47,8 +47,8 @@ def _snippet(
             raise SearchFailure(
                 "search_changed", "File changed during search; search again"
             )
-        start = max(0, offset - 80)
-        raw = os.pread(descriptor, 512, start)
+        start = max(0, offset - min(80, snippet_bytes // 5))
+        raw = os.pread(descriptor, snippet_bytes, start)
         text = raw.decode("utf-8", errors="ignore")
         # Only trim partial characters at window edges, never silently alter bytes.
         encoded = text.encode()
@@ -115,10 +115,16 @@ async def search_workspace(
     *,
     max_matches: int,
     max_bytes: int,
+    snippet_bytes: int = 512,
     timeout_seconds: float = 10,
     max_scan_bytes: int = 4_194_304,
 ) -> ToolOutcome:
-    if max_matches < 1 or max_bytes < 128 or max_scan_bytes < 1:
+    if (
+        max_matches < 1
+        or max_bytes < 128
+        or not 4 <= snippet_bytes <= 512
+        or max_scan_bytes < 1
+    ):
         raise ValueError("Search limits must allow a bounded response")
     resolver = WorkspacePathResolver(workspace)
     target = resolver.resolve(arguments.path)
@@ -195,7 +201,11 @@ async def search_workspace(
                     break
                 contained = resolver.resolve(relative)
                 text, start, end, snippet_truncated = _snippet(
-                    resolver.root, contained, offset, matched
+                    resolver.root,
+                    contained,
+                    offset,
+                    matched,
+                    snippet_bytes=snippet_bytes,
                 )
                 location: dict[str, object] = dict(
                     path=relative,

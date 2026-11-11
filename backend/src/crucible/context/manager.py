@@ -38,6 +38,7 @@ from crucible.engine.gateway import (
     PreparedModelRequest,
 )
 from crucible.engine.journal import EventSpec, JournalMutation, RunJournal
+from crucible.models.token_counting import estimate_input_tokens
 from crucible.repair.evidence import EvidenceRecorder
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,11 @@ class ContextManager:
         evidence: EvidenceRecorder | None = None,
         replay_instructions: tuple[str, ...] | None = None,
         replay_repair_context: tuple[ModelMessage, ...] | None = None,
+        project_tool_results: Callable[
+            [tuple[ModelMessage, ...], BehaviorObservation, int, int, TokenEstimator],
+            tuple[ModelMessage, ...],
+        ]
+        | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._clock = clock
@@ -121,9 +127,16 @@ class ContextManager:
         self._evidence = evidence
         self._replay_instructions = replay_instructions
         self._replay_repair_context = replay_repair_context
+        self._project_tool_results = project_tool_results
 
     async def prepare(
-        self, run: Run, step: Step, *, observation: BehaviorObservation | None = None
+        self,
+        run: Run,
+        step: Step,
+        *,
+        observation: BehaviorObservation | None = None,
+        transform_request: Callable[[PreparedModelRequest], PreparedModelRequest]
+        | None = None,
     ) -> PreparedContext:
         async with self._unit_of_work() as uow:
             task = await uow.tasks.get(run.task_id)
@@ -304,6 +317,46 @@ class ContextManager:
             ),
         )
         estimate, capacity = check.estimated_tokens, check.capacity
+        if self._project_tool_results is not None and observation is not None:
+            # This protected projection runs after source and pairing validation.
+            # The stored conversation and compaction source remain intact.
+            projected = self._project_tool_results(
+                model_messages,
+                observation,
+                estimate,
+                self._max_output_tokens,
+                self._estimator,
+            )
+            if projected != model_messages:
+                projected_estimate = self._estimator.estimate(projected)
+                if projected_estimate < estimate:
+                    model_messages, estimate = projected, projected_estimate
+        if transform_request is not None:
+            request = transform_request(
+                PreparedModelRequest(
+                    run.id,
+                    step.id,
+                    self._model,
+                    model_messages,
+                    self._tools,
+                    self._max_output_tokens,
+                )
+            )
+            estimate = estimate_input_tokens(request.messages, request.tools)
+            if estimate + request.max_output_tokens > self._input_limit:
+                raise ContextLimitExceeded(
+                    "Prepared role request exceeds model capacity"
+                )
+            return await self._persist_prepared(
+                run,
+                step,
+                request.messages,
+                messages,
+                instruction_digests,
+                estimate,
+                latest_compaction,
+                request=request,
+            )
         if estimate > capacity:
             result_to_call = {
                 result.id: result.tool_call_id for result in results.values()
@@ -400,8 +453,10 @@ class ContextManager:
         instruction_digests: dict[str, str],
         estimate: int,
         latest_compaction: Compaction | None,
+        *,
+        request: PreparedModelRequest | None = None,
     ) -> PreparedContext:
-        request = PreparedModelRequest(
+        request = request or PreparedModelRequest(
             run_id=run.id,
             step_id=step.id,
             model=self._model,
@@ -416,7 +471,7 @@ class ContextManager:
             step_id=step.id,
             model=self._model,
             parameters={
-                "max_output_tokens": self._max_output_tokens,
+                "max_output_tokens": request.max_output_tokens,
                 "estimator_version": getattr(self._estimator, "version", "custom"),
             },
             input_limit=self._input_limit,
@@ -426,7 +481,7 @@ class ContextManager:
             message_ids=[message.id for message in all_messages],
             part_ids=[part.id for message in all_messages for part in message.parts],
             instruction_digests=instruction_digests,
-            tool_schema_digest=_tool_digest(self._tools),
+            tool_schema_digest=_tool_digest(request.tools),
             created_at=self._clock.now(),
             compaction_id=latest_compaction.id if latest_compaction else None,
         )

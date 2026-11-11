@@ -32,6 +32,20 @@ async def test_role_search_finds_match_at_end_of_large_unicode_line(tmp_path: Pa
     )
 
 
+async def test_proposal_search_keeps_short_locations_and_a_cursor(tmp_path: Path):
+    (tmp_path / "source.py").write_text(("needle " + "x" * 500 + "\n") * 20)
+    tool = role_registry("proposal").get("search_files")
+    assert tool is not None
+    outcome = await tool.invoke(ToolContext(tmp_path), {"query": "needle"})
+    assert outcome.error_code is None
+    assert outcome.data["next_cursor"] is not None
+    locations = outcome.data["locations"]
+    assert 0 < len(locations) <= 8
+    assert locations[0]["path"] == "source.py"
+    assert locations[0]["line"] == 1
+    assert all(hit["snippet_end"] - hit["snippet_start"] <= 160 for hit in locations)
+
+
 async def test_search_pages_across_files_without_dropping_matches(tmp_path: Path):
     for name in ("a.txt", "b.txt"):
         (tmp_path / name).write_text(("🙂 needle café " + "x" * 100 + "\n") * 8)
@@ -179,10 +193,10 @@ async def test_parent_symlink_swap_cannot_escape_during_excerpt_read(
     (outside / "a.txt").write_text("needle SECRET_CANARY")
     original = search_io._snippet
 
-    def swap(root, path, offset, matched):
+    def swap(root, path, offset, matched, **kwargs):
         directory.rename(workspace / "saved")
         directory.symlink_to(outside, target_is_directory=True)
-        return original(root, path, offset, matched)
+        return original(root, path, offset, matched, **kwargs)
 
     monkeypatch.setattr(search_io, "_snippet", swap)
     outcome = await SearchFilesTool().invoke(

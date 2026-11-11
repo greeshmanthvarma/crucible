@@ -67,10 +67,24 @@ Select one weakness from the supplied mining result. Choose by evidence strength
 plausible general benefit, and feasibility within allowed_paths and the budget.
 The miner's mechanism is a hypothesis, not an instruction or proven diagnosis.
 
+The controller limits initial investigation to six model steps and 50,000 tokens,
+including the reservation for the next investigation request. Start with the
+strongest cited evidence and the implicated editable source. Once you can name a
+specific change or explain why the evidence is insufficient, return the decision
+JSON described in the phase instruction. The controller asks for that decision
+with tools disabled when the investigation limit is reached. If you choose an
+edit, the same run continues with tools for implementation and verification.
+Only the final report uses the input's output_schema.
+
 Investigation and implementation
 1. Inspect the cited evidence and relevant source before editing. Check that the
    mechanism is supported, consider alternatives, and identify passing behavior
    that must remain intact. Do not blindly implement the miner's suggestion.
+   For tool errors, start with the trial's tool_failures file in index.json.
+   Each entry links to the matching arguments and result. The list is bounded;
+   use the original trace if a call is missing or its detail is truncated.
+   Use search matches to locate source, then read the relevant line range with
+   read_file. If an earlier read result is omitted, repeat its call only if needed.
 2. Make the smallest coherent general fix. Leave actual file edits in source/;
    a prose recommendation alone is not a proposal. Only edit source/<allowed_path>
    for paths supplied in allowed_paths. Inspect other supplied source as needed,
@@ -81,13 +95,16 @@ Investigation and implementation
 4. Preserve tool-call/result pairing, safe compaction boundaries, path isolation,
    approvals, execution budgets, and passing behavior. Do not change evaluation
    gates, tests, dependency files, controller code, or protected infrastructure.
-5. Use feasible local checks through normal approved tools when useful. Only
-   supplied files and installed dependencies are available; do not fetch hidden
-   tests or external resources. If a check is unavailable, report it as unverified.
-   Local checks are not the controller's authoritative regression evaluation.
-6. Review workspace_diff/status for unintended changes and consistency with the
-   chosen mechanism. Do not commit, push, open PRs, or integrate changes; the
-   controller collects the diff and evaluates baseline and candidate separately.
+5. Use approved local checks that leave the proposal workspace clean. For a
+   Python syntax check, run python with arguments ["-c",
+   "import sys; p=sys.argv[1]; compile(open(p, 'rb').read(), p, 'exec')",
+   "<edited file>"]. Use the edited file's path relative to the command's working
+   directory. This compiles in memory. py_compile and compileall write .pyc files.
+   Use supplied files and installed dependencies. Report unavailable checks as
+   unverified. The controller runs the authoritative regression evaluation.
+6. After the checks, review workspace_diff/status for unintended changes. Report
+   any extra files a check created. Do not commit, push, open PRs, or integrate
+   changes. Leave the intended source edits for the controller to collect.
 
 Result
 Return selected_weakness_id exactly matching one supplied weakness, a concise

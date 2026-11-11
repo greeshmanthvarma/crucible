@@ -1,5 +1,7 @@
 """Role schemas refuse references that could name arbitrary private files."""
 
+import json
+
 import pytest
 
 from crucible.improvement.roles import EvidenceRef
@@ -16,7 +18,6 @@ def test_arbitrary_path_ref_rejected():
 @pytest.fixture
 async def evidence_setup(tmp_path, request):
     import hashlib
-    import json
     from uuid import uuid4
 
     from crucible.benchmarks.contracts import (
@@ -273,17 +274,31 @@ def test_prior_feedback_excludes_hidden_case_counts_and_ids():
                     "assistant_message_id": "message-1",
                     "name": "read_file",
                     "arguments": {"path": "example.py"},
-                }
+                },
+                {
+                    "id": "call-2",
+                    "name": "apply_patch",
+                    "arguments": {"patch": "bad patch\ntool-secret-canary"},
+                },
             ],
             "tool_results": [
                 {
                     "tool_call_id": "call-1",
+                    "status": "succeeded",
                     "result": {
                         "ok": True,
                         "secret": "tool-secret-canary",
                         "text": "x" * 1_100_000,
                     },
-                }
+                },
+                {
+                    "id": "result-2",
+                    "tool_call_id": "call-2",
+                    "status": "failed",
+                    "error_code": "tool_exception",
+                    "display_text": "Malformed patch hunk",
+                    "result": {"ok": False},
+                },
             ],
         }
     ],
@@ -309,6 +324,25 @@ async def test_structured_trace_retrieval_is_sanitized_and_bounded(
     assert b'"ok": true' in raw
     assert b"tool-secret-canary" not in raw
     assert b"[TRUNCATED:" in raw
+    # The trace was truncated before the failed result. The index still links it
+    # to the right arguments and preserves the sanitized result.
+    assert b'"id": "result-2"' not in raw
+    export = builder.export_root(view)
+    trial = next(
+        trial
+        for trial in json.loads((export / "index.json").read_bytes())["trials"]
+        if trial["trial_id"] == str(ref.trial_id)
+    )
+    (failure,) = [
+        json.loads(line)
+        for line in (export / trial["tool_failures"]).read_text().splitlines()
+    ]
+    assert failure["tool"] == "apply_patch"
+    assert failure["message"] == "Malformed patch hunk"
+    detail = json.loads((export / failure["file"]).read_bytes())
+    assert detail["tool_call_id"] == detail["result"]["tool_call_id"] == "call-2"
+    assert detail["arguments"] == {"patch": "bad patch\n[REDACTED]"}
+    assert detail["result"]["result"] == {"ok": False}
 
 
 async def test_archive_loading_does_not_widen_active_view_lifecycle(

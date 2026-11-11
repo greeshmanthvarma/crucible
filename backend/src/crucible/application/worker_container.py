@@ -17,6 +17,10 @@ from crucible.engine.compaction_gateway import ModelCompactionGateway
 from crucible.engine.gateway import ModelGateway
 from crucible.engine.journal import RunJournal
 from crucible.engine.run_engine import RunEngine
+from crucible.improvement.proposal_context import (
+    ProposalStepPolicy,
+    prune_proposal_tool_results,
+)
 from crucible.improvement.worker_commands import (
     WorkerAuthority,
     WorkerCommands,
@@ -89,6 +93,7 @@ def create_worker_engine(
         )
     else:
         registry = default_registry(cast(Tool, command))
+    is_proposer = isinstance(job, RoleJob) and job.job_kind == "proposal"
     context = ContextManager(
         uow,
         clock,
@@ -100,6 +105,7 @@ def create_worker_engine(
         output_reserve=job.model.output_reserve,
         tools=registry.definitions,
         journal=journal,
+        project_tool_results=prune_proposal_tool_results if is_proposer else None,
         compaction_lifecycle=CompactionLifecycle(
             uow,
             artifacts,
@@ -113,6 +119,7 @@ def create_worker_engine(
         and not 0 < reduced_model_budget <= job.limits.max_model_tokens
     ):
         raise ValueError("deterministic probe may only reduce model budget")
+    model_budget = reduced_model_budget or job.limits.max_model_tokens
     engine = RunEngine(
         uow,
         clock,
@@ -122,7 +129,12 @@ def create_worker_engine(
         dispatcher=ToolDispatcher(registry, uow, clock, journal=journal),
         max_steps=job.limits.max_steps,
         max_tool_calls=job.limits.max_tool_calls,
-        max_model_tokens=reduced_model_budget or job.limits.max_model_tokens,
+        max_model_tokens=model_budget,
         max_active_seconds=job.limits.max_active_seconds,
+        step_policy_factory=(
+            (lambda: ProposalStepPolicy(model_budget, job.model.input_limit))
+            if is_proposer
+            else None
+        ),
     )
     return engine, uow

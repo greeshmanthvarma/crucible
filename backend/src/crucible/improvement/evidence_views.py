@@ -1,11 +1,16 @@
 """Controller-owned, positive exports of completed development evidence only."""
 
 import hashlib
+import json
+from collections import Counter
+from collections.abc import Iterator
+from itertools import islice
 from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from crucible.benchmarks.evidence import sanitize
+from crucible.domain.tools import ToolResultStatus
 from crucible.improvement.case_mining import MAX_PACKAGES, PinnedPackage
 from crucible.improvement.contracts import SourceIdentity
 from crucible.improvement.roles import DevelopmentView, EvidenceRef, role_feedback
@@ -32,6 +37,9 @@ from crucible.repair.identity import canonical_json
 MAX_ARTIFACT = 1_048_576
 MAX_VIEW = 16 * MAX_ARTIFACT
 MARKER = b"\n[TRUNCATED: original digest retained in evidence reference]\n"
+MAX_FAILURE_DETAILS = 16
+MAX_FAILURE_DETAIL_BYTES = 8_192
+MAX_FAILURE_VIEW_BYTES = 512 * 1024
 
 
 def _bounded(raw: bytes, maximum: int = MAX_ARTIFACT) -> bytes:
@@ -39,6 +47,106 @@ def _bounded(raw: bytes, maximum: int = MAX_ARTIFACT) -> bytes:
         return raw
     prefix = raw[: maximum - len(MARKER)].decode("utf-8", errors="ignore").encode()
     return prefix + MARKER
+
+
+def _failed_tool_calls(
+    trace: str,
+) -> Iterator[tuple[dict[str, object], dict[str, object]]]:
+    """Link structured results to calls within one sanitized solver trace."""
+    try:
+        data = json.loads(trace)
+    except (ValueError, RecursionError):
+        return
+    if isinstance(data, dict) and data.get("trust") == "untrusted-worker-observation":
+        data = data.get("data")
+    if not isinstance(data, dict) or data.get("schema_version") != 2:
+        return
+    calls, results = data.get("tool_calls"), data.get("tool_results")
+    if not isinstance(calls, list) or not isinstance(results, list):
+        return
+    call_counts = Counter(
+        call["id"]
+        for call in calls
+        if isinstance(call, dict) and isinstance(call.get("id"), str)
+    )
+    result_counts = Counter(
+        result["tool_call_id"]
+        for result in results
+        if isinstance(result, dict) and isinstance(result.get("tool_call_id"), str)
+    )
+    by_call = {
+        result["tool_call_id"]: result
+        for result in results
+        if isinstance(result, dict) and isinstance(result.get("tool_call_id"), str)
+    }
+    failure_statuses = set(ToolResultStatus) - {ToolResultStatus.SUCCEEDED}
+    for call in calls:
+        if not isinstance(call, dict) or not isinstance(call.get("id"), str):
+            continue
+        call_id = call["id"]
+        if call_counts[call_id] != 1 or result_counts[call_id] != 1:
+            continue
+        result = by_call[call_id]
+        if (
+            isinstance(call.get("name"), str)
+            and isinstance(call.get("arguments"), dict)
+            and isinstance(result.get("status"), str)
+            and result["status"] in failure_statuses
+        ):
+            yield call, result
+
+
+def _failure_detail(value: object) -> object:
+    raw = canonical_json(value)
+    limit = MAX_FAILURE_DETAIL_BYTES // 2 - 256
+    if len(raw) <= limit:
+        return value
+    # Keep the detail document valid JSON and preserve both sides of the exchange.
+    return {
+        "truncated": True,
+        "json_prefix": raw[: limit // 2].decode("utf-8", errors="ignore"),
+    }
+
+
+def tool_failure_files(trace: str, trial_id: UUID, byte_limit: int) -> dict[str, bytes]:
+    """Build a small summary and linked detail files from a sanitized trace."""
+    files: dict[str, bytes] = {}
+    summary = bytearray()
+    total = 0
+    base = f"evidence/{trial_id}"
+    for ordinal, (call, failure) in enumerate(
+        islice(_failed_tool_calls(trace), MAX_FAILURE_DETAILS), start=1
+    ):
+        path = f"{base}/failure-{ordinal}.json"
+        detail = canonical_json(
+            {
+                "tool_call_id": call["id"],
+                "tool_name": call["name"],
+                "arguments": _failure_detail(call["arguments"]),
+                "result": _failure_detail(failure),
+            }
+        )
+        row = (
+            canonical_json(
+                {
+                    "tool": str(call["name"])[:80],
+                    "error": str(failure.get("error_code") or "")[:80],
+                    "message": str(failure.get("display_text") or "")[:160],
+                    "file": path,
+                }
+            )
+            + b"\n"
+        )
+        if len(detail) > MAX_FAILURE_DETAIL_BYTES:
+            continue
+        total += len(detail) + len(row)
+        if total > byte_limit:
+            break
+        files[path] = detail
+        summary.extend(row)
+    if summary:
+        files[f"{base}/tool-failures.jsonl"] = bytes(summary)
+    return files
 
 
 class DevelopmentViewBuilder:
@@ -254,8 +362,14 @@ class DevelopmentViewBuilder:
                     "source/" + source.relative_to(harness).as_posix(),
                     _bounded(read_regular_artifact(source, 2 * MAX_ARTIFACT)),
                 )
-        index = []
-        for (case_id, repeat), trial in sorted(selected.items()):
+        index: dict[tuple[str, int], dict[str, object]] = {}
+        linked_failures: dict[tuple[str, int], dict[str, bytes]] = {}
+        detail_bytes = 0
+        # Spend the bounded failure index on failed trials first.
+        for (case_id, repeat), trial in sorted(
+            selected.items(),
+            key=lambda item: (item[1]["grade_verdict"] != "fail", item[0]),
+        ):
             result, artifact_hashes, directory = verified_trial_result(
                 self.root, trial, development[case_id], snapshot, run.manifest
             )
@@ -266,6 +380,7 @@ class DevelopmentViewBuilder:
                 and result.patch is not None
             )
             trial_refs = []
+            failure_files: dict[str, bytes] = {}
             artifacts: tuple[tuple[Literal["trace", "solution_diff"], str], ...] = (
                 ("trace", "trace.json"),
                 ("solution_diff", "solution.diff"),
@@ -303,19 +418,27 @@ class DevelopmentViewBuilder:
                         "truncated": len(cleaned.encode()) > MAX_ARTIFACT,
                     }
                 )
+                if artifact == "trace" and detail_bytes < MAX_FAILURE_VIEW_BYTES:
+                    failure_files = tool_failure_files(
+                        cleaned,
+                        identity.trial_id,
+                        MAX_FAILURE_VIEW_BYTES - detail_bytes,
+                    )
+                    detail_bytes += sum(map(len, failure_files.values()))
             # Official feedback may contain protected tests and private paths.
             # Export only the independent verdict.
-            index.append(
-                {
-                    "case_id": case_id,
-                    "repeat_index": repeat,
-                    "trial_id": identity.trial_id,
-                    "termination": result.solver.termination,
-                    "verdict": result.grade.verdict,
-                    "grade_feedback": "unavailable: protected grader details excluded",
-                    "evidence": trial_refs,
-                }
-            )
+            key = (case_id, repeat)
+            index[key] = {
+                "case_id": case_id,
+                "repeat_index": repeat,
+                "trial_id": identity.trial_id,
+                "termination": result.solver.termination,
+                "verdict": result.grade.verdict,
+                "grade_feedback": "unavailable: protected grader details excluded",
+                "evidence": trial_refs,
+            }
+            if failure_files:
+                linked_failures[key] = failure_files
         prior = canonical_json(
             [
                 role_feedback(decision)
@@ -323,9 +446,18 @@ class DevelopmentViewBuilder:
             ]
         )
         write("prior-decisions.json", prior)
+        # Leave room for the required index even when the raw evidence fills the view.
+        for key, failures in linked_failures.items():
+            entry = index[key]
+            summary_path = f"evidence/{entry['trial_id']}/tool-failures.jsonl"
+            if total + sum(map(len, failures.values())) > MAX_VIEW - MAX_ARTIFACT:
+                continue
+            for path, content in failures.items():
+                write(path, content)
+            entry["tool_failures"] = summary_path
         encoded = canonical_json(
             {
-                "trials": index,
+                "trials": [index[key] for key in sorted(index)],
                 "source": "source/",
                 "prior_decisions": "prior-decisions.json",
             }

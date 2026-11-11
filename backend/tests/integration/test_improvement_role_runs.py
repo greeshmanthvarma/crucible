@@ -1,5 +1,7 @@
 """Scripted outputs test role retry policy, not measured isolation or quality."""
 
+from pathlib import Path
+
 import pytest
 
 from crucible.improvement.roles import parse_mining_output
@@ -121,7 +123,10 @@ async def test_role_uses_ordinary_engine_with_read_only_registry(
         async def stream(self, request):
             requests.append(request)
             yield TextDelta(
-                '{"schema_version":1,"disposition":"no_actionable_weakness",'
+                '{"decision":"decline","selected_weakness_id":"weakness-1",'
+                '"reason":"No action","paths":[]}'
+                if kind == "proposal"
+                else '{"schema_version":1,"disposition":"no_actionable_weakness",'
                 '"weaknesses":[],"summary":"No action"}'
             )
             yield ModelUsage(10, 10)
@@ -163,7 +168,230 @@ async def test_role_uses_ordinary_engine_with_read_only_registry(
         "read_file_chunk",
         "search_files",
     } <= tool_names
-    assert ("write_file" in tool_names) == (kind == "proposal")
+    assert "write_file" not in tool_names
+
+
+@pytest.mark.parametrize("token_budget", [100_000, 60_000])
+async def test_proposal_prunes_old_reads_before_dispatch_and_preserves_history(
+    database, tmp_path, token_budget
+):
+    from uuid import uuid4
+
+    from crucible.application.worker_container import create_worker_engine
+    from crucible.domain.conversation import MessageRole
+    from crucible.domain.run import RunStatus
+    from crucible.engine.gateway import (
+        CompleteToolCall,
+        ModelStop,
+        ModelStopReason,
+        ModelUsage,
+        TextDelta,
+    )
+    from crucible.improvement.worker import seed_task
+    from crucible.models.token_counting import estimate_input_tokens
+    from tests.contract.test_improvement_roles import role_job
+
+    job = role_job("proposal")
+    job = job.model_copy(
+        update={
+            "model": job.model.model_copy(
+                update={"input_limit": 50_000, "output_reserve": 256}
+            ),
+            "limits": job.limits.model_copy(
+                update={
+                    "max_steps": 8,
+                    "max_tool_calls": 8,
+                    "max_model_tokens": token_budget,
+                }
+            ),
+        }
+    )
+    job_path = tmp_path / "request.json"
+    job_path.write_text(job.model_dump_json())
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    reads = [f"{marker}\n" + " a b c d e f g" * 500 for marker in ("old", "mid", "new")]
+    for index, content in enumerate(reads):
+        (workspace / f"{index}.txt").write_text(content)
+    calls = [uuid4() for _ in reads]
+    requests = []
+
+    class Gateway:
+        async def stream(self, request):
+            step = len(requests)
+            requests.append(request)
+            if step < len(calls):
+                yield CompleteToolCall(
+                    calls[step], "read_file", {"path": f"{step}.txt"}
+                )
+                yield ModelUsage(4000, 0)
+                yield ModelStop(ModelStopReason.TOOL_CALLS)
+            else:
+                yield TextDelta(
+                    '{"decision":"decline","selected_weakness_id":"weakness-1",'
+                    '"reason":"No action","paths":[]}'
+                )
+                yield ModelUsage(100, 10)
+                yield ModelStop(ModelStopReason.COMPLETE)
+
+    engine, uow = create_worker_engine(
+        database, job, Gateway(), "test-only", state_root=tmp_path, job_path=job_path
+    )
+    run_id = await seed_task(
+        job.job_id,
+        "Keep this mining brief.",
+        job.harness_digest,
+        job.command_image,
+        uow,
+        workspace=workspace,
+    )
+    assert await engine.execute(run_id)
+    async with uow() as unit:
+        run = await unit.runs.get(run_id)
+        assert run.status == RunStatus.COMPLETED
+        messages = await unit.messages.list_for_task(run.task_id)
+    assert [
+        m.parts[0].text_content for m in messages if m.role is MessageRole.TOOL
+    ] == reads
+    assert len(requests) == 4
+    request = requests[-1]
+    parts = [part for message in request.messages for part in message.parts]
+    assert any(part.text_content == "Keep this mining brief." for part in parts)
+    assert [p.tool_call_id for p in parts if p.kind == "tool_call"] == calls
+    results = [p for p in parts if p.kind == "tool_result"]
+    assert [p.tool_call_id for p in results] == calls
+    if token_budget == 100_000:
+        assert [p.text_content for p in results] == reads
+    else:
+        assert "Repeat the original call" in results[0].text_content
+        assert [p.text_content for p in results[1:]] == reads[1:]
+    assert (
+        estimate_input_tokens(request.messages, request.tools)
+        + request.max_output_tokens
+        <= token_budget - 3 * 4000
+    )
+
+
+@pytest.mark.parametrize("trigger", ["steps", "tokens"])
+async def test_proposer_reserves_tool_free_decision_and_report(
+    database, tmp_path, trigger
+):
+    import json
+    from uuid import uuid4
+
+    from crucible.application.worker_container import create_worker_engine
+    from crucible.domain.conversation import MessageRole
+    from crucible.domain.run import RunStatus
+    from crucible.engine.gateway import (
+        CompleteToolCall,
+        ModelStop,
+        ModelStopReason,
+        ModelUsage,
+        TextDelta,
+    )
+    from crucible.improvement.contracts import EDITABLE_PATHS
+    from crucible.improvement.worker import seed_task
+    from tests.contract.test_improvement_roles import role_job
+
+    job = role_job("proposal")
+    job = job.model_copy(
+        update={
+            "model": job.model.model_copy(
+                update={"input_limit": 100_000, "output_reserve": 4096}
+            ),
+            "limits": job.limits.model_copy(
+                update={
+                    "max_steps": 9,
+                    "max_tool_calls": 20,
+                    "max_model_tokens": 150_000,
+                }
+            ),
+        }
+    )
+    job_path = tmp_path / "request.json"
+    job_path.write_text(job.model_dump_json())
+    path = EDITABLE_PATHS[0]
+    target = tmp_path / "source" / path
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n")
+    requests = []
+    investigation_steps = 6 if trigger == "steps" else 1
+    decision = {
+        "decision": "edit",
+        "selected_weakness_id": "weakness-1",
+        "reason": "Adjust the implicated tool",
+        "paths": [path],
+    }
+    report = {
+        "schema_version": 1,
+        "selected_weakness_id": "weakness-1",
+        "summary": "Updated the tool",
+        "claimed_paths": [path],
+        "risks": [],
+    }
+
+    class Gateway:
+        async def stream(self, request):
+            index = len(requests)
+            requests.append(request)
+            if index < investigation_steps:
+                assert "write_file" not in {tool.name for tool in request.tools}
+                yield CompleteToolCall(uuid4(), "read_file", {"path": f"source/{path}"})
+                yield ModelUsage(100 if trigger == "steps" else 44_000, 0)
+                yield ModelStop(ModelStopReason.TOOL_CALLS)
+            elif index == investigation_steps:
+                assert not request.tools
+                yield TextDelta(json.dumps(decision))
+                yield ModelUsage(1000, 0)
+                yield ModelStop(ModelStopReason.COMPLETE)
+            elif index == investigation_steps + 1:
+                assert "write_file" in {tool.name for tool in request.tools}
+                assert any(
+                    '"decision":"edit"' in (part.text_content or "")
+                    for message in request.messages
+                    for part in message.parts
+                )
+                yield CompleteToolCall(
+                    uuid4(),
+                    "write_file",
+                    {
+                        "path": f"source/{path}",
+                        "content": "after\n",
+                    },
+                )
+                yield ModelUsage(100 if trigger == "steps" else 80_000, 0)
+                yield ModelStop(ModelStopReason.TOOL_CALLS)
+            else:
+                assert not request.tools
+                yield TextDelta(json.dumps(report))
+                yield ModelUsage(1000, 0)
+                yield ModelStop(ModelStopReason.COMPLETE)
+
+    engine, uow = create_worker_engine(
+        database,
+        job,
+        Gateway(),
+        "test-only",
+        state_root=tmp_path / "state",
+        job_path=job_path,
+    )
+    run_id = await seed_task(
+        job.job_id,
+        "Inspect the implicated tool.",
+        job.harness_digest,
+        job.command_image,
+        uow,
+        workspace=tmp_path,
+    )
+    assert await engine.execute(run_id)
+    async with uow() as unit:
+        run = await unit.runs.get(run_id)
+        assert run.status == RunStatus.COMPLETED, run.outcome_code
+        messages = await unit.messages.list_for_task(run.task_id)
+    assert len(requests) == investigation_steps + 3
+    assert target.read_text() == "after\n"
+    assert messages[-1].role == MessageRole.ASSISTANT
+    assert json.loads(messages[-1].parts[0].text_content) == report
 
 
 async def test_partial_proposal_transfer_is_owned_but_user_edit_is_not(tmp_path):
@@ -219,10 +447,10 @@ async def test_partial_proposal_transfer_is_owned_but_user_edit_is_not(tmp_path)
     assert target.read_text() == "before"
 
 
-@pytest.mark.parametrize("after_replace", [False, True])
-async def test_interrupted_proposal_file_replacement_is_recoverable(
-    tmp_path, monkeypatch, after_replace
-):
+@pytest.mark.parametrize(
+    "scenario", ["clean", "cache", "before_replace", "after_replace"]
+)
+async def test_proposal_transfer_scope_and_recovery(tmp_path, monkeypatch, scenario):
     import hashlib
     import json
     import os
@@ -231,7 +459,7 @@ async def test_interrupted_proposal_file_replacement_is_recoverable(
     from crucible.improvement.contracts import EDITABLE_PATHS
     from crucible.improvement.evidence_views import DevelopmentViewBuilder
     from crucible.improvement.roles import RoleExecution, RoleRunner
-    from crucible.improvement.source import inspect_source, stage_harness
+    from crucible.improvement.source import ScopeRejected, inspect_source, stage_harness
     from crucible.improvement.store import ExperimentStore
     from crucible.improvement.worktree import ExperimentWorktree
     from tests.unit.test_improvement_search_store import search_manifest
@@ -295,7 +523,28 @@ async def test_interrupted_proposal_file_replacement_is_recoverable(
         )
         await store.save_role(execution, 0, (await store.get(run.id)).revision)
         target = owned.path / EDITABLE_PATHS[0]
+        runner = RoleRunner(store, root, None, DevelopmentViewBuilder(store, root))
+        if scenario == "clean":
+            compile(proposed.read_bytes(), str(proposed), "exec")
+            candidate = await runner.collect_proposal(execution, owned)
+            assert candidate.kind == "candidate"
+            assert target.read_text() == "after"
+            assert (await owned.inspect()).changed_paths == (EDITABLE_PATHS[0],)
+            return
+        if scenario == "cache":
+            from py_compile import compile as compile_to_file
+
+            cache = Path(compile_to_file(str(proposed), doraise=True))
+            with pytest.raises(
+                ScopeRejected, match="protected proposal changes"
+            ) as error:
+                await runner.collect_proposal(execution, owned)
+            assert error.value.paths == (cache.relative_to(workspace).as_posix(),)
+            assert target.read_text() == "before"
+            return
+
         replace = os.replace
+        after_replace = scenario == "after_replace"
 
         def interrupt(source, destination):
             if destination == target:
@@ -305,7 +554,6 @@ async def test_interrupted_proposal_file_replacement_is_recoverable(
             return replace(source, destination)
 
         monkeypatch.setattr(os, "replace", interrupt)
-        runner = RoleRunner(store, root, None, DevelopmentViewBuilder(store, root))
         with pytest.raises(RuntimeError, match="simulated crash"):
             await runner.collect_proposal(execution, owned)
         assert target.read_bytes() == (b"after" if after_replace else b"before")

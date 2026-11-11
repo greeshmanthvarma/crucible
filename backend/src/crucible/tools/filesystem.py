@@ -119,9 +119,16 @@ class SearchFilesTool:
     parallel_safe = True
     argument_model = SearchFilesArguments
 
-    def __init__(self, *, max_matches: int = 200, max_bytes: int = 100_000) -> None:
+    def __init__(
+        self,
+        *,
+        max_matches: int = 200,
+        max_bytes: int = 100_000,
+        snippet_bytes: int = 512,
+    ) -> None:
         self.max_matches = max_matches
         self.max_bytes = max_bytes
+        self.snippet_bytes = snippet_bytes
         self.definition = ModelToolDefinition(
             "search_files",
             behavior_contracts.DESCRIPTIONS["search_files"],
@@ -135,6 +142,7 @@ class SearchFilesTool:
             args,
             max_matches=self.max_matches,
             max_bytes=self.max_bytes,
+            snippet_bytes=self.snippet_bytes,
         )
 
 

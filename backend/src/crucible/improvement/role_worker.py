@@ -92,7 +92,9 @@ def role_registry(
         tuple[Tool, ...],
         (
             ListFilesTool(max_entries=200, max_bytes=ROLE_READ_BYTES),
-            SearchFilesTool(max_matches=40, max_bytes=ROLE_READ_BYTES),
+            SearchFilesTool(max_matches=8, max_bytes=3072, snippet_bytes=160)
+            if kind == "proposal"
+            else SearchFilesTool(max_matches=40, max_bytes=ROLE_READ_BYTES),
             ReadFileTool(max_bytes=ROLE_READ_BYTES),
             ReadFileChunkTool(),
         ),
@@ -112,11 +114,12 @@ def role_registry(
     )
 
 
-def role_input_prompt(raw: bytes) -> str:
+def role_input_prompt(raw: bytes, *, proposal: bool = False) -> str:
+    final_only = " for the final report" if proposal else ""
     return (
         "Perform the role specified by the system instructions using this "
         "controller input (also available in input.json). Return JSON matching "
-        "output_schema.\n" + raw.decode("utf-8")
+        f"output_schema{final_only}.\n" + raw.decode("utf-8")
     )
 
 
@@ -132,7 +135,7 @@ async def run_role_worker(
         raw = stream.read(1_048_577)
     if len(raw) > 1_048_576 or hashlib.sha256(raw).hexdigest() != job.input_digest:
         raise ValueError("role input identity drift")
-    prompt = role_input_prompt(raw)
+    prompt = role_input_prompt(raw, proposal=job.job_kind == "proposal")
     gateway = WorkerModelGateway(
         WorkerCredential(token, "http://relay:8080/internal/improvement/model"),
         job.job_id,

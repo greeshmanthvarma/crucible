@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Callable
+from typing import Protocol
 from uuid import UUID
 
 from crucible.application.ports import EventNotifier, UnitOfWork
@@ -32,6 +33,7 @@ from crucible.engine.gateway import (
     ModelStop,
     ModelStopReason,
     ModelUsage,
+    PreparedModelRequest,
     ReasoningDelta,
     TextDelta,
 )
@@ -54,6 +56,16 @@ class RunBudgetExceeded(Exception):
     pass
 
 
+class RunStepPolicy(Protocol):
+    def prepare_request(
+        self, request: PreparedModelRequest, observation: BehaviorObservation
+    ) -> PreparedModelRequest: ...
+
+    def finish_response(
+        self, text: str, calls: tuple[CompleteToolCall, ...]
+    ) -> tuple[str, bool]: ...
+
+
 class RunEngine:
     def __init__(
         self,
@@ -70,6 +82,7 @@ class RunEngine:
         max_tool_calls: int = 100,
         max_model_tokens: int = 200_000,
         max_active_seconds: float = 600,
+        step_policy_factory: Callable[[], RunStepPolicy] | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._clock = clock
@@ -88,6 +101,7 @@ class RunEngine:
         self._max_tool_calls = max_tool_calls
         self._max_model_tokens = max_model_tokens
         self._max_active_seconds = max_active_seconds
+        self._step_policy_factory = step_policy_factory
         self._context_manager = context_manager or ContextManager(
             unit_of_work,
             clock,
@@ -127,6 +141,7 @@ class RunEngine:
         used_calls = existing_calls
         used_tokens = 0
         active_time = ActiveTimeBudget(self._max_active_seconds)
+        step_policy = self._step_policy_factory() if self._step_policy_factory else None
         for step_sequence in range(1, self._max_steps + 1):
             try:
                 async with active_time.track():
@@ -136,6 +151,7 @@ class RunEngine:
                         call_budget=max(0, self._max_tool_calls - used_calls),
                         token_budget=max(0, self._max_model_tokens - used_tokens),
                         active_time=active_time,
+                        step_policy=step_policy,
                     )
                 used_calls += step_calls
                 used_tokens += step_tokens
@@ -185,6 +201,7 @@ class RunEngine:
         call_budget: int,
         token_budget: int,
         active_time: ActiveTimeBudget,
+        step_policy: RunStepPolicy | None = None,
     ) -> tuple[bool, int, int]:
         step = Step.preparing(
             new_id(), run.task_id, run.id, step_sequence, self._clock.now()
@@ -222,9 +239,19 @@ class RunEngine:
             tuple(observations[-8:]),
             completion_proposed,
         )
-        prepared = await self._context_manager.prepare(
-            run, step, observation=observation
-        )
+        if step_policy is None:
+            prepared = await self._context_manager.prepare(
+                run, step, observation=observation
+            )
+        else:
+            prepared = await self._context_manager.prepare(
+                run,
+                step,
+                observation=observation,
+                transform_request=lambda request: step_policy.prepare_request(
+                    request, observation
+                ),
+            )
         active_step = step.activate_model(self._clock.now())
         await self._record_step(active_step, EventType.STEP_MODEL_ACTIVE)
 
@@ -282,11 +309,18 @@ class RunEngine:
         now = self._clock.now()
         message_id = new_id()
         parts: list[MessagePart] = []
-        if text:
+        answer = "".join(text)
+        continue_without_tools = False
+        if step_policy is not None:
+            allowed_tools = {tool.name for tool in prepared.request.tools}
+            if any(call.name not in allowed_tools for call in calls):
+                raise ValueError("Model called a tool unavailable in this phase")
+            answer, continue_without_tools = step_policy.finish_response(
+                answer, tuple(calls)
+            )
+        if answer:
             parts.append(
-                MessagePart(
-                    new_id(), len(parts) + 1, MessagePartKind.TEXT, "".join(text)
-                )
+                MessagePart(new_id(), len(parts) + 1, MessagePartKind.TEXT, answer)
             )
         if reasoning:
             parts.append(
@@ -327,12 +361,14 @@ class RunEngine:
                 )
             await self._record_step(active_step.complete(now), EventType.STEP_COMPLETED)
             await self._journal.record(message_completed_mutation(run, assistant))
+            if continue_without_tools:
+                return True, 0, model_tokens
             await self._validation.record_proposal(
                 CompletionProposal(
                     new_id(),
                     run.id,
                     assistant.id,
-                    "".join(text),
+                    answer,
                     (),
                     "".join(reasoning) or None,
                     now,
