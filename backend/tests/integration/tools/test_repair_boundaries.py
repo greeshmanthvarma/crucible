@@ -166,14 +166,15 @@ def test_registry_keeps_registered_identity_and_maximum_schema():
         ToolRegistry((tool,))
 
 
-async def test_argument_adapter_cannot_expand_mutation_admission(
+async def test_argument_adapter_cannot_bypass_symlink_admission(
     database: Database, tmp_path: Path, monkeypatch
 ):
     from crucible.tools import behavior_contracts
 
     task, run, step, message = await prepared(database, "repair-adapter")
-    sentinel = tmp_path / "other.py"
+    sentinel = tmp_path / "sentinel.py"
     sentinel.write_text("original")
+    (tmp_path / "other.py").symlink_to(sentinel)
     monkeypatch.setattr(
         behavior_contracts,
         "adapt_arguments",

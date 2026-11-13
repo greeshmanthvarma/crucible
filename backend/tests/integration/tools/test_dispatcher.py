@@ -200,3 +200,60 @@ async def test_dispatcher_edit_file_is_admitted_and_confined(
     async with SqlAlchemyUnitOfWork(database) as uow:
         stored = await uow.tool_calls.list_for_step(step.id)
     assert [dict(c.arguments) for c in stored] == [dict(c.arguments) for c in calls]
+
+
+async def test_dispatcher_admits_adapted_patch_paths(database, tmp_path) -> None:
+    from crucible.tools.registry import default_registry
+    from tests.integration.tools.test_mutation_tools import repository
+
+    workspace = tmp_path / "workspace"
+    repository(workspace)
+    task, run, step, message = await prepared(database, "adapted")
+    dispatcher = ToolDispatcher(
+        default_registry(), lambda: SqlAlchemyUnitOfWork(database), FixedClock()
+    )
+    patch = (
+        "*** Begin Patch\n*** Update File: file.txt\n"
+        "@@ -1,20 +1,20 @@\n-old\n+new\n*** End Patch\n"
+    )
+    call = CompleteToolCall(new_id(), "apply_patch", {"patch": patch})
+    results = await dispatcher.execute_batch(
+        DispatchContext(task.id, run.id, step.id, message.id, workspace), (call,)
+    )
+    assert results[0].error_code is None, results[0].display_text
+    assert (workspace / "file.txt").read_text() == "new\n"
+    async with SqlAlchemyUnitOfWork(database) as uow:
+        stored = await uow.tool_calls.list_for_step(step.id)
+    assert dict(stored[0].arguments) == {"patch": patch}
+
+
+async def test_adapted_patch_cannot_escape_workspace(database, tmp_path) -> None:
+    from crucible.tools.registry import default_registry
+    from tests.integration.tools.test_mutation_tools import repository
+
+    workspace = tmp_path / "workspace"
+    repository(workspace)
+    outside = tmp_path / "outside"
+    outside.write_text("old\n")
+    (workspace / "link").symlink_to(outside)
+    task, run, step, message = await prepared(database, "escape")
+    dispatcher = ToolDispatcher(
+        default_registry(), lambda: SqlAlchemyUnitOfWork(database), FixedClock()
+    )
+    calls = tuple(
+        CompleteToolCall(
+            new_id(),
+            "apply_patch",
+            {
+                "patch": f"*** Update File: {path}\n"
+                "@@ -1,99 +1,99 @@\n-old\n+new\n*** End Patch\n"
+            },
+        )
+        for path in ("link", "../outside")
+    )
+    results = await dispatcher.execute_batch(
+        DispatchContext(task.id, run.id, step.id, message.id, workspace), calls
+    )
+    assert all(r.error_code == "tool_exception" for r in results)
+    assert outside.read_text() == "old\n"
+    assert (workspace / "file.txt").read_text() == "old\n"

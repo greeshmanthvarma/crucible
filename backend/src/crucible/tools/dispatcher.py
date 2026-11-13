@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -46,7 +46,7 @@ class AdmittedCall:
     source: CompleteToolCall
     record: ToolCall
     tool: Tool | None
-    arguments: object
+    arguments: Mapping[str, object]
     rejection: str | None = None
     rejection_code: str = "rejected"
 
@@ -161,7 +161,7 @@ class ToolDispatcher:
                     authority = None
                     if policy.mutation:
                         admission = admit_mutation(
-                            item.record.name, item.record.arguments, context.workspace
+                            item.record.name, item.arguments, context.workspace
                         )
                         authority = admission.authority
                         if self._evidence is not None:
@@ -262,7 +262,7 @@ class ToolDispatcher:
             tool = self._registry.get(source.name)
             rejection: str | None = None
             rejection_code = "rejected"
-            arguments: object = source.arguments
+            arguments: Mapping[str, object] = source.arguments
             if sequence > limit:
                 rejection = "Tool Call budget exhausted"
                 rejection_code = "budget_exhausted"
