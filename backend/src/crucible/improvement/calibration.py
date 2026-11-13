@@ -188,9 +188,10 @@ async def run_isolated_calibration(config: Path, output: Path) -> TrialResult:
         runtime.mkdir(exist_ok=False, mode=0o700)
         store = await CalibrationStore.open(runtime / "calibration.sqlite3")
         await store.create(manifest, str(settings.repository), str(manifest.trial_id))
-        # Use the platform temp root; stage_harness rejects checkout overlap.
+        # Use the platform temp root; stage_harness rejects checkout overlap and
+        # symlinked ancestors such as macOS /var -> /private/var.
         with TemporaryDirectory(prefix="crucible-calibration-") as temporary:
-            staged = Path(temporary) / "snapshot"
+            staged = Path(temporary).resolve() / "snapshot"
             snapshot = await asyncio.to_thread(
                 stage_harness,
                 settings.repository,

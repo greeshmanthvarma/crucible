@@ -131,9 +131,11 @@ async def test_calibration_composition(
     repository.mkdir()
     temporary_root = tmp_path / "platform-temp"
     temporary_root.mkdir()
+    symlinked_root = tmp_path / "platform-temp-link"
+    symlinked_root.symlink_to(temporary_root, target_is_directory=True)
 
     def platform_temporary_directory(*, prefix):
-        return TemporaryDirectory(prefix=prefix, dir=temporary_root)
+        return TemporaryDirectory(prefix=prefix, dir=symlinked_root)
 
     monkeypatch.setattr(calibration, "TemporaryDirectory", platform_temporary_directory)
     config = tmp_path / "config.json"
@@ -159,6 +161,7 @@ async def test_calibration_composition(
     )
 
     def stage(repository, commit, destination, paths):
+        assert destination == destination.resolve()
         assert destination.is_relative_to(temporary_root)
         assert not destination.is_relative_to(repository)
         (destination / "harness").mkdir(parents=True)
