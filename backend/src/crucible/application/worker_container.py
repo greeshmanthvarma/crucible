@@ -11,6 +11,7 @@ from crucible.application.ports import UnitOfWork
 from crucible.artifacts.store import LocalArtifactStore
 from crucible.context.compaction import CompactionLifecycle
 from crucible.context.manager import ContextManager
+from crucible.context.result_projection import project_coding_tool_results
 from crucible.domain.clock import SystemClock
 from crucible.engine.approval_broker import InMemoryApprovalBroker
 from crucible.engine.compaction_gateway import ModelCompactionGateway
@@ -105,7 +106,13 @@ def create_worker_engine(
         output_reserve=job.model.output_reserve,
         tools=registry.definitions,
         journal=journal,
-        project_tool_results=prune_proposal_tool_results if is_proposer else None,
+        project_tool_results=(
+            prune_proposal_tool_results
+            if is_proposer
+            else project_coding_tool_results
+            if not isinstance(job, RoleJob)
+            else None
+        ),
         compaction_lifecycle=CompactionLifecycle(
             uow,
             artifacts,
