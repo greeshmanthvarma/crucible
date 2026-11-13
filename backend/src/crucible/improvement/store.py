@@ -2487,7 +2487,7 @@ VALUES (:trial,:id,:sid,:case,:repeat,:key,'pending',:generation)"""),
                 await conn.execute(
                     text(
                         "SELECT reservation_id FROM experiment_usage WHERE "
-                        "experiment=:id AND status!='settled'"
+                        "experiment=:id AND status NOT IN ('settled','conservative')"
                     ),
                     {"id": str(id)},
                 )

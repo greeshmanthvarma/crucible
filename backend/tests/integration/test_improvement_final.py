@@ -53,6 +53,27 @@ async def test_final_dispatch_requires_seal_before_any_external_effect(search_se
         )
 
 
+async def test_seal_accepts_acknowledged_usage_after_recovery(search_setup):
+    from crucible.improvement.contracts import UsageAmounts
+    from crucible.improvement.search import SearchController
+
+    store, id, port = search_setup
+    reservation = await store.reserve_usage(id, None, UsageAmounts(tokens=70))
+    await store.mark_uncertain(reservation)
+    stopped = await store.request_stop(id)
+    owner = await store.claim_recovery(id, stopped.revision, None, 123, "test")
+    await store.acknowledge_usage(id, owner, (reservation,))
+    await store.recover_ready(id, owner)
+
+    port.disposition = "no_actionable_weakness"
+    outcome = await SearchController(store, port).run(id)
+    seal = await store.seal_search(id, outcome.accepted_commit, outcome.reason)
+    assert seal.initial_snapshot_id == seal.selected_final_snapshot_id
+    usage = await store.usage_summary(id)
+    assert usage["conservative"]["tokens"] == 70
+    assert usage["confirmed"]["tokens"] == 0
+
+
 async def test_final_authority_is_pinned_to_seal_and_two_snapshots(search_setup):
     store, id, port = search_setup
     from crucible.improvement.search import SearchController
