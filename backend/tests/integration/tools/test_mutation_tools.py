@@ -100,3 +100,50 @@ async def test_write_file_rejects_symlink_target(tmp_path: Path) -> None:
     else:
         raise AssertionError("symlink target was accepted")
     assert outside.read_text() == "outside"
+
+
+async def test_edit_file_replaces_unique_text(tmp_path: Path) -> None:
+    from crucible.tools.git_tools import EditFileTool
+
+    (tmp_path / "x").write_text("héllo\nworld\n")
+    outcome = await EditFileTool().invoke(
+        ToolContext(tmp_path), {"path": "x", "old_text": "héllo", "new_text": "hello"}
+    )
+    assert outcome.error_code is None
+    assert outcome.data == {"path": "x", "replacements": 1}
+    assert (tmp_path / "x").read_text() == "hello\nworld\n"
+
+
+async def test_edit_file_rejects_missing_and_ambiguous_text(tmp_path: Path) -> None:
+    from crucible.tools.git_tools import EditFileTool
+
+    path = tmp_path / "x"
+    path.write_text("a\na\n")
+    for old, new, code in (
+        ("a", "b", "edit_ambiguous"),
+        ("zzz", "b", "edit_no_match"),
+        ("a", "a", "edit_noop"),
+    ):
+        outcome = await EditFileTool().invoke(
+            ToolContext(tmp_path), {"path": "x", "old_text": old, "new_text": new}
+        )
+        assert outcome.error_code == code
+        assert path.read_text() == "a\na\n"
+    missing = await EditFileTool().invoke(
+        ToolContext(tmp_path), {"path": "missing", "old_text": "a", "new_text": "b"}
+    )
+    assert missing.error_code == "file_not_found"
+    assert "write_file" in missing.display_text
+    assert not (tmp_path / "missing").exists()
+
+
+async def test_edit_file_replace_all(tmp_path: Path) -> None:
+    from crucible.tools.git_tools import EditFileTool
+
+    (tmp_path / "x").write_text("a\na\n")
+    outcome = await EditFileTool().invoke(
+        ToolContext(tmp_path),
+        {"path": "x", "old_text": "a", "new_text": "", "replace_all": True},
+    )
+    assert outcome.data == {"path": "x", "replacements": 2}
+    assert (tmp_path / "x").read_text() == "\n\n"

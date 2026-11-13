@@ -46,6 +46,13 @@ class WriteFileArguments(ToolArguments):
     content: str = Field(max_length=1_000_000)
 
 
+class EditFileArguments(ToolArguments):
+    path: str
+    old_text: str = Field(min_length=1, max_length=200_000)
+    new_text: str = Field(max_length=1_000_000)
+    replace_all: bool = False
+
+
 class ApplyPatchArguments(ToolArguments):
     patch: str = Field(min_length=1, max_length=1_000_000)
 

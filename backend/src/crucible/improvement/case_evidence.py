@@ -59,6 +59,7 @@ _WITHHELD = {
     ("tool_result", "search_files"),
     ("tool_result", "workspace_diff"),
     ("tool_call", "write_file"),
+    ("tool_call", "edit_file"),
     ("tool_call", "execute_command"),
 }
 _TERMINATIONS = frozenset(termination.value for termination in SandboxTermination)

@@ -14,7 +14,6 @@ from crucible.tools.definitions import (
 from crucible.tools.search_io import search_workspace
 from crucible.tools.workspace_authority import WorkspacePathResolver
 
-
 LIST_TRUNCATED_NOTICE = (
     "[Listing truncated. Deeper paths were omitted. Call list_files with a "
     "subdirectory path, or use search_files to locate code.]"

@@ -15,6 +15,7 @@ _TOOL_LABELS = {
     "search_files": "search_files_failure",
     "read_file": "read_file_failure",
     "write_file": "write_file_failure",
+    "edit_file": "edit_file_failure",
     "apply_patch": "apply_patch_failure",
     "workspace_status": "workspace_status_failure",
     "workspace_diff": "workspace_diff_failure",

@@ -6,6 +6,7 @@ from crucible.tools.execution_policy import ToolPolicy, policy_for, protected_de
 from crucible.tools.filesystem import ListFilesTool, ReadFileTool, SearchFilesTool
 from crucible.tools.git_tools import (
     ApplyPatchTool,
+    EditFileTool,
     WorkspaceDiffTool,
     WorkspaceStatusTool,
     WriteFileTool,
@@ -47,6 +48,7 @@ def default_registry(command_tool: Tool | None = None) -> ToolRegistry:
                     WorkspaceStatusTool(),
                     WorkspaceDiffTool(),
                     ApplyPatchTool(),
+                    EditFileTool(),
                     WriteFileTool(),
                     command_tool,
                 )

@@ -58,7 +58,7 @@
     "tools": [
       {
         "name": "list_files",
-        "description": "List stable workspace-relative file paths.",
+        "description": "List workspace-relative paths breadth-first; directories end with /. Large trees are truncated; pass a subdirectory path to see deeper levels.",
         "input_schema": {
           "additionalProperties": false,
           "properties": {
@@ -202,7 +202,7 @@
       },
       {
         "name": "apply_patch",
-        "description": "Apply a standard unified diff inside the workspace. Include --- a/path, +++ b/path, and numbered @@ -old +new @@ hunk headers. The *** Begin Patch / *** Update File format is not supported.",
+        "description": "Prefer edit_file for targeted changes. Apply a standard unified diff inside the workspace. Include --- a/path, +++ b/path, and numbered @@ -old +new @@ hunk headers. The *** Begin Patch / *** Update File format is not supported.",
         "input_schema": {
           "additionalProperties": false,
           "properties": {
@@ -217,6 +217,43 @@
             "patch"
           ],
           "title": "ApplyPatchArguments",
+          "type": "object"
+        },
+        "schema_version": 1
+      },
+      {
+        "name": "edit_file",
+        "description": "Replace exact text in one workspace file. Copy old_text exactly from read_file output, including indentation, with enough surrounding lines to match once; set replace_all to change every match. Prefer this for targeted edits; use write_file to create files.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "title": "Path",
+              "type": "string"
+            },
+            "old_text": {
+              "maxLength": 200000,
+              "minLength": 1,
+              "title": "Old Text",
+              "type": "string"
+            },
+            "new_text": {
+              "maxLength": 1000000,
+              "title": "New Text",
+              "type": "string"
+            },
+            "replace_all": {
+              "default": false,
+              "title": "Replace All",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "old_text",
+            "new_text"
+          ],
+          "title": "EditFileArguments",
           "type": "object"
         },
         "schema_version": 1

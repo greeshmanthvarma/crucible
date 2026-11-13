@@ -170,3 +170,33 @@ async def test_cancellation_terminalizes_entire_admitted_batch_and_propagates(
         persisted_calls = await uow.tool_calls.list_for_step(step.id)
     assert [result.status.value for result in results] == ["cancelled", "cancelled"]
     assert [call.status.value for call in persisted_calls] == ["completed", "completed"]
+
+
+async def test_dispatcher_edit_file_is_admitted_and_confined(
+    database, tmp_path
+) -> None:
+    from crucible.tools.registry import default_registry
+
+    task, run, step, message = await prepared(database, "edit")
+    (tmp_path / "file.txt").write_text("old\n")
+    outside = tmp_path.parent / (tmp_path.name + "-outside")
+    outside.write_text("old\n")
+    (tmp_path / "link").symlink_to(outside)
+    dispatcher = ToolDispatcher(
+        default_registry(), lambda: SqlAlchemyUnitOfWork(database), FixedClock()
+    )
+    calls = tuple(
+        CompleteToolCall(
+            new_id(), "edit_file", {"path": path, "old_text": "old", "new_text": "new"}
+        )
+        for path in ("file.txt", "../" + outside.name, "link")
+    )
+    results = await dispatcher.execute_batch(
+        DispatchContext(task.id, run.id, step.id, message.id, tmp_path), calls
+    )
+    assert [r.error_code for r in results] == [None, "tool_exception", "tool_exception"]
+    assert (tmp_path / "file.txt").read_text() == "new\n"
+    assert outside.read_text() == "old\n"
+    async with SqlAlchemyUnitOfWork(database) as uow:
+        stored = await uow.tool_calls.list_for_step(step.id)
+    assert [dict(c.arguments) for c in stored] == [dict(c.arguments) for c in calls]

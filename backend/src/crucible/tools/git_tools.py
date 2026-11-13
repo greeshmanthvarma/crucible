@@ -2,6 +2,7 @@ from crucible.engine.gateway import ModelToolDefinition
 from crucible.tools import behavior_contracts
 from crucible.tools.definitions import (
     ApplyPatchArguments,
+    EditFileArguments,
     ToolContext,
     ToolOutcome,
     WorkspaceDiffArguments,
@@ -40,6 +41,60 @@ class WriteFileTool:
         return ToolOutcome(
             {"path": args.path, "bytes_written": written},
             f"Wrote {written} bytes to {args.path}",
+        )
+
+
+class EditFileTool:
+    parallel_safe = False
+    argument_model = EditFileArguments
+
+    def __init__(self) -> None:
+        self.definition = ModelToolDefinition(
+            "edit_file",
+            behavior_contracts.DESCRIPTIONS["edit_file"],
+            EditFileArguments.model_json_schema(),
+        )
+
+    async def invoke(self, context: ToolContext, arguments: object) -> ToolOutcome:
+        args = EditFileArguments.model_validate(arguments)
+        authority = (
+            context.workspace_authority
+            or admit_mutation(
+                "edit_file", args.model_dump(), context.workspace
+            ).authority
+        )
+        if args.old_text == args.new_text:
+            return ToolOutcome(
+                {}, "old_text and new_text are identical", error_code="edit_noop"
+            )
+        # The resolver reports missing paths as ValueError; admission has already
+        # validated confinement and symlinks, so check existence on the target.
+        if not authority.validate_target(args.path).exists():
+            return ToolOutcome(
+                {},
+                f"File {args.path} not found; use write_file to create files.",
+                error_code="file_not_found",
+            )
+        content = authority.read_text(args.path)
+        matches = content.count(args.old_text)
+        if not matches:
+            return ToolOutcome(
+                {},
+                f"No match in {args.path}; re-read and copy exact lines "
+                "including indentation.",
+                error_code="edit_no_match",
+            )
+        if matches > 1 and not args.replace_all:
+            return ToolOutcome(
+                {},
+                f"Found {matches} matches in {args.path}; "
+                "add surrounding lines or set replace_all.",
+                error_code="edit_ambiguous",
+            )
+        authority.write_text(args.path, content.replace(args.old_text, args.new_text))
+        return ToolOutcome(
+            {"path": args.path, "replacements": matches},
+            f"Replaced {matches} occurrence(s) in {args.path}",
         )
 
 

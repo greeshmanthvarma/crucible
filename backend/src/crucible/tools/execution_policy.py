@@ -7,6 +7,7 @@ from pathlib import Path
 from crucible.engine.gateway import ModelToolDefinition
 from crucible.tools.definitions import (
     ApplyPatchArguments,
+    EditFileArguments,
     ListFilesArguments,
     ReadFileArguments,
     SearchFilesArguments,
@@ -29,6 +30,7 @@ _MODELS: dict[str, type[ToolArguments]] = {
     "search_files": SearchFilesArguments,
     "read_file": ReadFileArguments,
     "write_file": WriteFileArguments,
+    "edit_file": EditFileArguments,
     "apply_patch": ApplyPatchArguments,
     "workspace_status": WorkspaceStatusArguments,
     "workspace_diff": WorkspaceDiffArguments,
@@ -52,6 +54,7 @@ def policy_for(tool: Tool) -> ToolPolicy:
     from crucible.tools.filesystem import ListFilesTool, ReadFileTool, SearchFilesTool
     from crucible.tools.git_tools import (
         ApplyPatchTool,
+        EditFileTool,
         WorkspaceDiffTool,
         WorkspaceStatusTool,
         WriteFileTool,
@@ -62,6 +65,7 @@ def policy_for(tool: Tool) -> ToolPolicy:
         (ReadFileTool, "read_file"),
         (SearchFilesTool, "search_files"),
         (WriteFileTool, "write_file"),
+        (EditFileTool, "edit_file"),
         (ApplyPatchTool, "apply_patch"),
         (WorkspaceDiffTool, "workspace_diff"),
         (WorkspaceStatusTool, "workspace_status"),
@@ -87,9 +91,9 @@ def policy_for(tool: Tool) -> ToolPolicy:
         name,
         model,
         output_bytes=200_000 if name == "workspace_diff" else 100_000,
-        mutation=name in {"write_file", "apply_patch"},
+        mutation=name in {"write_file", "edit_file", "apply_patch"},
         parallel_safe=(
-            name not in {"write_file", "apply_patch", "execute_command"}
+            name not in {"write_file", "edit_file", "apply_patch", "execute_command"}
             and tool.parallel_safe
         ),
     )
@@ -124,6 +128,8 @@ def admit_mutation(
     if name == "write_file":
         args = WriteFileArguments.model_validate(arguments)
         paths: tuple[str, ...] = (normalize_path(args.path),)
+    elif name == "edit_file":
+        paths = (normalize_path(EditFileArguments.model_validate(arguments).path),)
     elif name == "apply_patch":
         patch = ApplyPatchArguments.model_validate(arguments).patch
         paths = () if patch.startswith("*** Begin Patch") else patch_paths(patch)
