@@ -3,7 +3,8 @@
 from collections.abc import Mapping
 
 DESCRIPTIONS = {
-    "list_files": "List stable workspace-relative file paths.",
+    "list_files": "List workspace-relative paths breadth-first; directories end with /. "
+    "Large trees are truncated; pass a subdirectory path to see deeper levels.",
     "search_files": "Search workspace text with a ripgrep regular expression. "
     "Returns bounded matching excerpts with workspace-relative paths, line numbers "
     "and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged "

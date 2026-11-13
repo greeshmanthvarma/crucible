@@ -1,5 +1,4 @@
-import os
-from pathlib import Path
+from collections import deque
 
 from pydantic import ValidationError
 
@@ -16,11 +15,17 @@ from crucible.tools.search_io import search_workspace
 from crucible.tools.workspace_authority import WorkspacePathResolver
 
 
+LIST_TRUNCATED_NOTICE = (
+    "[Listing truncated. Deeper paths were omitted. Call list_files with a "
+    "subdirectory path, or use search_files to locate code.]"
+)
+
+
 class ListFilesTool:
     parallel_safe = True
     argument_model = ListFilesArguments
 
-    def __init__(self, *, max_entries: int = 1000, max_bytes: int = 100_000) -> None:
+    def __init__(self, *, max_entries: int = 250, max_bytes: int = 8_000) -> None:
         self.max_entries = max_entries
         self.max_bytes = max_bytes
         self.definition = ModelToolDefinition(
@@ -38,27 +43,30 @@ class ListFilesTool:
         paths: list[str] = []
         size = 0
         truncated = False
-        for current, directories, files in os.walk(root, followlinks=False):
-            directories[:] = sorted(
-                name for name in directories if name not in {".git", ".crucible"}
-            )
-            for name in sorted(files):
-                path = Path(current) / name
-                relative = path.relative_to(resolver.root).as_posix()
-                if relative == ".git" or relative.startswith(".git/"):
+        directories = deque([root])
+        while directories and not truncated:
+            current = directories.popleft()
+            for path in sorted(current.iterdir(), key=lambda entry: entry.name):
+                if path.name in {".git", ".crucible"}:
                     continue
+                is_directory = path.is_dir() and not path.is_symlink()
+                relative = path.relative_to(resolver.root).as_posix()
+                if is_directory:
+                    relative += "/"
                 added = len(relative.encode())
                 if len(paths) >= self.max_entries or size + added > self.max_bytes:
                     truncated = True
                     break
                 paths.append(relative)
                 size += added
-            if truncated:
-                break
-        paths.sort()
+                if is_directory:
+                    directories.append(path)
+        display = "\n".join(paths)
+        if truncated:
+            display += ("\n" if display else "") + LIST_TRUNCATED_NOTICE
         return ToolOutcome(
             {"paths": paths, "truncated": truncated},
-            "\n".join(paths),
+            display,
             truncated,
         )
 
