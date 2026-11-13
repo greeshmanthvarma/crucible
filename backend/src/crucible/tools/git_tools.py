@@ -76,7 +76,12 @@ class EditFileTool:
                 error_code="file_not_found",
             )
         content = authority.read_text(args.path)
-        matches = content.count(args.old_text)
+        old_text, new_text = args.old_text, args.new_text
+        matches = content.count(old_text)
+        if not matches and "\r\n" in content and "\r\n" not in old_text:
+            old_text = old_text.replace("\n", "\r\n")
+            new_text = new_text.replace("\r\n", "\n").replace("\n", "\r\n")
+            matches = content.count(old_text)
         if not matches:
             return ToolOutcome(
                 {},
@@ -91,7 +96,7 @@ class EditFileTool:
                 "add surrounding lines or set replace_all.",
                 error_code="edit_ambiguous",
             )
-        authority.write_text(args.path, content.replace(args.old_text, args.new_text))
+        authority.write_text(args.path, content.replace(old_text, new_text))
         return ToolOutcome(
             {"path": args.path, "replacements": matches},
             f"Replaced {matches} occurrence(s) in {args.path}",

@@ -137,6 +137,19 @@ async def test_edit_file_rejects_missing_and_ambiguous_text(tmp_path: Path) -> N
     assert not (tmp_path / "missing").exists()
 
 
+async def test_edit_file_preserves_crlf_line_endings(tmp_path: Path) -> None:
+    from crucible.tools.git_tools import EditFileTool
+
+    path = tmp_path / "x"
+    path.write_bytes(b"one\r\ntwo\r\nthree\r\n")
+    outcome = await EditFileTool().invoke(
+        ToolContext(tmp_path),
+        {"path": "x", "old_text": "one\ntwo", "new_text": "one\n2\ntwo"},
+    )
+    assert outcome.error_code is None
+    assert path.read_bytes() == b"one\r\n2\r\ntwo\r\nthree\r\n"
+
+
 async def test_edit_file_replace_all(tmp_path: Path) -> None:
     from crucible.tools.git_tools import EditFileTool
 

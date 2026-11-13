@@ -154,7 +154,7 @@ class WorkspaceAuthority:
         self._git = git or SubprocessGitClient()
 
     def read_text(self, path: str) -> str:
-        return self._resolver.resolve(path).read_text(encoding="utf-8")
+        return self._resolver.resolve(path).read_text(encoding="utf-8", newline="")
 
     def validate_target(self, path: str) -> Path:
         normalized = normalize_path(path)
