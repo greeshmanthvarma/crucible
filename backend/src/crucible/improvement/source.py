@@ -111,24 +111,46 @@ def _digest(files: dict[str, tuple[int, bytes]]) -> str:
     return digest.hexdigest()
 
 
+def _read_blobs(root: Path, blobs: tuple[str, ...]) -> dict[str, bytes]:
+    if not blobs:
+        return {}
+    output = git_bytes(
+        root, "cat-file", "--batch", data="".join(f"{b}\n" for b in blobs).encode()
+    )
+    contents: dict[str, bytes] = {}
+    offset = 0
+    for blob in blobs:
+        end = output.index(b"\n", offset)
+        header = output[offset:end].split()
+        if len(header) != 3 or header[0].decode() != blob or header[1] != b"blob":
+            raise ScopeRejected("unreadable base object", (blob,))
+        size = int(header[2])
+        if size > MAX_FILE:
+            raise ScopeRejected("source file exceeds limit", (blob,))
+        contents[blob] = output[end + 1 : end + 1 + size]
+        offset = end + 1 + size + 1
+    return contents
+
+
 def inspect_source(root: Path, baseline_commit: str) -> SourceInspection:
     safe_path(root)
     if not re.fullmatch("[0-9a-f]{40}", baseline_commit):
         raise ScopeRejected("invalid baseline commit")
-    base = {}
-    entries = git_bytes(root, "ls-tree", "-rz", baseline_commit).split(b"\0")
+    entries = git_bytes(root, "ls-tree", "-rlz", baseline_commit).split(b"\0")
     if len(entries) > MAX_FILES + 1:
         raise ScopeRejected("base file count exceeds limit")
+    listed: list[tuple[str, int, str]] = []
     for entry in filter(None, entries):
         meta, raw = entry.split(b"\t", 1)
-        mode, _, blob = meta.split()
+        mode, kind, blob, size = meta.split()
         name = _name(raw)
-        if mode not in (b"100644", b"100755"):
+        if mode not in (b"100644", b"100755") or kind != b"blob":
             raise ScopeRejected("unsupported base type", (name,))
-        size = int(git_bytes(root, "cat-file", "-s", blob.decode()).strip())
-        if size > MAX_FILE:
+        if int(size) > MAX_FILE:
             raise ScopeRejected("source file exceeds limit", (name,))
-        base[name] = (int(mode, 8), git_bytes(root, "cat-file", "blob", blob.decode()))
+        listed.append((name, int(mode, 8), blob.decode()))
+    contents = _read_blobs(root, tuple(blob for _, _, blob in listed))
+    base = {name: (mode, contents[blob]) for name, mode, blob in listed}
     raw_names = git_bytes(root, "ls-files", "-co", "--exclude-standard", "-z").split(
         b"\0"
     )
@@ -227,23 +249,42 @@ def _patch(inspection: SourceInspection) -> bytes:
     with tempfile.TemporaryDirectory(prefix="crucible-source-") as temporary:
         root = Path(temporary)
         git_bytes(root, "init", "-q")
+        staging = root / ".git" / "crucible-blobs"
+        staging.mkdir()
         trees = []
         for files in (inspection.base_files, inspection.files):
             git_bytes(root, "read-tree", "--empty")
-            for name, (mode, data) in sorted(files.items()):
-                blob = (
-                    git_bytes(root, "hash-object", "-w", "--stdin", data=data)
+            ordered = sorted(files.items())
+            if ordered:
+                paths = []
+                for index, (_, (_, data)) in enumerate(ordered):
+                    path = staging / str(index)
+                    path.write_bytes(data)
+                    paths.append(str(path))
+                blobs = (
+                    git_bytes(
+                        root,
+                        "hash-object",
+                        "-w",
+                        "--no-filters",
+                        "--stdin-paths",
+                        data="".join(f"{path}\n" for path in paths).encode(),
+                    )
                     .decode()
-                    .strip()
+                    .split()
                 )
+                if len(blobs) != len(ordered):
+                    raise ScopeRejected("source export hashing failed")
                 git_bytes(
                     root,
                     "update-index",
                     "--add",
-                    "--cacheinfo",
-                    f"{mode:o}",
-                    blob,
-                    name,
+                    "-z",
+                    "--index-info",
+                    data=b"".join(
+                        f"{mode:o} {blob}\t".encode() + name.encode() + b"\0"
+                        for (name, (mode, _)), blob in zip(ordered, blobs, strict=True)
+                    ),
                 )
             trees.append(git_bytes(root, "write-tree").decode().strip())
         return git_bytes(
