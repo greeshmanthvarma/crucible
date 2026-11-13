@@ -63,6 +63,18 @@ def grading_allowed(termination: str, cleanup_confirmed: bool) -> bool:
     return cleanup_confirmed and termination in ("completed", "budget_exhausted")
 
 
+# Selection-validation and final-test cases stay out of calibration so
+# measured selection and held-out results remain uninspected.
+CALIBRATION_SPLITS = frozenset({"calibration", "development"})
+
+
+def ensure_calibration_case(case: BenchmarkCase, expected_digest: str) -> None:
+    if case.split not in CALIBRATION_SPLITS or case_digest(case) != expected_digest:
+        raise ValueError(
+            "only the exact retired calibration case or a development case is allowed"
+        )
+
+
 def validate_calibration_inputs(
     manifest: CalibrationManifest, repository: Path, output: Path, data_dir: Path
 ) -> BenchmarkCase:
@@ -75,8 +87,7 @@ def validate_calibration_inputs(
     ):
         safe_path(path)
     case = load_case(manifest.case_manifest)
-    if case.split != "calibration" or case_digest(case) != manifest.case_digest:
-        raise ValueError("only the exact retired calibration case is allowed")
+    ensure_calibration_case(case, manifest.case_digest)
     if (
         hashlib.sha256(
             read_regular_artifact(manifest.admission_record, 1048576)

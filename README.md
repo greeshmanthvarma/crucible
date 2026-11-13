@@ -844,9 +844,10 @@ as an isolated baseline. No real experiment is launched by the test suite by def
 ### One-shot isolated calibration
 
 `crucible benchmark isolated-trial --config /absolute/config.json --output
-/absolute/new-output` runs one retired calibration case through the same Docker
-supervisor, scoped host model/command broker and official grader as experiments.
-It does not admit a measured suite, run mining/search, or publish anything.
+/absolute/new-output` runs one retired calibration case, or one development-split
+case, through the same Docker supervisor, scoped host model/command broker and
+official grader as experiments. Selection-validation and final-test cases are
+refused. It does not admit a measured suite, run mining/search, or publish anything.
 
 The config is `IsolatedCalibrationConfig`: `manifest`, `repository`, and a separate
 private `data_dir`. Its `CalibrationManifest` has kind `isolated-calibration`,

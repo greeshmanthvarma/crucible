@@ -63,6 +63,31 @@ def test_calibration_drift_blocks_dispatch(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    ("split", "allowed"),
+    [
+        ("calibration", True),
+        ("development", True),
+        ("selection-validation", False),
+        ("final-test", False),
+    ],
+)
+def test_calibration_admits_only_retired_or_development_cases(
+    case_fixture, split, allowed
+):
+    from crucible.benchmarks.manifests import case_digest
+    from crucible.improvement.calibration import ensure_calibration_case
+
+    case = case_fixture.model_copy(update={"split": split})
+    if allowed:
+        ensure_calibration_case(case, case_digest(case))
+    else:
+        with pytest.raises(ValueError, match="development case"):
+            ensure_calibration_case(case, case_digest(case))
+    with pytest.raises(ValueError, match="development case"):
+        ensure_calibration_case(case, "0" * 64)
+
+
 async def test_calibration_approval_eof_denies(monkeypatch):
     from types import SimpleNamespace
 
