@@ -20,7 +20,7 @@ def projection(request):
     return json.loads(json.dumps(value, default=str))
 
 
-async def test_behavior_refactor_preserves_empty_guidance(database, tmp_path):
+async def test_behavior_requests_match_snapshot(database, tmp_path):
     submitted = await queued_run(
         database, tmp_path, instructions="Keep repository rules."
     )

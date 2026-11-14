@@ -48,6 +48,32 @@
               "arguments": null,
               "kind": "text",
               "provider_correlation_id": null,
+              "text_content": "Supplemental coding advice:\nYou have a strict limit on model requests, and older tool output may be shortened. Locate the relevant code quickly with search_files, read only the line ranges you need, and request several independent read-only tools in the same turn when possible. After each investigation step, write one or two sentences of notes (file, function, line numbers, what must change), because your notes are never shortened. Do not re-read a range you already read unless you need its exact text for edit_file. Make the smallest correct fix with edit_file, then run a focused test if requests remain. The final workspace diff is your answer.",
+              "tool_call_id": null,
+              "tool_name": null
+            }
+          ],
+          "role": "system"
+        },
+        {
+          "parts": [
+            {
+              "arguments": null,
+              "kind": "text",
+              "provider_correlation_id": null,
+              "text_content": "Supplemental coding advice:\nThis is model request 1 of 20; about 200000 model tokens remain.",
+              "tool_call_id": null,
+              "tool_name": null
+            }
+          ],
+          "role": "system"
+        },
+        {
+          "parts": [
+            {
+              "arguments": null,
+              "kind": "text",
+              "provider_correlation_id": null,
               "text_content": "Explain the change",
               "tool_call_id": null,
               "tool_name": null
@@ -324,6 +350,32 @@
               "kind": "text",
               "provider_correlation_id": null,
               "text_content": "Keep repository rules.",
+              "tool_call_id": null,
+              "tool_name": null
+            }
+          ],
+          "role": "system"
+        },
+        {
+          "parts": [
+            {
+              "arguments": null,
+              "kind": "text",
+              "provider_correlation_id": null,
+              "text_content": "Supplemental coding advice:\nYou have a strict limit on model requests, and older tool output may be shortened. Locate the relevant code quickly with search_files, read only the line ranges you need, and request several independent read-only tools in the same turn when possible. After each investigation step, write one or two sentences of notes (file, function, line numbers, what must change), because your notes are never shortened. Do not re-read a range you already read unless you need its exact text for edit_file. Make the smallest correct fix with edit_file, then run a focused test if requests remain. The final workspace diff is your answer.",
+              "tool_call_id": null,
+              "tool_name": null
+            }
+          ],
+          "role": "system"
+        },
+        {
+          "parts": [
+            {
+              "arguments": null,
+              "kind": "text",
+              "provider_correlation_id": null,
+              "text_content": "Supplemental coding advice:\nThis is model request 2 of 20; about 198365 model tokens remain.",
               "tool_call_id": null,
               "tool_name": null
             }
@@ -642,6 +694,32 @@
               "kind": "text",
               "provider_correlation_id": null,
               "text_content": "Keep repository rules.",
+              "tool_call_id": null,
+              "tool_name": null
+            }
+          ],
+          "role": "system"
+        },
+        {
+          "parts": [
+            {
+              "arguments": null,
+              "kind": "text",
+              "provider_correlation_id": null,
+              "text_content": "Supplemental coding advice:\nYou have a strict limit on model requests, and older tool output may be shortened. Locate the relevant code quickly with search_files, read only the line ranges you need, and request several independent read-only tools in the same turn when possible. After each investigation step, write one or two sentences of notes (file, function, line numbers, what must change), because your notes are never shortened. Do not re-read a range you already read unless you need its exact text for edit_file. Make the smallest correct fix with edit_file, then run a focused test if requests remain. The final workspace diff is your answer.",
+              "tool_call_id": null,
+              "tool_name": null
+            }
+          ],
+          "role": "system"
+        },
+        {
+          "parts": [
+            {
+              "arguments": null,
+              "kind": "text",
+              "provider_correlation_id": null,
+              "text_content": "Supplemental coding advice:\nThis is model request 3 of 20; about 196604 model tokens remain.",
               "tool_call_id": null,
               "tool_name": null
             }

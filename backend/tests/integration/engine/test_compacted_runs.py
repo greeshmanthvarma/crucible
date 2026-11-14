@@ -50,7 +50,8 @@ async def test_prepared_context_inherits_latest_compaction_without_deleting_hist
         harness_policy="policy",
         tool_contract="tools",
         model="fixture",
-        input_limit=200,
+        # Leave room for coding advice after compacting the 1000-character history.
+        input_limit=300,
         output_reserve=10,
         threshold=0.8,
         recent_complete_units=0,
