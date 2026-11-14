@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from crucible.improvement.reporting import ReportExporter
 
 pytest_plugins = ["tests.integration.test_improvement_final"]
@@ -193,3 +195,36 @@ async def test_report_and_status_block_exhausted_remaining_allowance(
     )
     assert status["permitted_actions"] == ["remain_blocked"]
     assert data["recovery"]["required_operator_action"] == "remain_blocked"
+
+
+@pytest.mark.parametrize("trial_setup", ["pooled"], indirect=True)
+async def test_pooled_report_shows_reference_out_of_six_and_margin(
+    final_setup, tmp_path
+):
+    evaluator, _, store, manifest, _, _, _, _ = final_setup
+    await store.record_event(
+        manifest.experiment_id,
+        "selection_margin",
+        {
+            "half_a": 12,
+            "half_b": 18,
+            "gap": 6,
+            "margin": 4,
+            "noisy": True,
+            "snapshot_id": str(
+                (await store.search_seal(manifest.experiment_id)).initial_snapshot_id
+            ),
+        },
+    )
+    await ReportExporter(store, evaluator.paths).export_report(
+        manifest.experiment_id, tmp_path / "pooled"
+    )
+    data = json.loads((tmp_path / "pooled/metrics.json").read_text())
+    markdown = (tmp_path / "pooled/report.md").read_text()
+    assert data["configuration"]["reference_repeat_count"] == 6
+    assert data["selection_margin"]["margin"] == 4
+    assert (
+        "Baseline halves differed by 6 passes (above 4); results are unusually noisy."
+        in markdown
+    )
+    assert "reference" in markdown and "/6" in markdown

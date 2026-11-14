@@ -136,7 +136,11 @@ async def final_setup(trial_setup, tmp_path):
         store, old_runner.paths, worker, Grader(), old_runner.protected_suite_root
     )
     # A real runner supplies every selection trial before sealing.
-    await runner.run_selection_baseline(manifest.experiment_id, snapshot.snapshot_id)
+    await runner.run_selection_baseline(
+        manifest.experiment_id,
+        snapshot.snapshot_id,
+        repeats=manifest.reference_repeat_count,
+    )
     await store.record_event(
         manifest.experiment_id,
         "search_outcome",

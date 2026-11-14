@@ -376,7 +376,7 @@ class ReportExporter:
                 for k, v in run.manifest.role_limits.items()
             },
             "budget": run.manifest.budget.model_dump(mode="json"),
-            "repeat_count": 3,
+            "repeat_count": run.manifest.repeat_count,
             "max_rounds": 3,
             "controller_digest": run.manifest.controller_digest,
             "dependency_lock_digest": run.manifest.dependency_lock_digest,
@@ -519,6 +519,53 @@ class ReportExporter:
                 "independently recorded; no values are inferred.",
             ],
         }
+        pooled = run.manifest.scoring_version == "pooled-margin-v1"
+        margin_record = None
+        if pooled:
+            from crucible.improvement.selection import NoiseMargin
+
+            config["reference_repeat_count"] = run.manifest.reference_repeat_count
+            events = await self.store.events(id, "selection_margin")
+            if len(events) == 1:
+                value = NoiseMargin.model_validate(
+                    {key: events[0][key] for key in NoiseMargin.model_fields}
+                )
+                margin_record = value.model_dump(mode="json")
+                margin_record["snapshot_id"] = str(UUID(str(events[0]["snapshot_id"])))
+            data["selection_margin"] = margin_record
+            for split in measurement.splits:
+                rows = [c for c in measurement.cases if c.split == split.split]
+                initial_n = sum(6 if c.split != "final-test" else 3 for c in rows)
+                final_n = sum(
+                    6
+                    if c.split != "final-test"
+                    and (
+                        measurement.initial_snapshot_id == measurement.final_snapshot_id
+                        or any(t.repeat_index >= 3 for t in c.final_trials)
+                    )
+                    else 3
+                    for c in rows
+                )
+                rates[split.split] = {
+                    "initial_trial_denominator": initial_n,
+                    "final_trial_denominator": final_n,
+                    "task_denominator_per_version": split.expected_tasks,
+                    "trial_gain_percentage_points": 100
+                    * (
+                        split.final_passed_trials / final_n
+                        - split.initial_passed_trials / initial_n
+                    )
+                    if split.final_passed_trials is not None
+                    and split.initial_passed_trials is not None
+                    and initial_n
+                    and final_n
+                    else None,
+                    "task_gain_percentage_points": gain(
+                        split.initial_successful_tasks,
+                        split.final_successful_tasks,
+                        split.expected_tasks,
+                    ),
+                }
         lines = [
             f"# Crucible improvement report {id}",
             "",
@@ -530,11 +577,35 @@ class ReportExporter:
             f"Search stop reason: `{seal.stop_reason}`. "
             f"Seal: `{digest(asdict(seal))}`.",
             "",
-            "Each case has three trials per version. A task succeeds at least "
-            "twice out of three; trial and task denominators are reported "
-            "separately.",
+            (
+                "Selection references have six trials; candidates have three. "
+                "Final-test cases have three trials per version. Task success requires "
+                "a strict majority; denominators are reported separately."
+            )
+            if pooled
+            else (
+                "Each case has three trials per version. A task succeeds at least "
+                "twice out of three; trial and task denominators are reported "
+                "separately."
+            ),
             "",
         ]
+        if pooled and margin_record is not None:
+            lines.append(
+                f"Selection margin: {margin_record['margin']}; baseline halves "
+                f"{margin_record['half_a']} and {margin_record['half_b']} passes."
+            )
+            if margin_record["noisy"]:
+                lines.append(
+                    f"Baseline halves differed by {margin_record['gap']} passes "
+                    "(above 4); results are unusually noisy."
+                )
+        for decision in await self.store.decisions(id) if pooled else ():
+            for count in decision.counts:
+                lines.append(
+                    f"- {count.split}: `{count.case_id}` — "
+                    f"reference {count.baseline}/6; candidate {count.candidate}/3."
+                )
         for case in measurement.cases:
             before = (
                 "unavailable"
@@ -544,9 +615,20 @@ class ReportExporter:
             after = (
                 "unavailable" if case.final_passes is None else str(case.final_passes)
             )
+            initial_n = 6 if pooled and case.split != "final-test" else 3
+            final_n = (
+                6
+                if pooled
+                and case.split != "final-test"
+                and (
+                    measurement.initial_snapshot_id == measurement.final_snapshot_id
+                    or any(t.repeat_index >= 3 for t in case.final_trials)
+                )
+                else 3
+            )
             lines.append(
                 f"- {case.split}: `{case.case_id}` — "
-                f"initial {before}/3; final {after}/3."
+                f"initial {before}/{initial_n}; final {after}/{final_n}."
             )
         lines += [
             "",

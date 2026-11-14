@@ -28,10 +28,10 @@ class FinalTrialPort(Protocol):
 class MeasuredCase(Contract):
     case_id: Annotated[str, Field(min_length=1, max_length=200)]
     split: Literal["development", "selection-validation", "final-test"]
-    initial_passes: Annotated[int, Field(ge=0, le=3)] | None
-    final_passes: Annotated[int, Field(ge=0, le=3)] | None
-    initial_trials: Annotated[tuple[ScoredTrial, ...], Field(max_length=3)]
-    final_trials: Annotated[tuple[ScoredTrial, ...], Field(max_length=3)]
+    initial_passes: Annotated[int, Field(ge=0, le=6)] | None
+    final_passes: Annotated[int, Field(ge=0, le=6)] | None
+    initial_trials: Annotated[tuple[ScoredTrial, ...], Field(max_length=6)]
+    final_trials: Annotated[tuple[ScoredTrial, ...], Field(max_length=6)]
 
 
 class SplitMeasurement(Contract):
@@ -47,7 +47,7 @@ class SplitMeasurement(Contract):
 class MeasurementError(Contract):
     snapshot_id: UUID
     case_id: Annotated[str, Field(min_length=1, max_length=200)]
-    repeat_index: Annotated[int, Field(ge=0, le=2)]
+    repeat_index: Annotated[int, Field(ge=0, le=5)]
     reason: Literal["missing", "error", "interrupted"]
     trial_id: UUID | None
 
@@ -64,10 +64,10 @@ class FinalMeasurement(Contract):
     complete: bool
 
 
-def _passes(trials: tuple[ScoredTrial, ...]) -> int | None:
+def _passes(trials: tuple[ScoredTrial, ...], repeats: int = 3) -> int | None:
     if (
-        len(trials) != 3
-        or {t.repeat_index for t in trials} != {0, 1, 2}
+        len(trials) != repeats
+        or {t.repeat_index for t in trials} != set(range(repeats))
         or any(t.verdict not in ("pass", "fail") for t in trials)
     ):
         return None
@@ -117,7 +117,18 @@ class FinalEvaluator:
                 )
                 pairs.append(trials)
                 by_repeat = {t.repeat_index: t for t in trials}
-                for repeat in range(3):
+                repeats = 3
+                if (
+                    manifest.scoring_version == "pooled-margin-v1"
+                    and case.split != "final-test"
+                ):
+                    repeats = (
+                        6
+                        if sid == seal.initial_snapshot_id
+                        or any(t.repeat_index >= 3 for t in trials)
+                        else 3
+                    )
+                for repeat in range(repeats):
                     trial = by_repeat.get(repeat)
                     if trial is None or trial.verdict in ("error", "interrupted"):
                         errors.append(
@@ -138,8 +149,24 @@ class FinalEvaluator:
                 MeasuredCase(
                     case_id=case.case_id,
                     split=case.split,
-                    initial_passes=_passes(before),
-                    final_passes=_passes(after),
+                    initial_passes=_passes(
+                        before,
+                        6
+                        if manifest.scoring_version == "pooled-margin-v1"
+                        and case.split != "final-test"
+                        else 3,
+                    ),
+                    final_passes=_passes(
+                        after,
+                        6
+                        if manifest.scoring_version == "pooled-margin-v1"
+                        and case.split != "final-test"
+                        and (
+                            seal.selected_final_snapshot_id == seal.initial_snapshot_id
+                            or any(t.repeat_index >= 3 for t in after)
+                        )
+                        else 3,
+                    ),
                     initial_trials=before,
                     final_trials=after,
                 )
@@ -164,12 +191,14 @@ class FinalEvaluator:
                         if complete
                         else None,
                         initial_successful_tasks=sum(
-                            (c.initial_passes or 0) >= 2 for c in rows
+                            (c.initial_passes or 0) > len(c.initial_trials) // 2
+                            for c in rows
                         )
                         if complete
                         else None,
                         final_successful_tasks=sum(
-                            (c.final_passes or 0) >= 2 for c in rows
+                            (c.final_passes or 0) > len(c.final_trials) // 2
+                            for c in rows
                         )
                         if complete
                         else None,
