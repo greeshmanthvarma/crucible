@@ -159,8 +159,14 @@ def token_replay(
             )
             for m in original
         )
-        observation = BehaviorObservation(len(before) + 1, 0, 0, BUDGET, 0, (), False)
-        projected = project_coding_tool_results(updated, observation, 0, 0, estimator)
+        step = len(before) + 1
+        spent = sum(after)
+        observation = BehaviorObservation(
+            step, max(0, 20 - step), 0, BUDGET - spent, 0, (), False
+        )
+        projected = project_coding_tool_results(
+            updated, observation, estimator.estimate(updated), 0, estimator
+        )
         before.append(estimator.estimate(original))
         after.append(estimator.estimate(projected))
     return {
