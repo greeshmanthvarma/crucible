@@ -15,9 +15,13 @@ pytest_plugins = ["tests.integration.test_improvement_promotion"]
 
 
 @pytest.fixture
-async def search_setup(tmp_path):
+async def search_setup(tmp_path, request):
     store = await ExperimentStore.open(tmp_path / "state.sqlite3")
-    manifest = search_manifest()
+    manifest = (
+        search_manifest().model_copy(update={"scoring_version": "pooled-margin-v1"})
+        if getattr(request, "param", None) == "pooled"
+        else search_manifest()
+    )
     run = await store.create(manifest, "repo", "key")
     snapshot = HarnessSnapshot(
         snapshot_id=uuid4(),
@@ -117,7 +121,9 @@ class ScriptedSearch:
                 )
                 for c in self.manifest.cases
                 if c.split != "final-test"
-                for i in range(2 if self.incomplete else 3)
+                for i in range(
+                    2 if self.incomplete else self.manifest.reference_repeat_count
+                )
             ),
         )
 
@@ -462,3 +468,62 @@ async def test_supported_mining_stop_dispatches_no_proposal(search_setup):
     assert not result.ready_for_final
     assert port.proposals == 0
     assert len(await store.rounds(id)) == 1
+
+
+@pytest.mark.parametrize("search_setup", ["pooled"], indirect=True)
+async def test_margin_recorded_once_before_mining(search_setup):
+    store, id, port = search_setup
+    original = port.mine
+
+    async def mine(round):
+        assert len(await store.events(id, "selection_margin")) == 1
+        return await original(round)
+
+    port.mine = mine
+    await SearchController(store, port).run(id)
+    margins = await store.events(id, "selection_margin")
+    assert len(margins) == 1
+    assert margins[0]["snapshot_id"] == str(port.snapshot.snapshot_id)
+    assert margins[0]["margin"] == 2
+    assert port.mining_calls == 3
+
+
+@pytest.mark.parametrize("search_setup", ["pooled"], indirect=True)
+async def test_pooled_search_stops_when_mined_repeats_have_no_failures(search_setup):
+    store, id, port = search_setup
+    baseline = port.baseline
+
+    async def evaluation(id):
+        result = await baseline(id)
+        return result.model_copy(
+            update={
+                "trials": tuple(
+                    t.model_copy(
+                        update={
+                            "verdict": "fail"
+                            if t.split == "development" and t.repeat_index == 4
+                            else "pass"
+                        }
+                    )
+                    for t in result.trials
+                )
+            }
+        )
+
+    port.baseline = evaluation
+    result = await SearchController(store, port).run(id)
+    assert result.reason == "insufficient_evidence" and result.ready_for_final
+    assert port.mining_calls == port.proposals == 0
+    assert len(await store.events(id, "selection_margin")) == 1
+    assert (await store.events(id, "mining_skipped"))[0][
+        "reason"
+    ] == "no_failed_development_trials_in_mined_repeats"
+
+
+@pytest.mark.parametrize("search_setup", ["pooled"], indirect=True)
+async def test_pooled_all_development_pass_uses_six(search_setup):
+    store, id, port = search_setup
+    port.all_pass = True
+    result = await SearchController(store, port).run(id)
+    assert result.reason == "all_development_pass"
+    assert port.mining_calls == 0

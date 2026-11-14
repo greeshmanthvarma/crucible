@@ -131,7 +131,22 @@ class PromotionService:
         after = await build_evaluation_set(
             self.store, self.paths, run.id, candidate.snapshot_id
         )
-        if decide_candidate(before, after, checks) != decision:
+        if run.manifest.scoring_version == "pooled-margin-v1":
+            from crucible.improvement.selection import (
+                NoiseMargin,
+                decide_pooled_candidate,
+            )
+
+            events = await self.store.events(run.id, "selection_margin")
+            if len(events) != 1:
+                raise RevisionConflict("initial selection margin required")
+            margin = NoiseMargin.model_validate(
+                {key: events[0][key] for key in NoiseMargin.model_fields}
+            )
+            recomputed = decide_pooled_candidate(before, after, checks, margin)
+        else:
+            recomputed = decide_candidate(before, after, checks)
+        if recomputed != decision:
             raise RevisionConflict("promotion evidence or policy drift")
         return decision, candidate
 

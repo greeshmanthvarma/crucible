@@ -15,7 +15,12 @@ from crucible.improvement.roles import (
     RoleRunner,
     SelectionDecision,
 )
-from crucible.improvement.selection import EvaluationSet, selection_counts
+from crucible.improvement.selection import (
+    EvaluationSet,
+    NoiseMargin,
+    noise_margin,
+    selection_counts,
+)
 from crucible.improvement.store import ExperimentStore, RoundRecord
 from crucible.improvement.trials import IsolatedTrialRunner
 from crucible.improvement.worktree import OwnedWorktree
@@ -130,16 +135,62 @@ class SearchController:
                 if active is None and len(rounds) >= 3:
                     return await self._outcome(id, "round_limit")
                 evaluation = await self.execution.baseline(id)
-                counts = selection_counts(evaluation)
+                manifest = (await self.store.get(id)).manifest
+                counts = selection_counts(evaluation, manifest.reference_repeat_count)
                 if counts is None:
                     await self.store.fail_run(id, "incomplete_selection_baseline")
                     return await self._outcome(id, "infrastructure_error")
                 if all(
-                    counts[c.case_id] == 3
+                    counts[c.case_id] == manifest.reference_repeat_count
                     for c in evaluation.required_cases
                     if c.split == "development"
                 ):
                     return await self._outcome(id, "all_development_pass")
+                if manifest.scoring_version == "pooled-margin-v1":
+                    margins = await self.store.events(id, "selection_margin")
+                    if not margins:
+                        sid = await self.store.accepted_snapshot_id(id)
+                        initial = [
+                            row
+                            for row in await self.store.snapshots(id)
+                            if row["kind"] == "baseline"
+                            and row["source_digest"] == manifest.initial_source_digest
+                            and row["parent_commit"] == manifest.initial_commit
+                        ]
+                        margin = noise_margin(evaluation)
+                        if (
+                            len(initial) != 1
+                            or str(initial[0]["id"]) != str(sid)
+                            or margin is None
+                        ):
+                            await self.store.fail_run(
+                                id, "incomplete_selection_baseline"
+                            )
+                            return await self._outcome(id, "infrastructure_error")
+                        await self.store.record_event(
+                            id,
+                            "selection_margin",
+                            {**margin.model_dump(mode="json"), "snapshot_id": str(sid)},
+                        )
+                    if not any(
+                        t.split == "development"
+                        and t.repeat_index < 3
+                        and t.verdict == "fail"
+                        for t in evaluation.trials
+                    ):
+                        await self.store.record_event(
+                            id,
+                            "mining_skipped",
+                            {
+                                "reason": (
+                                    "no_failed_development_trials_in_mined_repeats"
+                                ),
+                                "snapshot_id": str(
+                                    await self.store.accepted_snapshot_id(id)
+                                ),
+                            },
+                        )
+                        return await self._outcome(id, "insufficient_evidence")
                 if active is None:
                     run = await self.store.require_search_open(id)
                     active = await self.store.begin_round(
@@ -210,8 +261,11 @@ class LocalSearchExecution:
         sid = await self.store.accepted_snapshot_id(experiment_id)
         # Verify existing evidence before scheduling; ambiguous generations fail closed.
         before = await build_evaluation_set(self.store, self.paths, experiment_id, sid)
-        if selection_counts(before) is None:
-            await self.trials.run_selection_baseline(experiment_id, sid)
+        manifest = (await self.store.get(experiment_id)).manifest
+        if selection_counts(before, manifest.reference_repeat_count) is None:
+            await self.trials.run_selection_baseline(
+                experiment_id, sid, repeats=manifest.reference_repeat_count
+            )
         return await build_evaluation_set(self.store, self.paths, experiment_id, sid)
 
     async def mine(self, round: RoundRecord) -> MiningResult:
@@ -369,10 +423,22 @@ class LocalSearchExecution:
             },
         )
         if checks.verdict == "pass" and checks.cleanup_confirmed:
-            await self.trials.run_selection_baseline(id, candidate.snapshot_id)
+            await self.trials.run_selection_baseline(
+                id, candidate.snapshot_id, repeats=run.manifest.candidate_repeat_count
+            )
         evaluation = await build_evaluation_set(
             self.store, self.paths, id, candidate.snapshot_id
         )
+        if run.manifest.scoring_version == "pooled-margin-v1":
+            from crucible.improvement.selection import decide_pooled_candidate
+
+            events = await self.store.events(id, "selection_margin")
+            if len(events) != 1:
+                raise ValueError("initial selection margin required")
+            margin = NoiseMargin.model_validate(
+                {key: events[0][key] for key in NoiseMargin.model_fields}
+            )
+            return decide_pooled_candidate(baseline, evaluation, checks, margin)
         return decide_candidate(baseline, evaluation, checks)
 
     async def promote(self, round: RoundRecord) -> None:

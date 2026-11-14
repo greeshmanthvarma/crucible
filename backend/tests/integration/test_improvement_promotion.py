@@ -31,7 +31,7 @@ pytest_plugins = ["tests.unit.test_improvement_source"]
 
 
 @pytest.fixture
-async def promotion_setup(harness, tmp_path):
+async def promotion_setup(harness, tmp_path, request):
     repository, commit = harness
     root = tmp_path / "state"
     suite = tmp_path / "suite"
@@ -44,6 +44,9 @@ async def promotion_setup(harness, tmp_path):
     manifest = search_manifest().model_copy(
         update={
             "experiment_id": experiment_id,
+            "scoring_version": "pooled-margin-v1"
+            if getattr(request, "param", None) == "pooled"
+            else "per-case-count-v1",
             "initial_commit": commit,
             "initial_source_digest": baseline.source_digest,
             "boundary_suite_digest": suite_digest(suite),
@@ -58,7 +61,13 @@ async def promotion_setup(harness, tmp_path):
     candidate = stage_harness(owned.path, commit, root / "candidate", EDITABLE_PATHS)
     await store.register_snapshot(run.id, candidate, "candidate/snapshot.json")
     await record_trials(store, root, manifest, baseline, 0)
-    await record_trials(store, root, manifest, candidate, 1)
+    await record_trials(
+        store,
+        root,
+        manifest,
+        candidate,
+        3 if manifest.scoring_version == "pooled-margin-v1" else 1,
+    )
     checks_dir = root / "checks"
     checks_dir.mkdir()
     log = checks_dir / "checks.log.json"
@@ -100,13 +109,21 @@ async def promotion_setup(harness, tmp_path):
 
 
 async def record_trials(
-    store, root, manifest, snapshot, dev_count, *, final_authorization=None
+    store,
+    root,
+    manifest,
+    snapshot,
+    dev_count,
+    *,
+    final_authorization=None,
+    repeats=3,
+    start=0,
 ):
     run = await store.get(manifest.experiment_id)
     for case in manifest.cases:
         if (case.split == "final-test") != (final_authorization is not None):
             continue
-        for repeat in range(3):
+        for repeat in range(start, repeats):
             trial = await store.create_trial(
                 run.id,
                 snapshot.snapshot_id,
@@ -123,7 +140,7 @@ async def record_trials(
             passed = (
                 repeat < dev_count
                 if case.split in ("development", "final-test")
-                else repeat > 0
+                else repeat % 3 > 0
             )
             result = TrialResult(
                 TrialIdentity(
@@ -437,3 +454,38 @@ async def test_duplicate_generations_are_not_silently_selected(promotion_setup):
         )
         == before
     )
+
+
+@pytest.mark.parametrize("promotion_setup", ["pooled"], indirect=True)
+async def test_pooled_schedule_tops_up_promoted_reference(promotion_setup, tmp_path):
+    from crucible.improvement.selection import (
+        decide_pooled_candidate,
+        noise_margin,
+        selection_counts,
+    )
+    from crucible.improvement.trials import build_evaluation_set
+
+    service, store, paths, owned, round, baseline, candidate, checks = promotion_setup
+    id = round.experiment_id
+    manifest = (await store.get(id)).manifest
+    await record_trials(store, paths.root, manifest, baseline, 0, repeats=6, start=3)
+    before = await build_evaluation_set(store, paths, id, baseline.snapshot_id)
+    after = await build_evaluation_set(store, paths, id, candidate.snapshot_id)
+    margin = noise_margin(before)
+    await store.record_event(
+        id,
+        "selection_margin",
+        {**margin.model_dump(mode="json"), "snapshot_id": str(baseline.snapshot_id)},
+    )
+    assert selection_counts(before, 6) is not None
+    assert len(before.trials) == 12 and len(after.trials) == 6
+    decision = decide_pooled_candidate(before, after, checks, margin)
+    assert decision.verdict == "promote"
+    await store.record_decision(round.id, decision, (await store.get(id)).revision)
+    await service.promote(round.id, digest(decision))
+    first_ids = {t.original_trial_id for t in after.trials}
+    await record_trials(store, paths.root, manifest, candidate, 3, repeats=6, start=3)
+    topped = await build_evaluation_set(store, paths, id, candidate.snapshot_id)
+    assert len(topped.trials) == 12
+    assert first_ids <= {t.original_trial_id for t in topped.trials}
+    assert selection_counts(topped, 6) is not None
