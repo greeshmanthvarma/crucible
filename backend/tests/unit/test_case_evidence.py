@@ -322,3 +322,76 @@ def test_same_assembler_handles_nonpatch_development_failure(nonpatch_package):
         "A later success alone does not establish recovery"
         in prepared.initial.messages[0].parts[0].text_content
     )
+
+
+def test_packet_adds_budget_signal_only_for_budget_exhaustion(tmp_path, verified_trial):
+    for index, termination in enumerate(("budget_exhausted", "completed")):
+        trial = replace(verified_trial, termination=termination)
+        root = tmp_path / str(index)
+        package = seal(root, (trial,))
+        packet = prepare((root, package, trial.trial_id)).packet
+        signals = [e for e in packet.events if e.id == "signal:budget_exhaustion"]
+        assert bool(signals) == (termination == "budget_exhausted")
+        if signals:
+            assert signals[0].excerpt.startswith(
+                "Solver stopped on a budget limit after "
+            )
+            assert signals[0].kind == "signal" and signals[0].tool is None
+
+
+@pytest.mark.parametrize("calls,expected", [(3, False), (4, True), (7, True)])
+def test_packet_adds_repeated_reads_signal_at_three_repeats(
+    tmp_path, verified_trial, parallel_records, calls, expected
+):
+    from uuid import UUID
+
+    trace = parallel_records
+    original = trace["tool_calls"][0]
+    trace["tool_calls"] = tuple(
+        replace(original, id=UUID(int=100 + i), call_sequence=i + 1)
+        for i in range(calls)
+    )
+    user, assistant, tool = trace["messages"]
+    part = assistant.parts[0]
+    assistant = replace(
+        assistant,
+        parts=tuple(
+            replace(part, id=UUID(int=200 + i), part_sequence=i + 1, tool_call_id=c.id)
+            for i, c in enumerate(trace["tool_calls"])
+        ),
+    )
+    trace["messages"] = (user, assistant)
+    trace["tool_results"] = ()
+    trial = with_evidence(verified_trial, trace, b"")
+    package = seal(tmp_path / "package", (trial,))
+    packet = prepare((tmp_path / "package", package, trial.trial_id)).packet
+    signals = [e for e in packet.events if e.id == "signal:repeated_reads"]
+    assert bool(signals) == expected
+    if signals:
+        assert signals[0].excerpt.startswith(f"{calls - 1} of {calls} read_file calls")
+        assert "a.py×" in signals[0].excerpt
+
+
+def test_signal_rows_survive_event_budget(patch_package):
+    from crucible.improvement.case_evidence import CaseEvent, _fit_initial
+
+    prepared = prepare(patch_package)
+    signal = CaseEvent(
+        "signal:repeated_reads",
+        "signal",
+        None,
+        "observed",
+        None,
+        None,
+        None,
+        "3 repeated reads",
+    )
+    packet = replace(prepared.packet, events=(signal, *prepared.packet.events))
+    # Exercise omission using a large optional event population.
+    events = tuple(
+        replace(packet.events[-1], id=f"E{i}", excerpt="x" * 160)
+        for i in range(100, 400)
+    )
+    packet = replace(packet, events=(*packet.events, *events))
+    fitted = _fit_initial(packet, dict(prepared._details), 4000)
+    assert fitted.packet.events[0] == signal

@@ -28,7 +28,7 @@ class EvaluationSet(Contract):
     export_digest: Sha256
     config_policy_digest: Sha256
     required_cases: Annotated[tuple[FrozenCaseRef, ...], Field(max_length=4096)]
-    trials: Annotated[tuple[ScoredTrial, ...], Field(max_length=12288)]
+    trials: Annotated[tuple[ScoredTrial, ...], Field(max_length=24576)]
 
 
 def selection_counts(

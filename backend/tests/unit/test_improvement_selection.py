@@ -315,3 +315,35 @@ def test_pooled_rejects_validation_loss_allows_equal(val, reason):
         noise_margin(reference),
     )
     assert result.reason == reason
+
+
+def test_per_case_decisions_unchanged():
+    import sqlite3
+    from pathlib import Path
+
+    from crucible.improvement.roles import SelectionDecision
+    from crucible.repair.identity import digest
+
+    database = Path("../data/self-improvement/full-run-v1/runtime/experiments.sqlite3")
+    if not database.exists():
+        pytest.skip("private v1 ledger absent")
+    with sqlite3.connect(
+        database.resolve().as_uri() + "?mode=ro&immutable=1", uri=True
+    ) as connection:
+        rows = connection.execute(
+            "SELECT decision_ref, decision_digest FROM experiment_rounds "
+            "WHERE decision_ref IS NOT NULL"
+        ).fetchall()
+    assert rows
+    for raw, expected in rows:
+        decision = SelectionDecision.model_validate_json(raw)
+        assert digest(decision) == expected
+
+
+def test_six_repeat_scoring_accepts_maximum_manifest_case_count():
+    from crucible.improvement.selection import selection_counts
+
+    evaluation = evals([6] * 2048, [6] * 2048, repeats=6)
+    counts = selection_counts(evaluation, 6)
+    assert counts is not None and len(counts) == 4096
+    assert set(counts.values()) == {6}

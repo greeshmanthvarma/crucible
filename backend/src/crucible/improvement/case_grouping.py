@@ -71,7 +71,7 @@ def _cited_attempt(packet: CasePacket, diagnosis: Diagnosis) -> DiagnosedAttempt
             event.id, event.tool, event.status, event.error_code, event.excerpt
         )
         for event in packet.events
-        if event.kind == "tool_result" and event.id in cited_ids
+        if event.kind in ("tool_result", "signal") and event.id in cited_ids
     )
     return DiagnosedAttempt(packet.case_id, packet.failed_trial_id, diagnosis, results)
 
@@ -80,6 +80,11 @@ def _candidate_labels(attempt: DiagnosedAttempt) -> tuple[str, ...]:
     return tuple(
         sorted(
             {
+                result.id.removeprefix("signal:")
+                for result in attempt.cited_results
+                if result.id in ("signal:budget_exhaustion", "signal:repeated_reads")
+            }
+            | {
                 _TOOL_LABELS[result.tool]
                 for result in attempt.cited_results
                 if result.tool is not None

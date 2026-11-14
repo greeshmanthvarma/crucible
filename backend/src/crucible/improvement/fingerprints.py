@@ -15,7 +15,8 @@ def trial_key(
     case: FrozenCaseRef,
     repeat_index: int,
 ) -> str:
-    if repeat_index not in range(6):
+    repeats = 3 if case.split == "final-test" else manifest.reference_repeat_count
+    if repeat_index not in range(repeats):
         raise ValueError("invalid repeat")
     return digest(
         dict(

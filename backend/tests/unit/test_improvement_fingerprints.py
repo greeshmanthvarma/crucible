@@ -35,3 +35,27 @@ def test_model_limits_image_policy_and_evaluator_invalidate_key():
             != original
         )
     assert trial_key(manifest, snapshot, manifest.cases[0], 1) != original
+
+
+def test_repeat_key_bounds_follow_scoring_and_split():
+    import pytest
+
+    manifest = make_manifest()
+    snapshot = HarnessSnapshot(
+        snapshot_id=uuid4(),
+        parent_commit="a" * 40,
+        source_digest="a" * 64,
+        export_digest="b" * 64,
+        patch_digest=None,
+        kind="baseline",
+    )
+    selection = next(c for c in manifest.cases if c.split == "development")
+    final = next(c for c in manifest.cases if c.split == "final-test")
+    with pytest.raises(ValueError):
+        trial_key(manifest, snapshot, selection, 3)
+    pooled = manifest.model_copy(update={"scoring_version": "pooled-margin-v1"})
+    assert trial_key(pooled, snapshot, selection, 5)
+    with pytest.raises(ValueError):
+        trial_key(pooled, snapshot, selection, 6)
+    with pytest.raises(ValueError):
+        trial_key(pooled, snapshot, final, 3)

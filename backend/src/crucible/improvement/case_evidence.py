@@ -45,6 +45,8 @@ supported partial contribution, and recovered when the trace shows recovery from
 that behavior. A later success alone does not establish recovery. Use unknown
 when the relationship is unresolved. Report the strongest supported lead and
 what evidence is missing when the cause remains unclear.
+Rows of kind signal are harness-computed facts about the whole attempt; cite them
+when the behavior they describe is linked or contributing.
 Return one JSON object with a result field and no extra text. The result is
 either an object with a diagnosis field
 containing observed_behavior (text), relationship (linked, contributing,
@@ -379,10 +381,81 @@ def _events(
     return tuple(events), details, tuple(truncated_ids), tuple(withheld_ids)
 
 
+def _signals(
+    reader: _PackageReader,
+    trial: TrialOverview,
+    records: tuple[TrajectoryRecord, ...],
+    entries: dict[str, DetailEntry],
+    submission: Submission,
+) -> tuple[CaseEvent, ...]:
+    assistants = 0
+    reads: dict[str, int] = {}
+    for record in records:
+        if record.detail_ref is None:
+            continue
+        entry = entries[record.detail_ref]
+        if entry.truncated:
+            continue
+        content = reader.detail(trial, entry)
+        if (
+            record.kind == "message"
+            and isinstance(content, dict)
+            and content.get("role") == "assistant"
+        ):
+            assistants += 1
+        if (
+            record.kind == "tool_call"
+            and record.tool == "read_file"
+            and isinstance(content, dict)
+        ):
+            path = content.get("path")
+            if isinstance(path, str):
+                reads[path] = reads.get(path, 0) + 1
+    signals = []
+
+    def signal(label: str, text: str) -> CaseEvent:
+        return CaseEvent(
+            "signal:" + label,
+            "signal",
+            None,
+            "observed",
+            None,
+            None,
+            None,
+            text[:EVENT_CHARS],
+        )
+
+    if trial.termination == "budget_exhausted":
+        signals.append(
+            signal(
+                "budget_exhaustion",
+                f"Solver stopped on a budget limit after {assistants} model requests; "
+                f"submission {submission.state}.",
+            )
+        )
+    repeats = sum(count - 1 for count in reads.values())
+    if repeats >= 3:
+        top = ", ".join(
+            f"{path}×{count}"
+            for path, count in sorted(
+                reads.items(), key=lambda item: (-item[1], item[0])
+            )[:3]
+        )
+        signals.append(
+            signal(
+                "repeated_reads",
+                f"{repeats} of {sum(reads.values())} read_file calls re-read a path "
+                f"already read; most repeated: {top}",
+            )
+        )
+    return tuple(signals)
+
+
 def _anchor_ids(events: tuple[CaseEvent, ...]) -> set[str]:
     if not events:
         return set()
     anchors = {events[0].id, events[-1].id}
+    anchors.update(event.id for event in events if event.kind == "signal")
     by_outcome: dict[tuple[str | None, str], list[CaseEvent]] = {}
     for event in events:
         if event.kind == "tool_result" and event.status in {"succeeded", "failed"}:
@@ -447,10 +520,16 @@ def _fit_initial(
         if preview.input_tokens <= limit:
             retained = {ref: details[ref] for ref in packet.available_detail_refs}
             return PreparedCasePacket(packet, preview, MappingProxyType(retained))
-        if any(event.excerpt is not None for event in packet.events):
+        if any(
+            event.excerpt is not None and event.kind != "signal"
+            for event in packet.events
+        ):
             packet = replace(
                 packet,
-                events=tuple(replace(event, excerpt=None) for event in packet.events),
+                events=tuple(
+                    event if event.kind == "signal" else replace(event, excerpt=None)
+                    for event in packet.events
+                ),
             )
         elif packet.comparison is not None:
             packet = replace(
@@ -538,7 +617,7 @@ def _assemble(
         target.termination,
         submission,
         _outcomes(records),
-        events,
+        (*_signals(reader, target, records, entries, submission), *events),
         comparison,
         Gaps(
             unavailable_fields=unavailable,

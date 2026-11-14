@@ -131,3 +131,25 @@ def test_rejects_invalid_provenance_or_duplicate_trial(packet):
     item = (packet, observed("E6"))
     with pytest.raises(ValueError, match="Duplicate diagnosed trial"):
         group_tool_failures((item, item))
+
+
+def test_grouping_uses_cited_signal(packet):
+    signal = CaseEvent(
+        "signal:repeated_reads",
+        "signal",
+        None,
+        "observed",
+        None,
+        None,
+        None,
+        "Repeated reads",
+    )
+    packet = replace(packet, events=(signal, result("apply_patch")))
+    report = group_tool_failures(((packet, observed(signal.id)),))
+    assert report.groups[0].label == "repeated_reads"
+    report = group_tool_failures(((packet, observed(signal.id, "E1")),))
+    assert report.unresolved[0].reason == "multiple_tools"
+    assert report.unresolved[0].candidate_labels == (
+        "apply_patch_failure",
+        "repeated_reads",
+    )
