@@ -195,3 +195,33 @@ def test_calibration_split_is_never_measured():
     payload["cases"][0]["split"] = "calibration"
     with pytest.raises(ValueError):
         ExperimentManifest.model_validate_json(json.dumps(payload))
+
+
+def test_pooled_manifest_schedule():
+    import json
+
+    payload = manifest_payload()
+    payload["scoring_version"] = "pooled-margin-v1"
+    payload["cases"] = [
+        {**case, "case_id": f"{case['case_id']}-{index}"}
+        for case in payload["cases"]
+        for index in range(5)
+    ]
+    manifest = ExperimentManifest.model_validate_json(json.dumps(payload))
+    assert (manifest.reference_repeat_count, manifest.candidate_repeat_count) == (6, 3)
+    assert manifest.baseline_trial_count == 60
+    assert manifest.planned_trial_upper_bound == 240
+
+
+def test_v1_manifest_schedule_and_decision_unchanged():
+    from pathlib import Path
+
+    raw = Path("../data/self-improvement/full-run-v1/experiment-manifest.json")
+    if not raw.exists():
+        pytest.skip("local experiment data absent")
+    manifest = ExperimentManifest.model_validate_json(raw.read_text())
+    assert manifest.reference_repeat_count == 3
+    assert (manifest.baseline_trial_count, manifest.planned_trial_upper_bound) == (
+        30,
+        150,
+    )

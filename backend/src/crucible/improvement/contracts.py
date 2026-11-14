@@ -128,7 +128,7 @@ class ExperimentManifest(ExecutionPolicy):
     max_rounds: Literal[3]
     editable_paths: tuple[str, ...]
     boundary_suite_digest: Sha256
-    scoring_version: Literal["per-case-count-v1"]
+    scoring_version: Literal["per-case-count-v1", "pooled-margin-v1"]
     disposable_commands_authorized: bool = False
 
     @model_validator(mode="after")
@@ -155,11 +155,28 @@ class ExperimentManifest(ExecutionPolicy):
         return self
 
     @property
+    def reference_repeat_count(self) -> int:
+        return 6 if self.scoring_version == "pooled-margin-v1" else 3
+
+    @property
+    def candidate_repeat_count(self) -> int:
+        return 3
+
+    @property
     def baseline_trial_count(self) -> int:
-        return 3 * sum(c.split != "final-test" for c in self.cases)
+        return self.reference_repeat_count * sum(
+            c.split != "final-test" for c in self.cases
+        )
 
     @property
     def planned_trial_upper_bound(self) -> int:
+        if self.scoring_version == "pooled-margin-v1":
+            nonfinal = sum(c.split != "final-test" for c in self.cases)
+            final = sum(c.split == "final-test" for c in self.cases)
+            return (
+                nonfinal * (6 + 3 * self.max_rounds + 3 * (self.max_rounds - 1))
+                + 6 * final
+            )
         return self.baseline_trial_count * 4 + 6 * sum(
             c.split == "final-test" for c in self.cases
         )
