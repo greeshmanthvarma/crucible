@@ -7,6 +7,7 @@ with that checkout's uv environment and --repository pointing at that checkout.
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -38,14 +39,16 @@ def trial_budget(limits: dict, policy: dict) -> dict:
 def write_runner(destination: Path) -> None:
     destination.write_text("""#!/bin/bash
 set -eu
-batch=${1:?usage: run.sh new|old}
-case "$batch" in new|old) ;; *) echo 'Choose new or old' >&2; exit 2;; esac
+batch=${1-}
+case "$batch" in *[!a-z0-9-]*|-*|'') echo 'Invalid batch name' >&2; exit 2;; esac
 root=$(cd -- "$(dirname -- "$0")" && pwd)
 plan="$root/$batch-harness/batch.json"
+[ -f "$plan" ] || { echo 'Batch plan does not exist' >&2; exit 2; }
 [ -t 0 ] || { echo 'Terminal stdin required for manual approval' >&2; exit 2; }
 # Python validates the frozen plan and emits shell-quoted arguments only.
 eval "$(python3 - "$plan" <<'PYTHON'
-import json, shlex, sys
+import json
+import re, shlex, sys
 p=json.load(open(sys.argv[1]))
 print('repository='+shlex.quote(p['repository']))
 print('expected='+shlex.quote(p['commit']))
@@ -74,6 +77,8 @@ done
 
 
 def prepare(repository: Path, source_root: Path, batch: str) -> dict:
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]*", batch) is None:
+        raise ValueError("invalid batch name")
     if git(repository, "status", "--porcelain"):
         raise ValueError("commit scripts first: repository must be clean")
     original = source_root / "data/self-improvement/full-run-v1"
@@ -178,7 +183,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--source-root", type=Path, default=Path(__file__).resolve().parents[2]
     )
-    parser.add_argument("--batch", choices=("new", "old"), default="new")
+    parser.add_argument("--batch", default="new")
     args = parser.parse_args()
     print(
         json.dumps(

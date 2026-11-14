@@ -543,9 +543,12 @@ async def test_context_inputs_are_captured_before_validation_without_interferenc
     if not capture_broken:
         _, raw = await recorder.read(captures[0].id, task_id=run.task_id)
         payload = json.loads(raw)
+        from crucible.engine.coding_behavior import coding_guidance
+
         assert payload["context"]["required_instructions"] == [
             "required policy",
             "required contract",
+            f"Supplemental coding advice:\n{coding_guidance()}",
         ]
         assert payload["context"]["message_ids"]
         assert payload["source_ids"]["step_id"] == str(step.id)
@@ -603,7 +606,13 @@ async def assert_context_input_replay(
     incident = IncidentContext(factory, artifacts)
     await incident.authorize_case(repair.id, case)
     settings = await incident.replay_settings(repair.id, case)
-    assert settings["required_instructions"] == ["required policy", "required contract"]
+    from crucible.engine.coding_behavior import coding_guidance
+
+    assert settings["required_instructions"] == [
+        "required policy",
+        "required contract",
+        f"Supplemental coding advice:\n{coding_guidance()}",
+    ]
     assert settings["recent_complete_units"] == 2
     sealed = seal_case(case.model_copy(update={"settings": settings}), uuid4())
     service = TrialService(

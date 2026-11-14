@@ -1,7 +1,10 @@
 import importlib.util
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
+
+import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[3] / "scripts"
 
@@ -149,7 +152,7 @@ def test_runner_skips_outputs_and_stops_on_exit_three(tmp_path):
     root.mkdir()
     repository = tmp_path / "checkout"
     (repository / "backend").mkdir(parents=True)
-    batch = root / "new-harness"
+    batch = root / "new-v2-harness"
     batch.mkdir()
     (batch / "batch.json").write_text(
         json.dumps({"repository": str(repository), "commit": "frozen"})
@@ -171,7 +174,7 @@ def test_runner_skips_outputs_and_stops_on_exit_three(tmp_path):
     master, slave = os.openpty()
     try:
         result = subprocess.run(
-            [str(runner), "new"],
+            [str(runner), "new-v2"],
             stdin=slave,
             capture_output=True,
             text=True,
@@ -186,3 +189,99 @@ def test_runner_skips_outputs_and_stops_on_exit_three(tmp_path):
     assert result.stdout.count("MOCK") == 1
     assert str(batch / "b/config.json") in result.stdout
     assert str(batch / "c/config.json") not in result.stdout
+
+
+def test_prepare_rejects_invalid_batch_name(tmp_path):
+    prepare = script("prepare_solver_calibration")
+    with pytest.raises(ValueError, match="batch"):
+        prepare.prepare(tmp_path, tmp_path, "../x")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_runner_rejects_invalid_batch_name(tmp_path):
+    target = tmp_path / "run.sh"
+    script("prepare_solver_calibration").write_runner(target)
+    result = subprocess.run([str(target), "../x"], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "Invalid batch" in result.stderr
+
+
+def test_summary_reads_isolated_calibration_output(tmp_path):
+    test_baseline_query_excludes_candidates_and_other_splits(tmp_path)
+    directory = tmp_path / "data/self-improvement/calibration-v1/x-harness/trial"
+    output = directory / "output"
+    output.mkdir(parents=True)
+    case = tmp_path / "case.json"
+    case.write_text(json.dumps({"case_id": "dev"}))
+    (directory / "config.json").write_text(
+        json.dumps({"manifest": {"case_manifest": str(case)}})
+    )
+    (output / "trace.json").write_text(
+        json.dumps({"messages": [], "tool_calls": [], "tool_results": []})
+    )
+    (output / "usage.json").write_text(json.dumps({"authority": "host-broker"}))
+    (output / "result.json").write_text(json.dumps({"grade": {"verdict": "pass"}}))
+    (output / "solution.diff").write_text("patch")
+    ledger = directory / "private/id/calibration.sqlite3"
+    ledger.parent.mkdir(parents=True)
+    with sqlite3.connect(ledger) as db:
+        db.execute("CREATE TABLE experiment_usage(kind, settled_json)")
+        db.executemany(
+            "INSERT INTO experiment_usage VALUES (?, ?)",
+            [
+                ("model", json.dumps({"tokens": 100, "requests": 1})),
+                ("model", json.dumps({"tokens": 250, "requests": 1})),
+                ("worker", json.dumps({"tokens": 900, "requests": 7})),
+            ],
+        )
+    row = script("summarize_solver_calibration").summarize(tmp_path)["x-harness"][
+        "total"
+    ]
+    assert row["model_requests"] == 2
+    assert row["model_tokens"] == 350
+
+
+def test_summary_counts_repeat_reads_and_first_edit(tmp_path):
+    summary = script("summarize_solver_calibration")
+    messages = [
+        {"id": str(i), "role": "assistant", "conversation_sequence": i}
+        for i in range(1, 4)
+    ]
+    calls = [
+        {
+            "id": "a",
+            "assistant_message_id": "1",
+            "name": "read_file",
+            "arguments": {"path": "a.py"},
+        },
+        {
+            "id": "b",
+            "assistant_message_id": "2",
+            "name": "read_file",
+            "arguments": {"path": "a.py"},
+        },
+        {
+            "id": "c",
+            "assistant_message_id": "2",
+            "name": "read_file",
+            "arguments": {"path": "b.py"},
+        },
+        {
+            "id": "d",
+            "assistant_message_id": "3",
+            "name": "edit_file",
+            "arguments": {"path": "a.py"},
+        },
+    ]
+    trace = {"messages": messages, "tool_calls": calls}
+    path = tmp_path / "trace.json"
+    path.write_text(json.dumps(trace))
+    row = summary.trial_metrics(tmp_path)
+    assert row["repeat_reads"] == 1
+    assert row["read_calls"] == 3
+    assert row["first_edit_request"] == [3]
+    trace["tool_calls"] = calls[:-1]
+    path.write_text(json.dumps(trace))
+    no_edit = summary.trial_metrics(tmp_path)
+    assert no_edit["first_edit_request"] == [None]
+    assert summary.combine([row, no_edit])["first_edit_request"] == [3, None]
