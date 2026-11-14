@@ -215,3 +215,31 @@ async def test_role_completion_is_durable_and_cannot_be_overwritten(tmp_path):
         assert len(await store.events(run.id, "role_saved")) == 2
     finally:
         await store.close()
+
+
+@pytest.mark.parametrize("pooled", [False, True])
+async def test_store_rejects_repeat_beyond_reference_count(tmp_path, pooled):
+    store = await ExperimentStore.open(tmp_path / "state.sqlite3")
+    try:
+        manifest = search_manifest().model_copy(
+            update={
+                "scoring_version": "pooled-margin-v1" if pooled else "per-case-count-v1"
+            }
+        )
+        run = await store.create(manifest, "repo", "key")
+        snapshot = baseline(manifest)
+        await store.register_snapshot(run.id, snapshot, "snapshot.json")
+        if pooled:
+            await store.create_trial(
+                run.id, snapshot.snapshot_id, "development", 5, "key"
+            )
+        with pytest.raises(ValueError, match="outside selection"):
+            await store.create_trial(
+                run.id, snapshot.snapshot_id, "development", 6 if pooled else 3, "key"
+            )
+        with pytest.raises(ValueError):
+            await store.create_trial(
+                run.id, snapshot.snapshot_id, "final-test", 3, "key"
+            )
+    finally:
+        await store.close()

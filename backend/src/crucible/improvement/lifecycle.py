@@ -874,14 +874,21 @@ class ExperimentService:
                     SwebenchGrader(record.manifest.grader),
                     config.protected_suite_root,
                 )
-                results = await runner.run_selection_baseline(id, snapshot_id)
+                repeats = (
+                    record.manifest.candidate_repeat_count
+                    if candidate
+                    else record.manifest.reference_repeat_count
+                )
+                results = await runner.run_selection_baseline(
+                    id, snapshot_id, repeats=repeats
+                )
                 from crucible.improvement.selection import selection_counts
                 from crucible.improvement.trials import build_evaluation_set
 
                 evaluation = await build_evaluation_set(
                     self.store, paths, id, snapshot_id
                 )
-                response["complete"] = selection_counts(evaluation) is not None
+                response["complete"] = selection_counts(evaluation, repeats) is not None
                 response["completed_stage"] = (
                     ("candidate_trials" if candidate else "baseline")
                     if response["complete"]

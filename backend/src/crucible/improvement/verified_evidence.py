@@ -353,7 +353,11 @@ class DevelopmentArchiveReader:
                 ):
                     raise TrajectoryError("identity_mismatch", "invalid supersession")
                 removed.add(old_id)
-            selected_rows = [r for r in rows if str(r["id"]) not in removed]
+            selected_rows = [
+                r
+                for r in rows
+                if str(r["id"]) not in removed and int(str(r["repeat_index"])) < 3
+            ]
             keys = [(r["case_id"], r["repeat_index"]) for r in selected_rows]
             if len(keys) != len(set(keys)):
                 raise TrajectoryError("identity_mismatch", "ambiguous generations")

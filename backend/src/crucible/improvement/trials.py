@@ -75,12 +75,14 @@ class GraderPort(Protocol):
     ) -> GradeResult: ...
 
 
-def selection_schedule(manifest: ExperimentManifest) -> tuple[tuple[str, int], ...]:
+def selection_schedule(
+    manifest: ExperimentManifest, repeats: int = 3
+) -> tuple[tuple[str, int], ...]:
     return tuple(
         (case.case_id, index)
         for case in manifest.cases
         if case.split != "final-test"
-        for index in range(3)
+        for index in range(repeats)
     )
 
 
@@ -605,11 +607,11 @@ class IsolatedTrialRunner:
             return result
 
     async def run_selection_baseline(
-        self, experiment_id: UUID, snapshot_id: UUID
+        self, experiment_id: UUID, snapshot_id: UUID, repeats: int = 3
     ) -> tuple[TrialResult, ...]:
         manifest = (await self.store.get(experiment_id)).manifest
         results = []
-        for case, index in selection_schedule(manifest):
+        for case, index in selection_schedule(manifest, repeats):
             result = await self.run(experiment_id, snapshot_id, case, index)
             results.append(result)
             if result.status != "complete":

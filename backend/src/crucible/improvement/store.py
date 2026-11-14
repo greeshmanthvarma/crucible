@@ -866,10 +866,18 @@ VALUES
             else:
                 if record.manifest.schema_version == 2:
                     await self._search_revision(conn, id, record.revision)
-                if repeat_index not in range(3) or case_id not in {
+                if repeat_index not in range(
+                    record.manifest.reference_repeat_count
+                ) or case_id not in {
                     c.case_id for c in record.manifest.cases if c.split != "final-test"
                 }:
                     raise ValueError("trial outside selection schedule")
+                if (
+                    record.manifest.scoring_version == "pooled-margin-v1"
+                    and repeat_index >= record.manifest.candidate_repeat_count
+                    and snapshot_id != await self._accepted_snapshot_id(conn, record)
+                ):
+                    raise ValueError("trial outside candidate selection schedule")
             snapshot = (
                 await conn.execute(
                     text(

@@ -15,7 +15,7 @@ def trial_key(
     case: FrozenCaseRef,
     repeat_index: int,
 ) -> str:
-    if repeat_index not in range(3):
+    if repeat_index not in range(6):
         raise ValueError("invalid repeat")
     return digest(
         dict(

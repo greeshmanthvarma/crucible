@@ -99,7 +99,7 @@ class TrialIdentity(BaseModel):
     harness_tree_digest: Sha256
     model_config_digest: Sha256
     limits_digest: Sha256
-    repeat_index: Annotated[int, Field(ge=0, le=2)]
+    repeat_index: Annotated[int, Field(ge=0, le=5)]
 
 
 @dataclass(frozen=True)

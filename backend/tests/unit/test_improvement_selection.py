@@ -10,7 +10,7 @@ from crucible.improvement.contracts import FrozenCaseRef
 from crucible.improvement.selection import EvaluationSet, ScoredTrial, decide_candidate
 
 
-def evals(dev, validation, *, candidate=False):
+def evals(dev, validation, *, candidate=False, repeats=3):
     cases = tuple(
         FrozenCaseRef(
             case_id=f"dev-{i}",
@@ -44,7 +44,7 @@ def evals(dev, validation, *, candidate=False):
                 evidence_digest="d" * 64,
             )
             for case, count in zip(cases, counts, strict=True)
-            for repeat in range(3)
+            for repeat in range(repeats)
         ),
     )
 
@@ -213,3 +213,12 @@ def test_reused_trial_cannot_change_its_evidence_or_verdict():
         export_digest=baseline.export_digest,
     )
     assert decide_candidate(baseline, candidate, checks).verdict == "inconclusive"
+
+
+def test_selection_counts_requires_exact_repeats():
+    from crucible.improvement.selection import selection_counts
+
+    six = evals([4], [5], repeats=6)
+    assert selection_counts(six, repeats=6) == {"dev-0": 4, "HIDDEN-0": 5}
+    assert selection_counts(six) is None
+    assert selection_counts(evals([2], [2]), repeats=6) is None

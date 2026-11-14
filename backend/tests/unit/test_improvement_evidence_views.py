@@ -35,7 +35,11 @@ async def evidence_setup(tmp_path, request):
     root = tmp_path / "state"
     root.mkdir()
     store = await ExperimentStore.open(root / "state.sqlite3")
-    manifest = search_manifest()
+    manifest = (
+        search_manifest().model_copy(update={"scoring_version": "pooled-margin-v1"})
+        if getattr(request, "param", {}).get("six_repeats")
+        else search_manifest()
+    )
     run = await store.create(manifest, "repo", "key")
     harness = root / "snapshot/harness"
     harness.mkdir(parents=True)
@@ -58,7 +62,9 @@ async def evidence_setup(tmp_path, request):
     await store.register_snapshot(run.id, snapshot, "snapshot/snapshot.json")
     ids = []
     for case in ("development", "selection-validation"):
-        for repeat in range(3):
+        for repeat in range(
+            6 if getattr(request, "param", {}).get("six_repeats") else 3
+        ):
             if (
                 getattr(request, "param", {}).get("omit_repeat")
                 and case == "development"
@@ -357,3 +363,17 @@ async def test_archive_loading_does_not_widen_active_view_lifecycle(
             run.id, snapshot.snapshot_id, tmp_path / "view"
         )
     assert not (tmp_path / "view").exists()
+
+
+@pytest.mark.parametrize("evidence_setup", [{"six_repeats": True}], indirect=True)
+async def test_mining_uses_first_three_repeats_of_six_repeat_reference(
+    evidence_setup, tmp_path
+):
+    from crucible.improvement.evidence_views import DevelopmentViewBuilder
+
+    store, root, run, snapshot, ids = evidence_setup
+    builder = DevelopmentViewBuilder(store, root)
+    view = await builder.build_development_view(
+        run.id, snapshot.snapshot_id, tmp_path / "view"
+    )
+    assert {ref.trial_id for ref in view.evidence_refs} == set(ids[:3])

@@ -45,7 +45,7 @@ class WorkerJob(Contract):
     job_id: UUID
     experiment_id: UUID
     trial_id: UUID
-    repeat_index: Annotated[int, Field(ge=0, le=2)]
+    repeat_index: Annotated[int, Field(ge=0, le=5)]
     harness_digest: Sha256
     export_digest: Sha256
     solver_case: SolverCaseWire

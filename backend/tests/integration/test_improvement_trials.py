@@ -142,8 +142,15 @@ async def trial_setup(tmp_path, case_fixture, monkeypatch, request):
     manifest = make_manifest().model_copy(
         update={
             "cases": tuple(refs),
-            "schema_version": getattr(request, "param", 1),
-            "worker_protocol_version": getattr(request, "param", None),
+            "schema_version": 1
+            if getattr(request, "param", None) == "pooled"
+            else (getattr(request, "param", 1) or 1),
+            "worker_protocol_version": None
+            if getattr(request, "param", None) == "pooled"
+            else getattr(request, "param", None),
+            "scoring_version": "pooled-margin-v1"
+            if getattr(request, "param", None) == "pooled"
+            else "per-case-count-v1",
             "grader": config,
             "initial_commit": case_fixture.base_commit,
             "budget": make_manifest().budget.model_copy(
@@ -450,3 +457,17 @@ async def test_recovery_reuses_three_completed_trials_and_only_retries_named_fai
     assert len(await store.selected_trials(manifest.experiment_id)) == 6
     rows = {r["id"]: r for r in await store.trials(manifest.experiment_id)}
     assert all(rows[r["id"]] == r for r in original)
+
+
+@pytest.mark.parametrize("trial_setup", ["pooled"], indirect=True)
+async def test_run_selection_baseline_skips_completed_repeats(trial_setup):
+    runner, store, manifest, snapshot, worker, grader = trial_setup
+    first = await runner.run_selection_baseline(
+        manifest.experiment_id, snapshot.snapshot_id, repeats=3
+    )
+    second = await runner.run_selection_baseline(
+        manifest.experiment_id, snapshot.snapshot_id, repeats=6
+    )
+    assert len(first) == 6 and len(second) == 12
+    assert worker.calls == grader.calls == 12
+    assert {r.identity.trial_id for r in first} <= {r.identity.trial_id for r in second}

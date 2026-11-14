@@ -17,7 +17,7 @@ __all__ = ["EvaluationSet", "ScoredTrial", "decide_candidate", "role_feedback"]
 class ScoredTrial(Contract):
     case_id: Annotated[str, Field(min_length=1, max_length=200)]
     split: Literal["development", "selection-validation", "final-test"]
-    repeat_index: Annotated[int, Field(ge=0, le=2)]
+    repeat_index: Annotated[int, Field(ge=0, le=5)]
     original_trial_id: UUID
     verdict: Literal["pass", "fail", "error", "interrupted"]
     evidence_digest: Sha256
@@ -31,13 +31,15 @@ class EvaluationSet(Contract):
     trials: Annotated[tuple[ScoredTrial, ...], Field(max_length=12288)]
 
 
-def selection_counts(evaluation: EvaluationSet) -> dict[str, int] | None:
+def selection_counts(
+    evaluation: EvaluationSet, repeats: int = 3
+) -> dict[str, int] | None:
     required = {case.case_id: case for case in evaluation.required_cases}
     if len(required) != len(evaluation.required_cases) or {
         case.split for case in required.values()
     } != {"development", "selection-validation"}:
         return None
-    expected = {(case_id, repeat) for case_id in required for repeat in range(3)}
+    expected = {(case_id, repeat) for case_id in required for repeat in range(repeats)}
     observed: set[tuple[str, int]] = set()
     trial_ids: set[UUID] = set()
     counts = dict.fromkeys(required, 0)

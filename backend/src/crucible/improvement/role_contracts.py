@@ -101,7 +101,7 @@ class RoleExecution(Contract):
 class CaseCount(Contract):
     case_id: Annotated[str, Field(min_length=1, max_length=200)]
     split: Literal["development", "selection-validation"]
-    baseline: Annotated[int, Field(ge=0, le=3)]
+    baseline: Annotated[int, Field(ge=0, le=6)]
     candidate: Annotated[int, Field(ge=0, le=3)]
 
 

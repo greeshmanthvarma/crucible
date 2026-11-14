@@ -543,7 +543,7 @@ async def test_stage_driver_never_advances_after_incomplete_baseline(
     async def runtime(manifest):
         yield None
 
-    async def incomplete(self, id, snapshot):
+    async def incomplete(self, id, snapshot, repeats=3):
         return []
 
     async def search(id, **kwargs):
@@ -559,3 +559,28 @@ async def test_stage_driver_never_advances_after_incomplete_baseline(
     assert result["stage"] == "baseline"
     assert result["completed_stage"] is None
     assert calls == []
+
+
+@pytest.mark.parametrize("trial_setup", [None, "pooled"], indirect=True)
+async def test_operator_evaluation_uses_reference_repeats(lifecycle_setup, monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from crucible.improvement.trials import IsolatedTrialRunner
+
+    service, config, manifest, _ = lifecycle_setup
+    run = await service.start(config, "repeat-test", True)
+    calls = []
+
+    @asynccontextmanager
+    async def runtime(manifest):
+        yield None
+
+    async def incomplete(self, id, snapshot, repeats=3):
+        calls.append(repeats)
+        return []
+
+    monkeypatch.setattr(service, "_runtime", runtime)
+    monkeypatch.setattr(IsolatedTrialRunner, "run_selection_baseline", incomplete)
+    result = await service.run_stages(run.id, "baseline")
+    assert calls == [manifest.reference_repeat_count]
+    assert result["complete"] is False

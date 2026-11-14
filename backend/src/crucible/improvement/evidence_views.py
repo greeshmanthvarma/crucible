@@ -223,6 +223,7 @@ class DevelopmentViewBuilder:
             for trial in await self.store.selected_trials(experiment_id)
             if trial["snapshot"] == str(view.baseline_snapshot_id)
             and str(trial["case_id"]) in development
+            and int(str(trial["repeat_index"])) < 3
         ]
         failed_cases = {
             str(trial["case_id"])
@@ -326,6 +327,7 @@ class DevelopmentViewBuilder:
             if (
                 trial["snapshot"] == str(baseline_snapshot_id)
                 and trial["case_id"] in development
+                and int(str(trial["repeat_index"])) < 3
             ):
                 key = (str(trial["case_id"]), int(str(trial["repeat_index"])))
                 if key in selected:
