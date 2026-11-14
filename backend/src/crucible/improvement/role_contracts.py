@@ -110,6 +110,9 @@ class SelectionDecision(Contract):
     verdict: Literal["promote", "reject", "inconclusive"]
     reason: Literal[
         "strict_development_gain",
+        "pooled_margin_gain",
+        "insufficient_gain",
+        "validation_regression",
         "case_regression",
         "no_development_gain",
         "scope_rejected",

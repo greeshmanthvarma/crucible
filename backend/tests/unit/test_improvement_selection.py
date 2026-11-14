@@ -222,3 +222,96 @@ def test_selection_counts_requires_exact_repeats():
     assert selection_counts(six, repeats=6) == {"dev-0": 4, "HIDDEN-0": 5}
     assert selection_counts(six) is None
     assert selection_counts(evals([2], [2]), repeats=6) is None
+
+
+def pooled_reference(dev, validation):
+    base = evals([0] * len(dev), [0] * len(validation), repeats=6)
+    counts = {
+        case.case_id: count
+        for case, count in zip(base.required_cases, (*dev, *validation), strict=True)
+    }
+    return base.model_copy(
+        update={
+            "trials": tuple(
+                t.model_copy(
+                    update={
+                        "verdict": "pass"
+                        if t.repeat_index % 3 < counts[t.case_id][t.repeat_index // 3]
+                        else "fail"
+                    }
+                )
+                for t in base.trials
+            )
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "total,verdict,reason",
+    [(19, "promote", "pooled_margin_gain"), (18, "reject", "insufficient_gain")],
+)
+def test_pooled_decision_boundaries(total, verdict, reason):
+    from crucible.improvement.selection import decide_pooled_candidate, noise_margin
+
+    reference = pooled_reference([(1, 2)] * 5, [(2, 2), (2, 2), (2, 1), (2, 1), (1, 1)])
+    assert sum(t.verdict == "pass" for t in reference.trials) == 31
+    margin = noise_margin(reference)
+    assert (margin.half_a, margin.half_b, margin.margin) == (14, 17, 3)
+    candidate = evals([2] * 5, [2] * 4 + [total - 18], candidate=True)
+    decision = decide_pooled_candidate(reference, candidate, checks_pass(), margin)
+    assert (decision.verdict, decision.reason) == (verdict, reason)
+
+
+@pytest.mark.parametrize(
+    "a,b,margin,noisy",
+    [(15, 15, 2, False), (14, 15, 2, False), (14, 17, 3, False), (12, 18, 4, True)],
+)
+def test_noise_margin_clamps_and_flags(a, b, margin, noisy):
+    from crucible.improvement.selection import noise_margin
+
+    halves = [(min(3, max(0, a - 3 * i)), min(3, max(0, b - 3 * i))) for i in range(10)]
+    reference = pooled_reference(halves[:5], halves[5:])
+    result = noise_margin(reference)
+    assert (result.half_a, result.half_b, result.gap, result.margin, result.noisy) == (
+        a,
+        b,
+        abs(a - b),
+        margin,
+        noisy,
+    )
+    assert (
+        noise_margin(reference.model_copy(update={"trials": reference.trials[:-1]}))
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "count,reason", [(6, "case_regression"), (3, "insufficient_gain")]
+)
+def test_pooled_rejects_drop_of_two_allows_one_and_a_half(count, reason):
+    from crucible.improvement.selection import decide_pooled_candidate, noise_margin
+
+    reference = pooled_reference([(min(count, 3), max(count - 3, 0))], [(0, 0)])
+    result = decide_pooled_candidate(
+        reference,
+        evals([1 if count == 6 else 0], [0], candidate=True),
+        checks_pass(),
+        noise_margin(reference),
+    )
+    assert result.reason == reason
+
+
+@pytest.mark.parametrize(
+    "val,reason", [(1, "validation_regression"), (2, "pooled_margin_gain")]
+)
+def test_pooled_rejects_validation_loss_allows_equal(val, reason):
+    from crucible.improvement.selection import decide_pooled_candidate, noise_margin
+
+    reference = pooled_reference([(0, 0)] * 2, [(2, 2)])
+    result = decide_pooled_candidate(
+        reference,
+        evals([3, 3], [val], candidate=True),
+        checks_pass(),
+        noise_margin(reference),
+    )
+    assert result.reason == reason

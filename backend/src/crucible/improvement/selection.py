@@ -61,8 +61,11 @@ def selection_counts(
     return counts if observed == expected else None
 
 
-def decide_candidate(
-    baseline: EvaluationSet, candidate: EvaluationSet, checks: CandidateCheckResult
+def _decide(
+    baseline: EvaluationSet,
+    candidate: EvaluationSet,
+    checks: CandidateCheckResult,
+    margin: "NoiseMargin | None" = None,
 ) -> SelectionDecision:
     """Only verified host evidence may construct these inputs."""
     baseline = EvaluationSet.model_validate_json(baseline.model_dump_json())
@@ -100,7 +103,7 @@ def decide_candidate(
             "scope_rejected" if "scope" in checks.reason else "boundary_rejected",
         )
     baseline_counts, candidate_counts = (
-        selection_counts(baseline),
+        selection_counts(baseline, 6 if margin is not None else 3),
         selection_counts(candidate),
     )
     if (
@@ -132,6 +135,25 @@ def decide_candidate(
         for case in sorted(baseline.required_cases, key=lambda c: c.case_id)
         if case.split != "final-test"
     )
+    if margin is not None:
+        if any(c.baseline - 2 * c.candidate >= 4 for c in counts):
+            return decision("reject", "case_regression", counts)
+        validation = [c for c in counts if c.split == "selection-validation"]
+        if 2 * sum(c.candidate for c in validation) < sum(
+            c.baseline for c in validation
+        ):
+            return decision("reject", "validation_regression", counts)
+        if (baseline.source_digest, baseline.export_digest) == (
+            candidate.source_digest,
+            candidate.export_digest,
+        ):
+            return decision("reject", "no_change", counts)
+        if (
+            2 * sum(c.candidate for c in counts)
+            > sum(c.baseline for c in counts) + 2 * margin.margin
+        ):
+            return decision("promote", "pooled_margin_gain", counts)
+        return decision("reject", "insufficient_gain", counts)
     if any(c.candidate < c.baseline for c in counts):
         return decision("reject", "case_regression", counts)
     if (baseline.source_digest, baseline.export_digest) == (
@@ -142,3 +164,41 @@ def decide_candidate(
     if any(c.split == "development" and c.candidate > c.baseline for c in counts):
         return decision("promote", "strict_development_gain", counts)
     return decision("reject", "no_development_gain", counts)
+
+
+class NoiseMargin(Contract):
+    half_a: Annotated[int, Field(ge=0)]
+    half_b: Annotated[int, Field(ge=0)]
+    gap: Annotated[int, Field(ge=0)]
+    margin: Literal[2, 3, 4]
+    noisy: bool
+
+
+def noise_margin(initial_baseline: EvaluationSet) -> NoiseMargin | None:
+    if selection_counts(initial_baseline, 6) is None:
+        return None
+    a = sum(t.verdict == "pass" for t in initial_baseline.trials if t.repeat_index < 3)
+    b = sum(t.verdict == "pass" for t in initial_baseline.trials if t.repeat_index >= 3)
+    gap = abs(a - b)
+    return NoiseMargin(
+        half_a=a,
+        half_b=b,
+        gap=gap,
+        margin=2 if gap <= 2 else 3 if gap == 3 else 4,
+        noisy=gap > 4,
+    )
+
+
+def decide_candidate(
+    baseline: EvaluationSet, candidate: EvaluationSet, checks: CandidateCheckResult
+) -> SelectionDecision:
+    return _decide(baseline, candidate, checks)
+
+
+def decide_pooled_candidate(
+    reference: EvaluationSet,
+    candidate: EvaluationSet,
+    checks: CandidateCheckResult,
+    margin: NoiseMargin,
+) -> SelectionDecision:
+    return _decide(reference, candidate, checks, margin)
