@@ -228,3 +228,27 @@ async def test_pooled_report_shows_reference_out_of_six_and_margin(
         in markdown
     )
     assert "reference" in markdown and "/6" in markdown
+
+
+async def test_report_resolves_owned_staging_directory(
+    final_setup, tmp_path, monkeypatch
+):
+    from tempfile import TemporaryDirectory
+
+    from crucible.improvement import reporting
+
+    evaluator, _, store, manifest, _, _, _, _ = final_setup
+    actual = tmp_path / "platform-temp"
+    actual.mkdir()
+    alias = tmp_path / "temp-link"
+    alias.symlink_to(actual, target_is_directory=True)
+
+    def temporary_directory(*, prefix, dir):
+        return TemporaryDirectory(prefix=prefix, dir=alias)
+
+    monkeypatch.setattr(reporting, "TemporaryDirectory", temporary_directory)
+    bundle = await reporting.ReportExporter(store, evaluator.paths).export_report(
+        manifest.experiment_id, tmp_path / "report"
+    )
+    assert (tmp_path / "report" / "metrics.json").exists()
+    assert bundle.files

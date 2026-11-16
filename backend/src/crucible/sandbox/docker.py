@@ -390,7 +390,13 @@ class DockerSandboxBackend:
             **command.environment,
         }
         if self.repository_environment:
-            environment.pop("PATH")
+            # SWE-bench installs project dependencies in testbed, while its
+            # image PATH selects base conda. Solver commands need the same
+            # interpreter as the grader, without accepting worker-supplied env.
+            environment["PATH"] = (
+                "/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:"
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            )
             environment.update(
                 {
                     "GIT_OPTIONAL_LOCKS": "0",

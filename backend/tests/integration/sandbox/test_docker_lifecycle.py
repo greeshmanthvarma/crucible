@@ -21,8 +21,9 @@ CLOCK = type("Clock", (), {"now": lambda self: NOW})()
 
 
 @pytest.mark.docker
+@pytest.mark.parametrize("testbed", [False, True])
 async def test_real_docker_container_is_removed_after_harmless_command(
-    database: Database, tmp_path: Path
+    database: Database, tmp_path: Path, testbed: bool
 ) -> None:
     if shutil.which("docker") is None:
         pytest.skip("Docker CLI is unavailable")
@@ -31,11 +32,14 @@ async def test_real_docker_container_is_removed_after_harmless_command(
     )
     if info.returncode != 0:
         pytest.skip(f"Docker daemon is unavailable: {info.stderr.strip()[:200]}")
-    image = os.environ.get("CRUCIBLE_DOCKER_TEST_IMAGE")
+    image_key = (
+        "CRUCIBLE_SWEBENCH_TEST_IMAGE" if testbed else "CRUCIBLE_DOCKER_TEST_IMAGE"
+    )
+    image = os.environ.get(image_key)
     if not image:
-        pytest.skip("CRUCIBLE_DOCKER_TEST_IMAGE is not configured")
+        pytest.skip(f"{image_key} is not configured")
     if "@sha256:" not in image:
-        pytest.fail("CRUCIBLE_DOCKER_TEST_IMAGE must be pinned by sha256 digest")
+        pytest.fail(f"{image_key} must be pinned by sha256 digest")
     inspected = subprocess.run(
         ["docker", "image", "inspect", image],
         capture_output=True,
@@ -69,7 +73,23 @@ async def test_real_docker_container_is_removed_after_harmless_command(
     workspace.mkdir(mode=0o755)
     factory = lambda: SqlAlchemyUnitOfWork(database)  # noqa: E731
     docker = SubprocessDockerClient()
-    backend = DockerSandboxBackend(docker, factory, CLOCK)
+    backend = DockerSandboxBackend(
+        docker,
+        factory,
+        CLOCK,
+        repository_environment=(image, "linux/amd64") if testbed else None,
+    )
+    if testbed:
+        (workspace / ".git").mkdir()
+    executable = "python" if testbed else "/bin/true"
+    arguments = (
+        (
+            "-c",
+            'import sys, pytest; assert sys.prefix == "/opt/miniconda3/envs/testbed"',
+        )
+        if testbed
+        else ()
+    )
     outcome = await backend.execute(
         SandboxRequest(
             task.id,
@@ -77,8 +97,8 @@ async def test_real_docker_container_is_removed_after_harmless_command(
             call_id,
             workspace,
             CommandSpec(
-                "/bin/true",
-                (),
+                executable,
+                arguments,
                 ".",
                 30,
                 CommandNetwork.NONE,

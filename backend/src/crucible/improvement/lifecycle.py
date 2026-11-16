@@ -548,7 +548,13 @@ class ExperimentService:
                 prefix="crucible-development-view-"
             ) as view_directory:
                 return await self._search_runtime(
-                    id, record, config, paths, owned, Path(view_directory), stop_after
+                    id,
+                    record,
+                    config,
+                    paths,
+                    owned,
+                    Path(view_directory).resolve(),
+                    stop_after,
                 )
         finally:
             pulse.cancel()

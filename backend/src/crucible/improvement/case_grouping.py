@@ -104,7 +104,7 @@ def _candidate_labels(attempt: DiagnosedAttempt) -> tuple[str, ...]:
 def group_tool_failures(
     diagnosed_cases: Iterable[tuple[CasePacket, Diagnosis]],
 ) -> ToolFailureReport:
-    """Assign a label only when the cited failures identify exactly one tool."""
+    """Group one failure label, treating repeated reads as budget support."""
     groups: defaultdict[str, list[DiagnosedAttempt]] = defaultdict(list)
     unresolved: list[UnresolvedDiagnosis] = []
     seen: set[UUID] = set()
@@ -116,6 +116,8 @@ def group_tool_failures(
         seen.add(packet.failed_trial_id)
         attempt = _cited_attempt(packet, diagnosis)
         candidates = _candidate_labels(attempt)
+        if candidates == ("budget_exhaustion", "repeated_reads"):
+            candidates = ("budget_exhaustion",)
         if len(candidates) == 1:
             groups[candidates[0]].append(attempt)
         else:

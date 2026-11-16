@@ -340,7 +340,10 @@ async def test_solver_mounts_exclude_grader_inputs(database, tmp_path):
         f"type=bind,src={workspace},dst=/testbed",
         f"type=bind,src={workspace / '.git'},dst=/testbed/.git,readonly",
     ]
-    assert not any(arg.startswith("PATH=") for arg in args)
+    assert (
+        "PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:"
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    ) in args
     assert "--user" not in args
 
 

@@ -125,3 +125,52 @@ async def test_missing_evidence_package_has_bounded_error(
     assert "artifact_drift" in error
     assert "secret-path-canary" not in error
     assert not package.exists()
+
+
+async def test_search_resolves_owned_temporary_directory(tmp_path, monkeypatch):
+    from tempfile import TemporaryDirectory
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from crucible.improvement import lifecycle
+
+    actual = tmp_path / "platform-temp"
+    actual.mkdir()
+    alias = tmp_path / "temp-link"
+    alias.symlink_to(actual, target_is_directory=True)
+
+    def temporary_directory(*, prefix):
+        return TemporaryDirectory(prefix=prefix, dir=alias)
+
+    class Store:
+        async def require_search_open(self, id):
+            return object()
+
+        async def claim_execution(self, *args, **kwargs):
+            return "owner"
+
+        async def heartbeat(self, *args):
+            pass
+
+        async def release_execution(self, *args):
+            pass
+
+    service = lifecycle.ExperimentService(Store(), tmp_path)
+
+    async def validate(record):
+        return SimpleNamespace(registry_root=tmp_path, repository=tmp_path)
+
+    async def no_op(*args):
+        return None
+
+    async def search_runtime(id, record, config, paths, owned, directory, stop_after):
+        assert directory == directory.resolve()
+        assert directory.is_relative_to(actual)
+        return {"done": True}
+
+    monkeypatch.setattr(lifecycle, "TemporaryDirectory", temporary_directory)
+    monkeypatch.setattr(service, "_validate", validate)
+    monkeypatch.setattr(service, "_repository_lock", no_op)
+    monkeypatch.setattr(service, "_worktree", no_op)
+    monkeypatch.setattr(service, "_search_runtime", search_runtime)
+    assert await service.search(uuid4()) == {"done": True}

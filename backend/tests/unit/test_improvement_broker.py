@@ -176,6 +176,7 @@ async def test_wrong_token_and_job_rejected(tmp_path):
 
 
 async def test_replay_does_not_start_second_command(tmp_path):
+    import json
     from datetime import UTC, datetime
     from uuid import uuid4
 
@@ -205,6 +206,11 @@ async def test_replay_does_not_start_second_command(tmp_path):
 
     commands = Commands()
     store, broker, job, credential = await setup_broker(tmp_path, None, commands)
+
+    async def forbidden_approval(*args):
+        raise AssertionError("preauthorized disposable commands must not prompt")
+
+    broker.approval = forbidden_approval
     spec = CommandSpec(
         "true",
         (),
@@ -223,6 +229,7 @@ async def test_replay_does_not_start_second_command(tmp_path):
             await broker.command(credential.token, job.job_id, identity, spec) == first
         )
         assert commands.calls == 1
+        assert json.loads(first.splitlines()[-1])["outcome"]["exit_code"] == 0
     finally:
         await store.close()
 

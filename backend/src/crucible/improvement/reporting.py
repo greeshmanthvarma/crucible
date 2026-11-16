@@ -676,6 +676,6 @@ class ReportExporter:
                 with TemporaryDirectory(
                     prefix="report-write-", dir=destination
                 ) as staging:
-                    atomic_source_file(path, (0o100644, raw), Path(staging))
+                    atomic_source_file(path, (0o100644, raw), Path(staging).resolve())
         verify_bundle(bundle, destination)
         return bundle

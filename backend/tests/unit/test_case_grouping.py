@@ -153,3 +153,29 @@ def test_grouping_uses_cited_signal(packet):
         "apply_patch_failure",
         "repeated_reads",
     )
+
+
+@pytest.mark.parametrize("with_tool", [False, True])
+def test_combined_signals_preserve_evidence_and_tool_ambiguity(packet, with_tool):
+    signals = tuple(
+        CaseEvent(
+            f"signal:{label}", "signal", None, "observed", None, None, None, label
+        )
+        for label in ("budget_exhaustion", "repeated_reads")
+    )
+    events = signals + ((result("read_file"),) if with_tool else ())
+    packet = replace(packet, events=events)
+    report = group_tool_failures(((packet, observed(*(e.id for e in events))),))
+    if with_tool:
+        assert not report.groups
+        assert report.unresolved[0].candidate_labels == (
+            "budget_exhaustion",
+            "read_file_failure",
+            "repeated_reads",
+        )
+    else:
+        assert not report.unresolved
+        assert report.groups[0].label == "budget_exhaustion"
+        assert tuple(e.id for e in report.groups[0].attempts[0].cited_results) == tuple(
+            e.id for e in signals
+        )
