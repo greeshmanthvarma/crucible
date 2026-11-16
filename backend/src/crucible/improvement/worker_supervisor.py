@@ -311,6 +311,15 @@ class DockerCommands:
             str(spec.limits.memory_bytes),
             "--tmpfs",
             "/tmp:rw,nosuid,nodev,size=67108864",
+            *(
+                (
+                    "--env",
+                    "PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:"
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                )
+                if isinstance(job, WorkerJob)
+                else ()
+            ),
             *label_args(job),
             *mount(binding.path, "/workspace"),
             *mount(binding.path / ".git", "/workspace/.git", True),

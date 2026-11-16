@@ -539,3 +539,106 @@ def test_diagnostic_worker_evidence_mount_is_readonly(tmp_path, kind):
     assert any("target=/workspace,readonly" in value for value in mounts)
     assert any("target=/workspace/.git,readonly" in value for value in mounts)
     assert "--pull=never" in arguments
+
+
+async def test_improvement_task_commands_select_testbed_python(tmp_path, monkeypatch):
+    from crucible.domain.commands import CommandLimits, CommandNetwork, CommandSpec
+    from crucible.improvement import worker_supervisor
+    from crucible.improvement.broker import WorkspaceBinding
+
+    class Store:
+        async def begin_effect(self, *args):
+            return uuid4()
+
+        async def effect_state(self, *args):
+            pass
+
+    class Docker:
+        args = ()
+
+        async def invoke(self, *args):
+            self.args = args
+            return "command-container"
+
+        async def attach(self, *args):
+            return 0, ()
+
+    async def stopped(*args):
+        pass
+
+    monkeypatch.setattr(worker_supervisor, "verify_stopped", stopped)
+    job = make_job()
+    docker = Docker()
+    spec = CommandSpec(
+        "python",
+        ("-c", "import pytest"),
+        ".",
+        30,
+        CommandNetwork.NONE,
+        {},
+        job.solver_case.image,
+        "testbed check",
+        CommandLimits(1, 256 * 1024**2, 32, 1024),
+    )
+    await worker_supervisor.DockerCommands(Store(), docker).execute(
+        job,
+        WorkspaceBinding(tmp_path, job.solver_case.image, job.solver_case.platform),
+        uuid4(),
+        spec,
+    )
+    assert (
+        "PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:"
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    ) in docker.args
+    assert docker.args[docker.args.index("--network") + 1] == "none"
+
+
+@pytest.mark.docker
+async def test_real_improvement_command_imports_testbed_dependencies(tmp_path):
+    import os
+
+    from crucible.domain.commands import CommandLimits, CommandNetwork, CommandSpec
+    from crucible.improvement.broker import WorkspaceBinding
+    from crucible.improvement.worker_supervisor import DockerCommands, DockerRuntime
+
+    image = os.environ.get("CRUCIBLE_SWEBENCH_TEST_IMAGE")
+    if not image:
+        pytest.skip("CRUCIBLE_SWEBENCH_TEST_IMAGE is not configured")
+    assert "@sha256:" in image
+
+    class Store:
+        async def begin_effect(self, *args):
+            return uuid4()
+
+        async def effect_state(self, *args):
+            pass
+
+    workspace = tmp_path / "workspace"
+    (workspace / ".git").mkdir(parents=True)
+    job = make_job()
+    job = job.model_copy(
+        update={"solver_case": job.solver_case.model_copy(update={"image": image})}
+    )
+    dependency = os.environ.get("CRUCIBLE_SWEBENCH_TEST_MODULE", "pytest")
+    spec = CommandSpec(
+        "python",
+        (
+            "-c",
+            "import importlib, sys; importlib.import_module(sys.argv[1]); "
+            'assert sys.prefix == "/opt/miniconda3/envs/testbed"',
+            dependency,
+        ),
+        ".",
+        30,
+        CommandNetwork.NONE,
+        {},
+        image,
+        "Check real task environment",
+        CommandLimits(1, 1024**3, 64, 4096),
+    )
+    commands = DockerCommands(Store(), DockerRuntime())
+    chunks, outcome = await commands.execute(
+        job, WorkspaceBinding(workspace, image, "linux/amd64"), uuid4(), spec
+    )
+    assert outcome.exit_code == 0, b"".join(chunk.data for chunk in chunks)
+    await commands.stop(job.job_id)
