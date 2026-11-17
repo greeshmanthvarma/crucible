@@ -347,3 +347,72 @@ def test_six_repeat_scoring_accepts_maximum_manifest_case_count():
     counts = selection_counts(evaluation, 6)
     assert counts is not None and len(counts) == 4096
     assert set(counts.values()) == {6}
+
+
+@pytest.mark.parametrize(
+    "before,after,verdict,reason",
+    [
+        (([0, 0], [1]), ([1, 1], [1]), "reject", "insufficient_gain"),
+        (([0, 0], [1]), ([2, 1], [1]), "promote", "fixed_margin_gain"),
+        (([2, 0, 0], [1]), ([0, 3, 3], [1]), "reject", "case_regression"),
+        (([2, 0, 0], [1]), ([1, 2, 2], [1]), "promote", "fixed_margin_gain"),
+        (([0, 0], [2]), ([3, 3], [1]), "reject", "validation_regression"),
+    ],
+)
+def test_fixed_margin_guards(before, after, verdict, reason):
+    from crucible.improvement.selection import decide_fixed_candidate
+
+    decision = decide_fixed_candidate(
+        evals(*before), evals(*after, candidate=True), checks_pass()
+    )
+    assert (decision.verdict, decision.reason) == (verdict, reason)
+
+
+@pytest.mark.parametrize("corruption", ["missing", "duplicate", "six", "no_change"])
+def test_fixed_margin_evidence_and_source_guard(corruption):
+    from crucible.improvement.selection import decide_fixed_candidate
+
+    reference, candidate = evals([0], [0]), evals([3], [0], candidate=True)
+    if corruption == "six":
+        reference = evals([0], [0], repeats=6)
+    elif corruption == "missing":
+        candidate = candidate.model_copy(update={"trials": candidate.trials[:-1]})
+    elif corruption == "duplicate":
+        candidate = candidate.model_copy(
+            update={"trials": (*candidate.trials[:-1], candidate.trials[0])}
+        )
+    else:
+        reference = reference.model_copy(
+            update={
+                "source_digest": candidate.source_digest,
+                "export_digest": candidate.export_digest,
+            }
+        )
+    decision = decide_fixed_candidate(reference, candidate, checks_pass())
+    assert decision.reason == (
+        "no_change" if corruption == "no_change" else "incomplete_evidence"
+    )
+
+
+@pytest.mark.parametrize(
+    "dev_after,validation_after,expected",
+    [
+        (3, [1, 1], "fixed_margin_gain"),
+        (2, [1, 1], "insufficient_gain"),
+        (3, [1, 0], "hidden_gate_rejected"),
+    ],
+)
+def test_fixed_feedback_does_not_call_allowed_validation_tradeoff_a_hidden_failure(
+    dev_after, validation_after, expected
+):
+    from crucible.improvement.selection import decide_fixed_candidate, role_feedback
+
+    decision = decide_fixed_candidate(
+        evals([0], [2, 0]),
+        evals([dev_after], validation_after, candidate=True),
+        checks_pass(),
+    )
+    feedback = role_feedback(decision, fixed_margin=True)
+    assert feedback.reason == expected
+    assert feedback.hidden_gate_rejected == (expected == "hidden_gate_rejected")
+    assert "HIDDEN" not in feedback.model_dump_json()

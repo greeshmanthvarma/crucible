@@ -128,7 +128,7 @@ class ExperimentManifest(ExecutionPolicy):
     max_rounds: Literal[3]
     editable_paths: tuple[str, ...]
     boundary_suite_digest: Sha256
-    scoring_version: Literal["per-case-count-v1", "pooled-margin-v1"]
+    scoring_version: Literal["per-case-count-v1", "pooled-margin-v1", "fixed-margin-v1"]
     disposable_commands_authorized: bool = False
 
     @model_validator(mode="after")

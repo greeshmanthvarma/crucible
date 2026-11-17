@@ -58,17 +58,34 @@ from crucible.improvement.role_contracts import (
 )
 
 
-def role_feedback(decision: SelectionDecision) -> RoleDecisionFeedback:
+def role_feedback(
+    decision: SelectionDecision, *, fixed_margin: bool = False
+) -> RoleDecisionFeedback:
     development = tuple(c for c in decision.counts if c.split == "development")
     hidden = any(
         c.candidate < c.baseline
         for c in decision.counts
         if c.split == "selection-validation"
     )
+    if fixed_margin:
+        hidden = decision.verdict == "reject" and (
+            decision.reason == "validation_regression"
+            or (
+                decision.reason == "case_regression"
+                and any(
+                    c.baseline - c.candidate >= 2
+                    for c in decision.counts
+                    if c.split == "selection-validation"
+                )
+            )
+        )
+    development_regression = any(
+        c.baseline - c.candidate >= (2 if fixed_margin else 1) for c in development
+    )
     return RoleDecisionFeedback(
         verdict=decision.verdict,
         reason="hidden_gate_rejected"
-        if hidden and not any(c.candidate < c.baseline for c in development)
+        if hidden and not development_regression
         else decision.reason,
         development=development,
         hidden_gate_rejected=hidden,

@@ -22,6 +22,8 @@ async def search_setup(tmp_path, request):
         if getattr(request, "param", None) == "pooled"
         else search_manifest()
     )
+    if getattr(request, "param", None) == "fixed":
+        manifest = manifest.model_copy(update={"scoring_version": "fixed-margin-v1"})
     run = await store.create(manifest, "repo", "key")
     snapshot = HarnessSnapshot(
         snapshot_id=uuid4(),
@@ -527,3 +529,15 @@ async def test_pooled_all_development_pass_uses_six(search_setup):
     result = await SearchController(store, port).run(id)
     assert result.reason == "all_development_pass"
     assert port.mining_calls == 0
+
+
+@pytest.mark.parametrize("search_setup", ["fixed"], indirect=True)
+async def test_fixed_search_uses_three_repeats_without_measuring_margin(search_setup):
+    store, id, port = search_setup
+    port.disposition = "no_actionable_weakness"
+    evaluation = await port.baseline(id)
+    assert len(evaluation.trials) == 6
+    result = await SearchController(store, port).run(id)
+    assert result.reason == "no_actionable_weakness"
+    assert not await store.events(id, "selection_margin")
+    assert port.manifest.reference_repeat_count == 3

@@ -143,10 +143,10 @@ async def trial_setup(tmp_path, case_fixture, monkeypatch, request):
         update={
             "cases": tuple(refs),
             "schema_version": 1
-            if getattr(request, "param", None) == "pooled"
+            if getattr(request, "param", None) in ("pooled", "fixed")
             else (getattr(request, "param", 1) or 1),
             "worker_protocol_version": None
-            if getattr(request, "param", None) == "pooled"
+            if getattr(request, "param", None) in ("pooled", "fixed")
             else getattr(request, "param", None),
             "scoring_version": "pooled-margin-v1"
             if getattr(request, "param", None) == "pooled"
@@ -160,6 +160,8 @@ async def trial_setup(tmp_path, case_fixture, monkeypatch, request):
     )
     state = tmp_path / "state"
     state.mkdir()
+    if getattr(request, "param", None) == "fixed":
+        manifest = manifest.model_copy(update={"scoring_version": "fixed-margin-v1"})
     store = await ExperimentStore.open(state / "experiments.sqlite3")
     await store.create(manifest, "repository", "key")
     snapshot_root = state / "snapshots/base"

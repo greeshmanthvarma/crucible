@@ -111,6 +111,7 @@ class SelectionDecision(Contract):
     reason: Literal[
         "strict_development_gain",
         "pooled_margin_gain",
+        "fixed_margin_gain",
         "insufficient_gain",
         "validation_regression",
         "case_regression",

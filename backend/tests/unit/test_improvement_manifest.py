@@ -225,3 +225,18 @@ def test_v1_manifest_schedule_and_decision_unchanged():
         30,
         150,
     )
+
+
+def test_fixed_margin_manifest_roundtrip_has_three_repeat_schedule():
+    payload = manifest_payload()
+    payload["scoring_version"] = "fixed-margin-v1"
+    manifest = ExperimentManifest.model_validate_json(__import__("json").dumps(payload))
+    assert manifest.reference_repeat_count == manifest.candidate_repeat_count == 3
+    assert (
+        manifest.planned_trial_upper_bound
+        == manifest.baseline_trial_count * 4
+        + 6 * sum(c.split == "final-test" for c in manifest.cases)
+    )
+    assert (
+        ExperimentManifest.model_validate_json(manifest.model_dump_json()) == manifest
+    )

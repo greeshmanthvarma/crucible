@@ -443,7 +443,10 @@ class DevelopmentViewBuilder:
                 linked_failures[key] = failure_files
         prior = canonical_json(
             [
-                role_feedback(decision)
+                role_feedback(
+                    decision,
+                    fixed_margin=run.manifest.scoring_version == "fixed-margin-v1",
+                )
                 for decision in await self.store.decisions(experiment_id)
             ]
         )

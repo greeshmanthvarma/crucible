@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID
 
-from crucible.improvement.checks import ProbePort
+from crucible.improvement.checks import CandidateCheckResult, ProbePort
 from crucible.improvement.contracts import Contract, ExperimentPaths
 from crucible.improvement.evidence_views import DevelopmentViewBuilder
 from crucible.improvement.promotion import PromotionService
@@ -342,7 +342,6 @@ class LocalSearchExecution:
 
         from crucible.improvement.checks import check_candidate
         from crucible.improvement.roles import parse_mining_output
-        from crucible.improvement.selection import decide_candidate
         from crucible.improvement.source import ScopeRejected
         from crucible.improvement.trials import build_evaluation_set, owned_artifact
         from crucible.improvement.worker_supervisor import read_regular_artifact
@@ -429,6 +428,18 @@ class LocalSearchExecution:
         evaluation = await build_evaluation_set(
             self.store, self.paths, id, candidate.snapshot_id
         )
+        return await self._selection_decision(id, baseline, evaluation, checks)
+
+    async def _selection_decision(
+        self,
+        id: UUID,
+        baseline: EvaluationSet,
+        evaluation: EvaluationSet,
+        checks: CandidateCheckResult,
+    ) -> SelectionDecision:
+        from crucible.improvement.selection import decide_candidate
+
+        run = await self.store.get(id)
         if run.manifest.scoring_version == "pooled-margin-v1":
             from crucible.improvement.selection import decide_pooled_candidate
 
@@ -439,6 +450,10 @@ class LocalSearchExecution:
                 {key: events[0][key] for key in NoiseMargin.model_fields}
             )
             return decide_pooled_candidate(baseline, evaluation, checks, margin)
+        if run.manifest.scoring_version == "fixed-margin-v1":
+            from crucible.improvement.selection import decide_fixed_candidate
+
+            return decide_fixed_candidate(baseline, evaluation, checks)
         return decide_candidate(baseline, evaluation, checks)
 
     async def promote(self, round: RoundRecord) -> None:

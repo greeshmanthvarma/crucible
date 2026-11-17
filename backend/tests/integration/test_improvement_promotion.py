@@ -46,6 +46,8 @@ async def promotion_setup(harness, tmp_path, request):
             "experiment_id": experiment_id,
             "scoring_version": "pooled-margin-v1"
             if getattr(request, "param", None) == "pooled"
+            else "fixed-margin-v1"
+            if getattr(request, "param", None) == "fixed"
             else "per-case-count-v1",
             "initial_commit": commit,
             "initial_source_digest": baseline.source_digest,
@@ -66,7 +68,7 @@ async def promotion_setup(harness, tmp_path, request):
         root,
         manifest,
         candidate,
-        3 if manifest.scoring_version == "pooled-margin-v1" else 1,
+        3 if manifest.scoring_version in ("pooled-margin-v1", "fixed-margin-v1") else 1,
     )
     checks_dir = root / "checks"
     checks_dir.mkdir()
@@ -489,3 +491,42 @@ async def test_pooled_schedule_tops_up_promoted_reference(promotion_setup, tmp_p
     assert len(topped.trials) == 12
     assert first_ids <= {t.original_trial_id for t in topped.trials}
     assert selection_counts(topped, 6) is not None
+
+
+@pytest.mark.parametrize("promotion_setup", ["fixed"], indirect=True)
+async def test_fixed_promotion_reverifies_without_margin_or_topup(promotion_setup):
+    from crucible.improvement.selection import decide_fixed_candidate, selection_counts
+    from crucible.improvement.trials import build_evaluation_set
+
+    service, store, paths, owned, round, baseline, candidate, checks = promotion_setup
+    id = round.experiment_id
+    before = await build_evaluation_set(store, paths, id, baseline.snapshot_id)
+    after = await build_evaluation_set(store, paths, id, candidate.snapshot_id)
+    from crucible.improvement.search import LocalSearchExecution
+
+    execution = LocalSearchExecution(
+        store,
+        paths,
+        service.protected_suite_root,
+        None,
+        None,
+        None,
+        service,
+        owned,
+        None,
+        paths.root / "views",
+    )
+    decision = await execution._selection_decision(id, before, after, checks)
+    assert decision == decide_fixed_candidate(before, after, checks)
+    assert decision.verdict == "promote"
+    await store.record_decision(round.id, decision, (await store.get(id)).revision)
+    await service.promote(round.id, digest(decision))
+    assert not await store.events(id, "selection_margin")
+    assert len(before.trials) == len(after.trials) == 6
+    promoted = await build_evaluation_set(
+        store, paths, id, await store.accepted_snapshot_id(id)
+    )
+    assert promoted == after
+    # A complete promoted three-repeat reference is reused without dispatch.
+    assert await execution.baseline(id) == after
+    assert selection_counts(promoted, 3) is not None

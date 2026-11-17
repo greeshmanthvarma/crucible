@@ -252,3 +252,21 @@ async def test_report_resolves_owned_staging_directory(
     )
     assert (tmp_path / "report" / "metrics.json").exists()
     assert bundle.files
+
+
+@pytest.mark.parametrize("trial_setup", ["fixed"], indirect=True)
+async def test_fixed_report_exposes_policy_without_invented_measurement(
+    final_setup, tmp_path
+):
+    evaluator, _, store, manifest, _, _, _, _ = final_setup
+    await ReportExporter(store, evaluator.paths).export_report(
+        manifest.experiment_id, tmp_path / "fixed"
+    )
+    data = json.loads((tmp_path / "fixed/metrics.json").read_text())
+    text = (tmp_path / "fixed/report.md").read_text()
+    assert data["configuration"]["scoring_version"] == "fixed-margin-v1"
+    assert data["selection_policy"]["minimum_total_gain"] == 3
+    assert data["selection_policy"]["reference_repeats"] == 3
+    assert "selection_margin" not in data
+    assert "Fixed selection margin: 2" in text
+    assert not await store.events(manifest.experiment_id, "selection_margin")

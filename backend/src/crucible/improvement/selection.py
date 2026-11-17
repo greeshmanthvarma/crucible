@@ -66,6 +66,8 @@ def _decide(
     candidate: EvaluationSet,
     checks: CandidateCheckResult,
     margin: "NoiseMargin | None" = None,
+    *,
+    fixed_margin: bool = False,
 ) -> SelectionDecision:
     """Only verified host evidence may construct these inputs."""
     baseline = EvaluationSet.model_validate_json(baseline.model_dump_json())
@@ -135,6 +137,20 @@ def _decide(
         for case in sorted(baseline.required_cases, key=lambda c: c.case_id)
         if case.split != "final-test"
     )
+    if fixed_margin:
+        if any(c.baseline - c.candidate >= 2 for c in counts):
+            return decision("reject", "case_regression", counts)
+        validation = [c for c in counts if c.split == "selection-validation"]
+        if sum(c.candidate for c in validation) < sum(c.baseline for c in validation):
+            return decision("reject", "validation_regression", counts)
+        if (baseline.source_digest, baseline.export_digest) == (
+            candidate.source_digest,
+            candidate.export_digest,
+        ):
+            return decision("reject", "no_change", counts)
+        if sum(c.candidate for c in counts) >= sum(c.baseline for c in counts) + 3:
+            return decision("promote", "fixed_margin_gain", counts)
+        return decision("reject", "insufficient_gain", counts)
     if margin is not None:
         if any(c.baseline - 2 * c.candidate >= 4 for c in counts):
             return decision("reject", "case_regression", counts)
@@ -202,3 +218,12 @@ def decide_pooled_candidate(
     margin: NoiseMargin,
 ) -> SelectionDecision:
     return _decide(reference, candidate, checks, margin)
+
+
+def decide_fixed_candidate(
+    reference: EvaluationSet,
+    candidate: EvaluationSet,
+    checks: CandidateCheckResult,
+) -> SelectionDecision:
+    """Equal three-repeat schedules; exceed the frozen margin of two passes."""
+    return _decide(reference, candidate, checks, fixed_margin=True)

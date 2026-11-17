@@ -520,6 +520,16 @@ class ReportExporter:
             ],
         }
         pooled = run.manifest.scoring_version == "pooled-margin-v1"
+        fixed = run.manifest.scoring_version == "fixed-margin-v1"
+        if fixed:
+            data["selection_policy"] = {
+                "reference_repeats": 3,
+                "candidate_repeats": 3,
+                "fixed_margin": 2,
+                "minimum_total_gain": 3,
+                "maximum_per_case_loss": 1,
+                "minimum_validation_gain": 0,
+            }
         margin_record = None
         if pooled:
             from crucible.improvement.selection import NoiseMargin
@@ -590,6 +600,11 @@ class ReportExporter:
             ),
             "",
         ]
+        if fixed:
+            lines.append(
+                "Fixed selection margin: 2; minimum total gain: 3 passes. "
+                "Reject a per-case drop of 2 or more or any aggregate validation loss."
+            )
         if pooled and margin_record is not None:
             lines.append(
                 f"Selection margin: {margin_record['margin']}; baseline halves "
@@ -600,11 +615,13 @@ class ReportExporter:
                     f"Baseline halves differed by {margin_record['gap']} passes "
                     "(above 4); results are unusually noisy."
                 )
-        for decision in await self.store.decisions(id) if pooled else ():
+        for decision in await self.store.decisions(id) if pooled or fixed else ():
             for count in decision.counts:
                 lines.append(
                     f"- {count.split}: `{count.case_id}` — "
-                    f"reference {count.baseline}/6; candidate {count.candidate}/3."
+                    f"reference {count.baseline}/"
+                    f"{run.manifest.reference_repeat_count}; "
+                    f"candidate {count.candidate}/3."
                 )
         for case in measurement.cases:
             before = (

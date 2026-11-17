@@ -144,6 +144,10 @@ class PromotionService:
                 {key: events[0][key] for key in NoiseMargin.model_fields}
             )
             recomputed = decide_pooled_candidate(before, after, checks, margin)
+        elif run.manifest.scoring_version == "fixed-margin-v1":
+            from crucible.improvement.selection import decide_fixed_candidate
+
+            recomputed = decide_fixed_candidate(before, after, checks)
         else:
             recomputed = decide_candidate(before, after, checks)
         if recomputed != decision:
