@@ -14,6 +14,7 @@ from uuid import UUID
 from crucible.benchmarks.evidence import atomic_json
 from crucible.domain.clock import SystemClock
 from crucible.domain.commands import CommandSpec
+from crucible.improvement import task_environment
 from crucible.improvement.broker import ImprovementBroker, WorkspaceBinding
 from crucible.improvement.contracts import (
     ExecutionManifest,
@@ -289,6 +290,17 @@ class DockerCommands:
             job.experiment_id, job.trial_id, "command", {"name": name}, labels(job)
         )
         self.active.setdefault(job.job_id, []).append((effect, name, job))
+        command = (spec.executable, *spec.arguments)
+        if isinstance(job, WorkerJob):
+            bootstrap = read_regular_artifact(Path(task_environment.__file__), 65536)
+            command = (
+                "/opt/miniconda3/envs/testbed/bin/python",
+                "-c",
+                bootstrap.decode(),
+                "/testbed",
+                "/workspace",
+                *command,
+            )
         args = [
             "create",
             "--pull=never",
@@ -316,6 +328,10 @@ class DockerCommands:
                     "--env",
                     "PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:"
                     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "--env",
+                    "PYTHONPATH=/workspace/src:/workspace",
+                    "--env",
+                    "PYTHONDONTWRITEBYTECODE=1",
                 )
                 if isinstance(job, WorkerJob)
                 else ()
@@ -326,8 +342,7 @@ class DockerCommands:
             "--workdir",
             "/workspace" + ("/" + spec.cwd if spec.cwd != "." else ""),
             binding.image,
-            spec.executable,
-            *spec.arguments,
+            *command,
         ]
         clock = SystemClock()
         started = clock.now()

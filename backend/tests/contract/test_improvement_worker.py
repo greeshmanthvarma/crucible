@@ -541,7 +541,10 @@ def test_diagnostic_worker_evidence_mount_is_readonly(tmp_path, kind):
     assert "--pull=never" in arguments
 
 
-async def test_improvement_task_commands_select_testbed_python(tmp_path, monkeypatch):
+@pytest.mark.parametrize("trial", [True, False])
+async def test_improvement_task_commands_select_testbed_python(
+    tmp_path, monkeypatch, trial
+):
     from crucible.domain.commands import CommandLimits, CommandNetwork, CommandSpec
     from crucible.improvement import worker_supervisor
     from crucible.improvement.broker import WorkspaceBinding
@@ -567,7 +570,11 @@ async def test_improvement_task_commands_select_testbed_python(tmp_path, monkeyp
         pass
 
     monkeypatch.setattr(worker_supervisor, "verify_stopped", stopped)
-    job = make_job()
+    from tests.contract.test_improvement_roles import role_job
+
+    job = make_job() if trial else role_job("proposal")
+    image = job.solver_case.image if trial else job.command_image
+    platform = job.solver_case.platform if trial else job.command_platform
     docker = Docker()
     spec = CommandSpec(
         "python",
@@ -576,21 +583,33 @@ async def test_improvement_task_commands_select_testbed_python(tmp_path, monkeyp
         30,
         CommandNetwork.NONE,
         {},
-        job.solver_case.image,
+        image,
         "testbed check",
         CommandLimits(1, 256 * 1024**2, 32, 1024),
     )
     await worker_supervisor.DockerCommands(Store(), docker).execute(
         job,
-        WorkspaceBinding(tmp_path, job.solver_case.image, job.solver_case.platform),
+        WorkspaceBinding(tmp_path, image, platform),
         uuid4(),
         spec,
     )
-    assert (
-        "PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:"
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    ) in docker.args
     assert docker.args[docker.args.index("--network") + 1] == "none"
+    if trial:
+        assert (
+            "PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:"
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ) in docker.args
+        assert "PYTHONPATH=/workspace/src:/workspace" in docker.args
+        assert docker.args[-5:] == (
+            "/testbed",
+            "/workspace",
+            "python",
+            "-c",
+            "import pytest",
+        )
+    else:
+        assert not any(arg.startswith(("PATH=", "PYTHONPATH=")) for arg in docker.args)
+        assert docker.args[-3:] == ("python", "-c", "import pytest")
 
 
 @pytest.mark.docker
@@ -614,7 +633,10 @@ async def test_real_improvement_command_imports_testbed_dependencies(tmp_path):
             pass
 
     workspace = tmp_path / "workspace"
-    (workspace / ".git").mkdir(parents=True)
+    import subprocess
+
+    workspace.mkdir()
+    subprocess.run(["git", "-C", str(workspace), "init", "-q"], check=True)
     job = make_job()
     job = job.model_copy(
         update={"solver_case": job.solver_case.model_copy(update={"image": image})}

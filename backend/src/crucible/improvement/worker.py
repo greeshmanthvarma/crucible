@@ -34,12 +34,23 @@ from crucible.storage.database import Database
 from crucible.storage.models import metadata
 
 
+def solver_prompt(prompt: str) -> str:
+    return prompt + (
+        "\n\nTask command environment: Python uses the image's testbed environment "
+        "and imports edited source from /workspace/src and /workspace. "
+        "Inspect the repository's test instructions before running tests; "
+        "do not assume pytest is installed or is the native runner. "
+        "If the repository provides bin/test, inspect and use that native runner "
+        "(for example, python bin/test <test path>) as documented."
+    )
+
+
 async def seed_solver_task(
     job: WorkerJob, uow_factory: Callable[[], UnitOfWork]
 ) -> UUID:
     return await seed_task(
         job.job_id,
-        job.solver_case.prompt,
+        solver_prompt(job.solver_case.prompt),
         job.solver_case.base_commit,
         job.solver_case.image,
         uow_factory,
