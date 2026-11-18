@@ -473,3 +473,49 @@ async def test_run_selection_baseline_skips_completed_repeats(trial_setup):
     assert len(first) == 6 and len(second) == 12
     assert worker.calls == grader.calls == 12
     assert {r.identity.trial_id for r in first} <= {r.identity.trial_id for r in second}
+
+
+@pytest.mark.parametrize("wrong_image", [False, True])
+async def test_host_runtime_inventory_reaches_collector_and_protected_evidence(
+    trial_setup, monkeypatch, wrong_image
+):
+    import json
+    from dataclasses import replace
+
+    from crucible.benchmarks.runtime_artifacts import RuntimeArtifactInventory
+    from crucible.improvement import trials
+
+    runner, store, manifest, snapshot, worker, grader = trial_setup
+    execute = worker.execute
+    seen = []
+    collect = trials.collect_solution_patch
+
+    async def execute_with_inventory(job, *args, **kwargs):
+        result = await execute(job, *args, **kwargs)
+        image = "other@sha256:" + "f" * 64 if wrong_image else job.solver_case.image
+        return replace(
+            result, runtime_inventory=RuntimeArtifactInventory(image=image, files={})
+        )
+
+    def collect_with_inventory(*args, **kwargs):
+        seen.append(kwargs["runtime_inventory"])
+        return collect(*args, **kwargs)
+
+    monkeypatch.setattr(worker, "execute", execute_with_inventory)
+    monkeypatch.setattr(trials, "collect_solution_patch", collect_with_inventory)
+    result = await runner.run(
+        manifest.experiment_id, snapshot.snapshot_id, "development", 0
+    )
+    if wrong_image:
+        assert result.status == "error" and not seen and grader.calls == 0
+    else:
+        assert result.status == "complete" and len(seen) == 1
+        path = (
+            runner.paths.root
+            / "trials"
+            / str(result.identity.trial_id)
+            / "runtime-artifacts.json"
+        )
+        assert json.loads(path.read_text())["image"] == seen[0].image
+        envelope = json.loads((path.parent / "result.json").read_text())
+        assert "runtime-artifacts.json" in envelope["artifacts"]

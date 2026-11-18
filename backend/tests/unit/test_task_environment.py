@@ -117,3 +117,20 @@ def test_bootstrap_preserves_command_arguments_and_cwd(tmp_path, monkeypatch):
     assert tuple(map(str, calls[0])) == ("/testbed", "/workspace")
     assert calls[1][0:2] == ("python", original)
     assert task_environment.os.getcwd() == str(tmp_path)
+
+
+def test_image_inventory_hashes_only_runtime_artifacts(roots):
+    import hashlib
+
+    from crucible.improvement.task_environment import runtime_inventory
+
+    image, _ = roots
+    (image / "pkg/lib.so").write_bytes(b"native")
+    (image / "pkg/_version.py").write_text("version")
+    (image / "pkg/generated.c").write_text("build source")
+    result = runtime_inventory(image)
+    assert set(result) == {"pkg/lib.so", "pkg/_version.py"}
+    assert result["pkg/lib.so"] == {
+        "size_bytes": 6,
+        "sha256": hashlib.sha256(b"native").hexdigest(),
+    }

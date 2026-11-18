@@ -429,6 +429,12 @@ class IsolatedTrialRunner:
                 root / "trace.json",
                 root / "usage.json",
             )
+            if execution.runtime_inventory is not None:
+                if execution.runtime_inventory.image != case.image:
+                    raise ValueError("runtime inventory differs from admitted image")
+                atomic_json(
+                    root / "runtime-artifacts.json", execution.runtime_inventory
+                )
             await self.store.trial_state(trial, "snapshotting")
             patch = await asyncio.to_thread(
                 collect_solution_patch,
@@ -438,6 +444,7 @@ class IsolatedTrialRunner:
                 base_commit=case.base_commit,
                 base_repository=base,
                 snapshot_limits=snapshot_limits,
+                runtime_inventory=execution.runtime_inventory,
             )
             await self.store.trial_state(trial, "grading")
             effect = await self.store.begin_effect(

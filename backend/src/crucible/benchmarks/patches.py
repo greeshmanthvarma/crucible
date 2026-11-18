@@ -3,12 +3,18 @@
 import hashlib
 import os
 import re
+import stat
+import subprocess
 import tempfile
 import zlib
 from pathlib import Path
 
 from crucible.benchmarks.contracts import SolutionPatch
 from crucible.benchmarks.manifests import _git
+from crucible.benchmarks.runtime_artifacts import (
+    RuntimeArtifact,
+    RuntimeArtifactInventory,
+)
 
 
 def collect_solution_patch(
@@ -20,6 +26,7 @@ def collect_solution_patch(
     max_bytes: int = 8_388_608,
     base_repository: Path | None = None,
     snapshot_limits: tuple[int, int, int] | None = None,
+    runtime_inventory: RuntimeArtifactInventory | None = None,
 ) -> SolutionPatch:
     if not re.fullmatch(r"[0-9a-f]{40}", expected_base_tree) or max_bytes <= 0:
         raise ValueError("invalid base tree or patch limit")
@@ -59,6 +66,42 @@ def collect_solution_patch(
             entries[name] = (mode, content)
         if _git(root, "write-tree").decode().strip() != expected_base_tree:
             raise ValueError("base tree integrity failure")
+        runtime_files: dict[str, RuntimeArtifact] = {}
+        baseline_ignores: list[Path] = []
+        if runtime_inventory is not None:
+            runtime_inventory = RuntimeArtifactInventory.model_validate_json(
+                runtime_inventory.model_dump_json()
+            )
+            # Ignore classification uses the protected base, not solver edits.
+            for name, (_, content) in entries.items():
+                if Path(name).name == ".gitignore":
+                    ignore = root / name
+                    ignore.parent.mkdir(parents=True, exist_ok=True)
+                    ignore.write_bytes(content)
+                    baseline_ignores.append(ignore)
+            candidates = {
+                name: record
+                for name, record in runtime_inventory.files.items()
+                if name not in entries
+            }
+            if candidates:
+                try:
+                    ignored = _git(
+                        root,
+                        "check-ignore",
+                        "--stdin",
+                        "-z",
+                        data=b"\0".join(n.encode() for n in candidates) + b"\0",
+                    )
+                except subprocess.CalledProcessError as error:
+                    if error.returncode != 1:
+                        raise
+                    ignored = error.output or b""
+                runtime_files = {
+                    n: candidates[n] for n in ignored.decode().split("\0") if n
+                }
+        for ignore in baseline_ignores:
+            ignore.unlink()
         # Copy only regular supported files; the source index and config are never used.
         snapshot_bytes = snapshot_count = 0
         for directory, directories, files in os.walk(workspace, followlinks=False):
@@ -78,6 +121,10 @@ def collect_solution_patch(
                 _validate_path(relative.as_posix())
                 if source.is_symlink() or not source.is_file():
                     raise ValueError("unsupported symlink or special file")
+                dependency = runtime_files.get(relative.as_posix())
+                if dependency is not None:
+                    _verify_runtime_artifact(source, dependency)
+                    continue
                 output = root / relative
                 output.parent.mkdir(parents=True, exist_ok=True)
                 if snapshot_limits:
@@ -214,3 +261,21 @@ def _base_files(
         else:
             raise ValueError("unsupported base symlink or submodule")
     return files
+
+
+def _verify_runtime_artifact(path: Path, expected: RuntimeArtifact) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size != expected.size_bytes:
+            raise ValueError("runtime artifact size or type changed")
+        sha = hashlib.sha256()
+        remaining = expected.size_bytes
+        while remaining:
+            chunk = stream.read(min(65536, remaining))
+            if not chunk:
+                raise ValueError("runtime artifact truncated")
+            sha.update(chunk)
+            remaining -= len(chunk)
+        if stream.read(1) or sha.hexdigest() != expected.sha256:
+            raise ValueError("runtime artifact content changed")

@@ -234,3 +234,140 @@ def test_candidate_sparse_file_rejected_before_host_read(workspace, tmp_path):
             base_commit=commit,
             snapshot_limits=(1024 * 1024, 2 * 1024 * 1024, 1000),
         )
+
+
+def inventory_file(root, path, content):
+    import hashlib
+
+    from crucible.benchmarks.runtime_artifacts import (
+        RuntimeArtifact,
+        RuntimeArtifactInventory,
+    )
+
+    return RuntimeArtifactInventory(
+        image="task@sha256:" + "a" * 64,
+        files={
+            path: RuntimeArtifact(
+                size_bytes=len(content), sha256=hashlib.sha256(content).hexdigest()
+            )
+        },
+    )
+
+
+def test_inventory_excludes_large_unchanged_dependency_before_source_bounds(
+    workspace, tmp_path
+):
+    root, tree, commit = workspace
+    content = b"\0" * 20000
+    (root / "secret").write_bytes(content)
+    (root / "app.py").write_text("changed = True\n")
+    patch = collect_solution_patch(
+        root,
+        tree,
+        tmp_path / "p.diff",
+        base_commit=commit,
+        snapshot_limits=(1024, 2048, 100),
+        runtime_inventory=inventory_file(root, "secret", content),
+    )
+    assert "+changed = True" in patch.path.read_text()
+    assert "secret" not in patch.path.read_text()
+
+
+@pytest.mark.parametrize(
+    "change", [b"x" * 20000, b"\0" * 20001], ids=["content", "size"]
+)
+def test_inventory_modified_dependency_rejected(workspace, tmp_path, change):
+    root, tree, commit = workspace
+    inventory = inventory_file(root, "secret", b"\0" * 20000)
+    (root / "secret").write_bytes(change)
+    with pytest.raises(ValueError, match="runtime artifact"):
+        collect_solution_patch(
+            root,
+            tree,
+            tmp_path / "p.diff",
+            base_commit=commit,
+            runtime_inventory=inventory,
+        )
+
+
+@pytest.mark.parametrize("delete", [False, True])
+def test_inventory_never_hides_tracked_source(workspace, tmp_path, delete):
+    root, tree, commit = workspace
+    inventory = inventory_file(root, "app.py", b"old = True\n")
+    if delete:
+        (root / "app.py").unlink()
+    else:
+        (root / "app.py").write_text("modified = True\n")
+    patch = collect_solution_patch(
+        root, tree, tmp_path / "p.diff", base_commit=commit, runtime_inventory=inventory
+    )
+    assert "-old = True" in patch.path.read_text()
+
+
+def test_candidate_ignore_rules_cannot_authorize_inventory_skip(workspace, tmp_path):
+    root, tree, commit = workspace
+    (root / ".gitignore").write_text("secret\nnew.py\n")
+    (root / "new.py").write_text("new_source = True\n")
+    inventory = inventory_file(root, "new.py", (root / "new.py").read_bytes())
+    # It is not ignored in the trusted base; it must remain in source accounting.
+    with pytest.raises(ValueError, match="workspace file exceeds"):
+        collect_solution_patch(
+            root,
+            tree,
+            tmp_path / "p.diff",
+            base_commit=commit,
+            snapshot_limits=(16, 2048, 100),
+            runtime_inventory=inventory,
+        )
+
+
+def test_inventory_keeps_source_bloat_guard(workspace, tmp_path):
+    root, tree, commit = workspace
+    (root / "secret").write_bytes(b"\0" * 20000)
+    (root / "app.py").write_bytes(b"x" * 3000)
+    with pytest.raises(ValueError, match="workspace file exceeds"):
+        collect_solution_patch(
+            root,
+            tree,
+            tmp_path / "p.diff",
+            base_commit=commit,
+            snapshot_limits=(1024, 2048, 100),
+            runtime_inventory=inventory_file(root, "secret", b"\0" * 20000),
+        )
+
+
+def test_inventory_preserves_deleted_tracked_ignore_file(workspace, tmp_path):
+    root, tree, commit = workspace
+    (root / ".gitignore").unlink()
+    (root / "secret").write_bytes(b"\0" * 20000)
+    patch = collect_solution_patch(
+        root,
+        tree,
+        tmp_path / "p.diff",
+        base_commit=commit,
+        runtime_inventory=inventory_file(root, "secret", b"\0" * 20000),
+    )
+    assert "deleted file" in patch.path.read_text()
+    assert "-secret" in patch.path.read_text()
+
+
+def test_inventory_dependency_symlink_is_still_rejected(workspace, tmp_path):
+    root, tree, commit = workspace
+    (tmp_path / "outside").write_bytes(b"\0" * 20000)
+    (root / "secret").symlink_to(tmp_path / "outside")
+    with pytest.raises(ValueError, match="symlink"):
+        collect_solution_patch(
+            root,
+            tree,
+            tmp_path / "p.diff",
+            base_commit=commit,
+            runtime_inventory=inventory_file(root, "secret", b"\0" * 20000),
+        )
+
+
+@pytest.mark.parametrize(
+    "name", [".", "../bad.so", "/bad.so", ".git/config.py", "a/../b.so", "a//b.so"]
+)
+def test_inventory_contract_rejects_unsafe_paths(name):
+    with pytest.raises(ValueError, match="unsafe runtime artifact"):
+        inventory_file(None, name, b"")

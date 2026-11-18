@@ -570,6 +570,7 @@ async def test_improvement_task_commands_select_testbed_python(
         pass
 
     monkeypatch.setattr(worker_supervisor, "verify_stopped", stopped)
+    monkeypatch.setattr(worker_supervisor.DockerCommands, "_inventory", stopped)
     from tests.contract.test_improvement_roles import role_job
 
     job = make_job() if trial else role_job("proposal")
@@ -664,3 +665,82 @@ async def test_real_improvement_command_imports_testbed_dependencies(tmp_path):
     )
     assert outcome.exit_code == 0, b"".join(chunk.data for chunk in chunks)
     await commands.stop(job.job_id)
+
+
+@pytest.mark.parametrize("failure", [None, "bad_path", "exit", "json", "output"])
+async def test_runtime_inventory_is_mount_free_bounded_cached_and_cleaned(
+    tmp_path, monkeypatch, failure
+):
+    from crucible.domain.commands import CommandLimits, CommandNetwork, CommandSpec
+    from crucible.improvement import worker_supervisor as ws
+    from crucible.improvement.broker import WorkspaceBinding
+    from crucible.sandbox.protocol import OutputChunk, OutputStream
+
+    job = make_job()
+    created = []
+    removed = []
+    states = []
+
+    class Store:
+        async def begin_effect(self, *args):
+            return uuid4()
+
+        async def effect_state(self, *args):
+            states.append(args[1])
+
+    class Docker:
+        async def invoke(self, *args):
+            created.append(args)
+            return "inventory-container"
+
+        async def attach(self, *args):
+            if failure == "output":
+                raise ws.DockerOutputLimit((), 1_048_577)
+            payload = {
+                ("../escape.so" if failure == "bad_path" else "pkg/lib.so"): {
+                    "size_bytes": 3,
+                    "sha256": "a" * 64,
+                }
+            }
+            return (1 if failure == "exit" else 0), (
+                OutputChunk(
+                    OutputStream.STDOUT,
+                    1,
+                    b"invalid" if failure == "json" else json.dumps(payload).encode(),
+                ),
+            )
+
+    async def remove(*args):
+        removed.append(args)
+
+    monkeypatch.setattr(ws, "remove_owned_effect", remove)
+    commands = ws.DockerCommands(Store(), Docker())
+    binding = WorkspaceBinding(
+        tmp_path, job.solver_case.image, job.solver_case.platform
+    )
+    spec = CommandSpec(
+        "true",
+        (),
+        ".",
+        30,
+        CommandNetwork.NONE,
+        {},
+        binding.image,
+        "probe",
+        CommandLimits(1, 1024, 32, 1024),
+    )
+    if failure:
+        with pytest.raises(ValueError):
+            await commands._inventory(job, binding, spec)
+        assert job.job_id not in commands.inventories
+    else:
+        first = await commands._inventory(job, binding, spec)
+        assert await commands._inventory(job, binding, spec) is first
+        assert first.image == binding.image
+    assert len(created) == len(removed) == 1
+    args = created[0]
+    assert "--mount" not in args and "--env" not in args
+    assert args[args.index("--network") + 1] == "none"
+    assert "--read-only" in args and "--pull=never" in args and "-I" in args
+    assert "--inventory" in args and "/testbed" in args
+    assert states[-1] == "stopped" and not commands.active[job.job_id]

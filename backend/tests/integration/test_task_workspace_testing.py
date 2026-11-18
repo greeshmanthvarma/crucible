@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 from crucible.benchmarks.manifests import export_solver_case, load_case
+from crucible.benchmarks.patches import collect_solution_patch
 from crucible.domain.commands import CommandLimits, CommandNetwork, CommandSpec
 from crucible.improvement.broker import WorkspaceBinding
 from crucible.improvement.worker_supervisor import (
@@ -46,6 +47,19 @@ async def test_edited_workspace_runs_in_admitted_image(
     case = load_case(Path(registry["cases"][case_id]["case_manifest"]))
     view = export_solver_case(case, tmp_path / "workspace")
     workspace = view.workspace
+    initial_files = [
+        p
+        for p in workspace.rglob("*")
+        if p.is_file() and ".git" not in p.relative_to(workspace).parts
+    ]
+    snapshot_limits = (
+        max(p.stat().st_size for p in initial_files) + 8 * 1024**2,
+        sum(p.stat().st_size for p in initial_files) + 16 * 1024**2,
+        len(initial_files) * 4 + 4096,
+    )
+    base_tree = subprocess.check_output(
+        ["git", "-C", str(workspace), "rev-parse", "HEAD^{tree}"], text=True
+    ).strip()
     marker = workspace / package_path / "_crucible_probe.py"
     marker.write_text("VALUE = 'edited-workspace'\n")
     probe = (
@@ -133,3 +147,18 @@ async def test_edited_workspace_runs_in_admitted_image(
         marker.relative_to(workspace).as_posix(),
         test_path,
     }
+
+    inventory = commands.inventories[job.job_id]
+    assert inventory.image == case.image
+    patch = collect_solution_patch(
+        workspace,
+        base_tree,
+        tmp_path / "solution.diff",
+        base_commit=case.base_commit,
+        snapshot_limits=snapshot_limits,
+        runtime_inventory=inventory,
+    )
+    text = patch.path.read_text()
+    assert marker.relative_to(workspace).as_posix() in text
+    assert test_path in text
+    assert ".so" not in text and ".egg-info" not in text

@@ -289,6 +289,10 @@ async def run_isolated_calibration(config: Path, output: Path) -> TrialResult:
         )
         if not grading_allowed(solver.termination, execution.cleanup_confirmed):
             raise RuntimeError("calibration solver did not yield gradable evidence")
+        if execution.runtime_inventory is not None:
+            if execution.runtime_inventory.image != case.image:
+                raise ValueError("runtime inventory differs from admitted image")
+            atomic_json(output / "runtime-artifacts.json", execution.runtime_inventory)
         evidence.stage("snapshotting")
         patch = await asyncio.to_thread(
             collect_solution_patch,
@@ -296,6 +300,7 @@ async def run_isolated_calibration(config: Path, output: Path) -> TrialResult:
             tree,
             output / "solution.diff",
             base_commit=case.base_commit,
+            runtime_inventory=execution.runtime_inventory,
         )
         evidence.stage("grading")
         grade = await SwebenchGrader(manifest.grader).grade(

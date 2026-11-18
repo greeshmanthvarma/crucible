@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
@@ -25,6 +25,9 @@ from crucible.improvement.contracts import (
 )
 from crucible.repair.gateway import TrustedUsage
 from crucible.sandbox.protocol import SandboxOutcome
+
+if TYPE_CHECKING:
+    from crucible.benchmarks.runtime_artifacts import RuntimeArtifactInventory
 
 
 class SolverCaseWire(Contract):
@@ -328,6 +331,7 @@ class IsolatedExecution:
     cleanup_confirmed: bool
     elapsed_seconds: float
     outcome: JobOutcome | None = None
+    runtime_inventory: "RuntimeArtifactInventory | None" = None
 
 
 class RoleObservation(Contract):

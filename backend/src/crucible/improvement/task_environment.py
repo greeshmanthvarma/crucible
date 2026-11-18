@@ -4,12 +4,14 @@ Runs in the same network-none, resource-limited command container as the solver
 command. The image supplies dependencies; existing workspace files always win.
 """
 
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Union
 
 
 def _git(root: Path, args: List[str]) -> bytes:
@@ -43,9 +45,8 @@ def _runtime_file(path: Path) -> bool:
     ) and not any(p in ("build", "__pycache__") for p in path.parts)
 
 
-def prepare_runtime_artifacts(image_root: Path, workspace: Path) -> None:
-    """Copy missing ignored runtime files; never overwrite or restore source."""
-    candidates = [
+def runtime_paths(image_root: Path) -> List[str]:
+    return [
         os.fsdecode(name)
         for name in _git(
             image_root,
@@ -53,6 +54,33 @@ def prepare_runtime_artifacts(image_root: Path, workspace: Path) -> None:
         ).split(b"\0")
         if name and _runtime_file(Path(os.fsdecode(name)))
     ]
+
+
+def runtime_inventory(image_root: Path) -> Dict[str, Dict[str, Union[int, str]]]:
+    files = {}  # type: Dict[str, Dict[str, Union[int, str]]]
+    total = 0
+    for name in runtime_paths(image_root):
+        path = _checked(image_root, name)
+        size = path.stat().st_size
+        total += size
+        if (
+            not path.is_file()
+            or size > 64 * 1024 * 1024
+            or total > 512 * 1024 * 1024
+            or len(files) >= 4096
+        ):
+            raise ValueError("runtime inventory exceeds dependency bounds")
+        sha = hashlib.sha256()
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(65536), b""):
+                sha.update(chunk)
+        files[name] = {"size_bytes": size, "sha256": sha.hexdigest()}
+    return files
+
+
+def prepare_runtime_artifacts(image_root: Path, workspace: Path) -> None:
+    """Copy missing ignored runtime files; never overwrite or restore source."""
+    candidates = runtime_paths(image_root)
     if not candidates:
         return
     for relative in candidates:
@@ -93,6 +121,9 @@ def prepare_runtime_artifacts(image_root: Path, workspace: Path) -> None:
 
 
 def main(argv: List[str]) -> None:
+    if len(argv) == 2 and argv[0] == "--inventory":
+        print(json.dumps(runtime_inventory(Path(argv[1]))))
+        return
     if len(argv) < 3:
         raise ValueError("image root, workspace and command are required")
     prepare_runtime_artifacts(Path(argv[0]), Path(argv[1]))

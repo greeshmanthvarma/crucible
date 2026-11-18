@@ -7,11 +7,13 @@ import re
 import signal
 import stat
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal, Protocol, overload
 from uuid import UUID
 
 from crucible.benchmarks.evidence import atomic_json
+from crucible.benchmarks.runtime_artifacts import RuntimeArtifactInventory
 from crucible.domain.clock import SystemClock
 from crucible.domain.commands import CommandSpec
 from crucible.improvement import task_environment
@@ -277,6 +279,81 @@ class DockerCommands:
     def __init__(self, store: ExecutionStore, docker: DockerPort) -> None:
         self.store, self.docker = store, docker
         self.active: dict[UUID, list[tuple[UUID, str, WorkerRequest]]] = {}
+        self.inventories: dict[UUID, RuntimeArtifactInventory] = {}
+        self._inventory_locks: dict[UUID, asyncio.Lock] = {}
+
+    async def _inventory(
+        self, job: WorkerJob, binding: WorkspaceBinding, spec: CommandSpec
+    ) -> RuntimeArtifactInventory:
+        async with self._inventory_locks.setdefault(job.job_id, asyncio.Lock()):
+            cached = self.inventories.get(job.job_id)
+            if cached is not None:
+                if cached.image != binding.image:
+                    raise ValueError("runtime inventory image changed")
+                return cached
+            name = "improvement-inventory-" + str(job.job_id)
+            effect = await self.store.begin_effect(
+                job.experiment_id, job.trial_id, "command", {"name": name}, labels(job)
+            )
+            entry = (effect, name, job)
+            self.active.setdefault(job.job_id, []).append(entry)
+            try:
+                bootstrap = read_regular_artifact(
+                    Path(task_environment.__file__), 65536
+                )
+                identity = await self.docker.invoke(
+                    "create",
+                    "--pull=never",
+                    "--name",
+                    name,
+                    "--platform",
+                    binding.platform,
+                    "--network",
+                    "none",
+                    "--read-only",
+                    "--cap-drop=ALL",
+                    "--security-opt=no-new-privileges",
+                    "--user",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "--cpus",
+                    str(spec.limits.cpus),
+                    "--memory",
+                    str(spec.limits.memory_bytes),
+                    "--pids-limit",
+                    str(spec.limits.pids),
+                    "--tmpfs",
+                    "/tmp:rw,nosuid,nodev,size=67108864",
+                    *label_args(job),
+                    "--entrypoint",
+                    "/opt/miniconda3/envs/testbed/bin/python",
+                    binding.image,
+                    "-I",
+                    "-c",
+                    bootstrap.decode(),
+                    "--inventory",
+                    "/testbed",
+                )
+                await self.store.effect_state(effect, "active", identity)
+                async with asyncio.timeout(min(30, spec.timeout_seconds)):
+                    code, chunks = await self.docker.attach(identity, 1_048_576)
+                if code != 0:
+                    raise ValueError("task image runtime inventory failed")
+                raw = b"".join(
+                    c.data for c in chunks if c.stream == OutputStream.STDOUT
+                )
+                inventory = RuntimeArtifactInventory.model_validate_json(
+                    canonical_json({"image": binding.image, "files": json.loads(raw)})
+                )
+            finally:
+                try:
+                    await remove_owned_effect(self.docker, "command", name, labels(job))
+                    await self.store.effect_state(effect, "stopped")
+                    self.active[job.job_id].remove(entry)
+                except BaseException:
+                    await self.store.effect_state(effect, "uncertain")
+                    raise
+            self.inventories[job.job_id] = inventory
+            return inventory
 
     async def execute(
         self,
@@ -285,6 +362,10 @@ class DockerCommands:
         command_id: UUID,
         spec: CommandSpec,
     ) -> tuple[tuple[OutputChunk, ...], SandboxOutcome]:
+        command_started = time.monotonic()
+        if isinstance(job, WorkerJob):
+            async with asyncio.timeout(spec.timeout_seconds):
+                await self._inventory(job, binding, spec)
         name = "improvement-command-" + str(command_id)
         effect = await self.store.begin_effect(
             job.experiment_id, job.trial_id, "command", {"name": name}, labels(job)
@@ -354,7 +435,14 @@ class DockerCommands:
             chunks: tuple[OutputChunk, ...] = ()
             original = 0
             try:
-                async with asyncio.timeout(spec.timeout_seconds):
+                async with asyncio.timeout(
+                    max(
+                        0,
+                        spec.timeout_seconds - (time.monotonic() - command_started)
+                        if isinstance(job, WorkerJob)
+                        else spec.timeout_seconds,
+                    )
+                ):
                     code, chunks = await self.docker.attach(
                         identity, spec.limits.output_bytes
                     )
@@ -870,7 +958,7 @@ class WorkerSupervisor:
         execution_type = (
             IsolatedExecution if isinstance(job, WorkerJob) else IsolatedRoleExecution
         )
-        return execution_type(
+        result = execution_type(
             observation,  # type: ignore[arg-type]
             solver_export,
             state,
@@ -880,6 +968,15 @@ class WorkerSupervisor:
             elapsed,
             outcome,
         )
+
+        if isinstance(result, IsolatedExecution) and isinstance(
+            self.broker.commands, DockerCommands
+        ):
+            result = replace(
+                result,
+                runtime_inventory=self.broker.commands.inventories.get(job.job_id),
+            )
+        return result
 
     async def _monitor(self, job: WorkerRequest, started: float) -> None:
         while True:
