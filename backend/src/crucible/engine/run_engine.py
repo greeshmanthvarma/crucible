@@ -56,6 +56,10 @@ class RunBudgetExceeded(Exception):
     pass
 
 
+class ModelResponseInvalid(ValueError):
+    """A completed model response violates its structured output contract."""
+
+
 class RunStepPolicy(Protocol):
     def prepare_request(
         self, request: PreparedModelRequest, observation: BehaviorObservation
@@ -181,6 +185,11 @@ class RunEngine:
                     event_type=EventType.RUN_CANCELLED,
                 )
                 raise
+            except ModelResponseInvalid as error:
+                await self._persist_failure(
+                    run_id, error, code="model_response_invalid"
+                )
+                return True
             except Exception as error:
                 await self._persist_failure(run_id, error)
                 return True

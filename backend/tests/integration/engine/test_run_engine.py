@@ -158,3 +158,31 @@ async def test_gateway_failure_persists_stable_outcome(
             .one()
         )
     assert summary["projection_json"]["outcome"] == "failed"
+
+
+async def test_invalid_proposal_records_response_failure(
+    database: Database, tmp_path: Path
+) -> None:
+    from crucible.improvement.proposal_context import ProposalStepPolicy
+
+    submitted = await queued_run(database, tmp_path)
+    gateway = FakeModelGateway()
+    engine = RunEngine(
+        uow_factory(database),
+        FixedClock(),
+        gateway,
+        step_policy_factory=lambda: ProposalStepPolicy(200000, 100000),
+    )
+    assert await engine.execute(submitted.run_id)
+    async with database.engine.connect() as connection:
+        run = (
+            (
+                await connection.execute(
+                    select(models.runs).where(models.runs.c.id == str(submitted.run_id))
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert run["outcome_code"] == "model_response_invalid"
+    assert run["outcome_detail"] == "Invalid proposal decision response"

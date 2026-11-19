@@ -1,5 +1,6 @@
 """Reduce repeated reads in the proposer without changing its saved trace."""
 
+import json
 from dataclasses import replace
 from typing import Annotated, Literal, Self
 
@@ -15,7 +16,7 @@ from crucible.engine.gateway import (
     ModelRole,
     PreparedModelRequest,
 )
-from crucible.engine.run_engine import RunBudgetExceeded
+from crucible.engine.run_engine import ModelResponseInvalid, RunBudgetExceeded
 from crucible.improvement.contracts import EDITABLE_PATHS, Contract
 from crucible.improvement.role_contracts import Identifier, ProposalResult
 from crucible.models.token_counting import estimate_input_tokens
@@ -193,7 +194,7 @@ class ProposalStepPolicy:
         if calls:
             return text, False
         if self._phase in ("investigate", "decide"):
-            decision = ProposalDecision.model_validate_json(text)
+            decision = parse_proposal_decision(text)
             if decision.decision == "edit" and self._has_followup_step:
                 self._decision = decision
                 return decision.model_dump_json(), True
@@ -208,6 +209,23 @@ class ProposalStepPolicy:
                 risks=(),
             ).model_dump_json(), False
         return text, False
+
+
+def parse_proposal_decision(text: str) -> ProposalDecision:
+    """Normalize a single wrapped object without relaxing schema validation."""
+    try:
+        if len(text.encode()) > 1_048_576:
+            raise ValueError("response exceeds cap")
+        start = text.find("{")
+        if start < 0:
+            raise ValueError("missing decision object")
+        _, length = json.JSONDecoder().raw_decode(text[start:])
+        end = start + length
+        if text[end:].strip() not in ("", "```"):
+            raise ValueError("ambiguous or trailing response content")
+        return ProposalDecision.model_validate_json(text[start:end])
+    except ValueError as error:
+        raise ModelResponseInvalid("Invalid proposal decision response") from error
 
 
 def _reservation(request: PreparedModelRequest) -> int:
