@@ -1,5 +1,7 @@
 from pathlib import Path
+from uuid import UUID
 
+import pytest
 from sqlalchemy import select
 
 from crucible.engine.fake_gateway import FakeModelGateway
@@ -185,4 +187,116 @@ async def test_invalid_proposal_records_response_failure(
             .one()
         )
     assert run["outcome_code"] == "model_response_invalid"
-    assert run["outcome_detail"] == "Invalid proposal decision response"
+    assert run["outcome_detail"].startswith("Invalid proposal response:")
+
+
+@pytest.mark.parametrize(
+    "responses,max_steps,expected_status,expected_requests,feedback_count,first_tokens,code",
+    [
+        (
+            [
+                "not JSON",
+                '{"decision":"decline","selected_weakness_id":"budget_exhaustion",'
+                '"reason":"No justified edit.","paths":[]}',
+            ],
+            5,
+            "completed",
+            2,
+            1,
+            110,
+            None,
+        ),
+        (["not JSON"] * 3, 5, "failed", 3, 2, 110, "model_response_invalid"),
+        (["not JSON"], 1, "failed", 1, 0, 110, "model_response_invalid"),
+        (["not JSON"], 5, "failed", 1, 1, 199999, "budget_exhausted"),
+    ],
+)
+async def test_proposer_bounded_correction(
+    database,
+    tmp_path,
+    responses,
+    max_steps,
+    expected_status,
+    expected_requests,
+    feedback_count,
+    first_tokens,
+    code,
+):
+    from crucible.engine.gateway import (
+        ModelStop,
+        ModelStopReason,
+        ModelUsage,
+        TextDelta,
+    )
+    from crucible.improvement.proposal_context import ProposalStepPolicy
+
+    class Gateway:
+        def __init__(self):
+            self.requests = []
+
+        async def stream(self, request):
+            self.requests.append(request)
+            yield TextDelta(responses[len(self.requests) - 1])
+            yield ModelUsage(first_tokens - 10, 10)
+            yield ModelStop(ModelStopReason.COMPLETE)
+
+    submitted = await queued_run(database, tmp_path)
+    gateway = Gateway()
+    engine = RunEngine(
+        uow_factory(database),
+        FixedClock(),
+        gateway,
+        max_steps=max_steps,
+        step_policy_factory=lambda: ProposalStepPolicy(200000, 100000),
+    )
+    assert await engine.execute(submitted.run_id)
+    async with database.engine.connect() as connection:
+        run = (
+            (
+                await connection.execute(
+                    select(models.runs).where(models.runs.c.id == str(submitted.run_id))
+                )
+            )
+            .mappings()
+            .one()
+        )
+        usage = (await connection.execute(select(models.step_usage))).mappings().all()
+    assert run["status"] == expected_status
+    assert len(gateway.requests) == expected_requests
+    assert len(usage) == expected_requests
+    async with uow_factory(database)() as uow:
+        messages = await uow.messages.list_for_task(UUID(run["task_id"]))
+    assistant_texts = [
+        part.text_content
+        for m in messages
+        if m.role.value == "assistant"
+        for part in m.parts
+        if part.text_content
+    ]
+    assert assistant_texts.count("not JSON") == (
+        1 if expected_status == "completed" else expected_requests
+    )
+    feedback = [
+        part.text_content
+        for m in messages
+        if m.role.value == "system"
+        for part in m.parts
+        if part.text_content
+        and part.text_content.startswith("Response validation error:")
+    ]
+    assert len(feedback) == feedback_count
+    assert all("missing decision object" in text for text in feedback)
+    for request in gateway.requests[1:]:
+        assert not request.tools
+        instructions = "\n".join(
+            p.text_content or ""
+            for m in request.messages
+            if m.role.value == "system"
+            for p in m.parts
+        )
+        assert (
+            "Correction" in instructions and "missing decision object" in instructions
+        )
+        assert "selected_weakness_id" in instructions and "required" in instructions
+    if expected_status == "failed":
+        assert run["outcome_code"] == code

@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Protocol
 from uuid import UUID
 
@@ -320,13 +321,17 @@ class RunEngine:
         parts: list[MessagePart] = []
         answer = "".join(text)
         continue_without_tools = False
+        response_failure: ModelResponseInvalid | None = None
         if step_policy is not None:
             allowed_tools = {tool.name for tool in prepared.request.tools}
             if any(call.name not in allowed_tools for call in calls):
                 raise ValueError("Model called a tool unavailable in this phase")
-            answer, continue_without_tools = step_policy.finish_response(
-                answer, tuple(calls)
-            )
+            try:
+                answer, continue_without_tools = step_policy.finish_response(
+                    answer, tuple(calls)
+                )
+            except ModelResponseInvalid as error:
+                response_failure = error
         if answer:
             parts.append(
                 MessagePart(new_id(), len(parts) + 1, MessagePartKind.TEXT, answer)
@@ -363,6 +368,9 @@ class RunEngine:
             created_at=now,
             completed_at=now,
         )
+        if response_failure is not None:
+            await self._journal.record(message_completed_mutation(run, assistant))
+            raise response_failure
         if not calls:
             if stop is not None and stop.reason is ModelStopReason.TOOL_CALLS:
                 raise RuntimeError(
@@ -371,6 +379,24 @@ class RunEngine:
             await self._record_step(active_step.complete(now), EventType.STEP_COMPLETED)
             await self._journal.record(message_completed_mutation(run, assistant))
             if continue_without_tools:
+                correction = getattr(step_policy, "response_correction", None)
+                if isinstance(correction, str):
+                    feedback = replace(
+                        assistant,
+                        id=new_id(),
+                        role=MessageRole.SYSTEM,
+                        parts=(
+                            MessagePart(
+                                new_id(),
+                                1,
+                                MessagePartKind.TEXT,
+                                "Response validation error: " + correction,
+                            ),
+                        ),
+                    )
+                    await self._journal.record(
+                        message_completed_mutation(run, feedback)
+                    )
                 return True, 0, model_tokens
             await self._validation.record_proposal(
                 CompletionProposal(

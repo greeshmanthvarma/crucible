@@ -44,8 +44,10 @@ def test_wrapped_decision(text):
     ],
 )
 def test_invalid_decision(text):
+    policy = ProposalStepPolicy(150000, 100000)
+    policy._has_followup_step = False
     with pytest.raises(ModelResponseInvalid):
-        ProposalStepPolicy(150000, 100000).finish_response(text, ())
+        policy.finish_response(text, ())
 
 
 def test_wrapped_edit_keeps_followup_and_allowed_paths():
@@ -75,3 +77,43 @@ def test_tool_response_does_not_parse_partial_text():
     assert ProposalStepPolicy(150000, 100000).finish_response(
         "Investigating.", calls
     ) == ("Investigating.", False)
+
+
+def test_final_report_can_be_corrected_without_changing_scope():
+    from crucible.improvement.proposal_context import ProposalDecision
+
+    policy = ProposalStepPolicy(150000, 100000)
+    policy._phase = "report"
+    policy._decision = ProposalDecision.model_validate_json(DECISION)
+    assert policy.finish_response("unfinished report", ()) == (
+        "unfinished report",
+        True,
+    )
+    assert "missing decision object" in policy.response_correction
+    report = json.dumps(
+        dict(
+            schema_version=1,
+            selected_weakness_id="budget_exhaustion",
+            summary="Declined.",
+            claimed_paths=[],
+            risks=[],
+        )
+    )
+    assert not policy.finish_response(report, ())[1]
+    assert policy.response_correction is None
+
+
+def test_schema_errors_are_available_for_correction_without_echoing_input():
+    policy = ProposalStepPolicy(150000, 100000)
+    text = json.dumps(
+        dict(
+            decision="edit",
+            selected_weakness_id="budget_exhaustion",
+            reason="Concrete change.",
+            paths=["/tmp/outside-scope"],
+        )
+    )
+    assert policy.finish_response(text, ()) == (text, True)
+    assert "allowed paths" in policy.response_correction
+    assert "/tmp/outside-scope" not in policy.response_correction
+    assert policy._decision is None

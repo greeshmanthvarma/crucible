@@ -2,9 +2,9 @@
 
 import json
 from dataclasses import replace
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, TypeVar
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from crucible.context.invariants import TokenEstimator
 from crucible.domain.ids import ToolCallId
@@ -28,6 +28,7 @@ _PREVIEW_NOTICE = "\n[Read-only output shortened. Repeat a narrower read for det
 INVESTIGATION_STEPS = 6
 INVESTIGATION_TOKENS = 50_000
 _REPORT_RESERVE = 24_000
+MAX_RESPONSE_CORRECTIONS = 2
 _REPORT = (
     "Final report phase. Return the proposal JSON specified by the original task. "
     "Report actual edits and checks, including unfinished work."
@@ -69,6 +70,13 @@ class ProposalStepPolicy:
             "investigate"
         )
         self._has_followup_step = True
+        self._corrections_used = 0
+        self._correction_error: str | None = None
+
+    @property
+    def response_correction(self) -> str | None:
+        """Safe validation feedback for the durable conversation journal."""
+        return self._correction_error
 
     def prepare_request(
         self, request: PreparedModelRequest, observation: BehaviorObservation
@@ -76,6 +84,19 @@ class ProposalStepPolicy:
         remaining = observation.remaining_model_tokens
         self._has_followup_step = observation.remaining_steps > 0
         can_use_tools = self._has_followup_step and observation.remaining_tool_calls > 0
+        if self._correction_error is not None:
+            schema = (
+                ProposalDecision if self._decision is None else ProposalResult
+            ).model_json_schema()
+            instruction = (
+                "Correction: your previous response failed validation. "
+                "Return only one JSON object matching the schema, without tools. "
+                "Keep the original task and scope. Validation error: "
+                + self._correction_error
+                + "\nRequired schema: "
+                + json.dumps(schema)
+            )
+            return self._answer_request(request, instruction, remaining)
         report_reserve = max(
             self._report_reserve,
             _reservation(self._answer_base(request, _REPORT)),
@@ -193,6 +214,21 @@ class ProposalStepPolicy:
     ) -> tuple[str, bool]:
         if calls:
             return text, False
+        try:
+            result = self._finish_response(text)
+        except ModelResponseInvalid as error:
+            if (
+                self._has_followup_step
+                and self._corrections_used < MAX_RESPONSE_CORRECTIONS
+            ):
+                self._corrections_used += 1
+                self._correction_error = str(error)
+                return text, True
+            raise
+        self._correction_error = None
+        return result
+
+    def _finish_response(self, text: str) -> tuple[str, bool]:
         if self._phase in ("investigate", "decide"):
             decision = parse_proposal_decision(text)
             if decision.decision == "edit" and self._has_followup_step:
@@ -208,10 +244,23 @@ class ProposalStepPolicy:
                 claimed_paths=(),
                 risks=(),
             ).model_dump_json(), False
-        return text, False
+        report = _parse_response(text, ProposalResult)
+        if self._decision is not None and (
+            report.selected_weakness_id != self._decision.selected_weakness_id
+            or not set(report.claimed_paths) <= set(self._decision.paths)
+        ):
+            raise ModelResponseInvalid("Report changes the recorded decision scope")
+        return report.model_dump_json(), False
 
 
 def parse_proposal_decision(text: str) -> ProposalDecision:
+    return _parse_response(text, ProposalDecision)
+
+
+ResponseT = TypeVar("ResponseT", bound=Contract)
+
+
+def _parse_response(text: str, schema: type[ResponseT]) -> ResponseT:
     """Normalize a single wrapped object without relaxing schema validation."""
     try:
         if len(text.encode()) > 1_048_576:
@@ -223,9 +272,16 @@ def parse_proposal_decision(text: str) -> ProposalDecision:
         end = start + length
         if text[end:].strip() not in ("", "```"):
             raise ValueError("ambiguous or trailing response content")
-        return ProposalDecision.model_validate_json(text[start:end])
+        return schema.model_validate_json(text[start:end])
+    except ValidationError as error:
+        detail = json.dumps(
+            error.errors(include_input=False, include_url=False, include_context=False)
+        )[:4000]
+        raise ModelResponseInvalid("Invalid proposal response: " + detail) from error
     except ValueError as error:
-        raise ModelResponseInvalid("Invalid proposal decision response") from error
+        raise ModelResponseInvalid(
+            "Invalid proposal response: " + str(error)[:4000]
+        ) from error
 
 
 def _reservation(request: PreparedModelRequest) -> int:
