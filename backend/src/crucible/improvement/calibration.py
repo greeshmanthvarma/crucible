@@ -28,6 +28,7 @@ from crucible.benchmarks.patches import collect_solution_patch
 from crucible.benchmarks.swebench import SwebenchGrader
 from crucible.domain.clock import SystemClock
 from crucible.domain.commands import CommandSpec
+from crucible.improvement.broker import Approval
 from crucible.improvement.contracts import (
     EDITABLE_PATHS,
     CalibrationManifest,
@@ -148,6 +149,17 @@ async def interactive_approval(job: WorkerRequest, spec: CommandSpec) -> bool:
         return False
 
 
+async def preauthorized_approval(_job: WorkerRequest, _spec: CommandSpec) -> bool:
+    # The broker invokes this only after validating the disposable command.
+    return True
+
+
+def calibration_approval(manifest: CalibrationManifest) -> Approval:
+    if manifest.approval_mode == "preauthorized-disposable":
+        return preauthorized_approval
+    return interactive_approval
+
+
 async def run_isolated_calibration(config: Path, output: Path) -> TrialResult:
     settings = IsolatedCalibrationConfig.model_validate_json(
         read_regular_artifact(config, 1048576)
@@ -256,7 +268,12 @@ async def run_isolated_calibration(config: Path, output: Path) -> TrialResult:
         evidence.stage("solving")
         await store.trial_state(manifest.trial_id, "solving")
         async with execution_runtime(
-            store, runtime, manifest, DockerRuntime(), gateway, interactive_approval
+            store,
+            runtime,
+            manifest,
+            DockerRuntime(),
+            gateway,
+            calibration_approval(manifest),
         ) as supervisor:
             try:
                 execution = await supervisor.execute(

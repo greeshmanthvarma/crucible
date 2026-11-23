@@ -1,4 +1,4 @@
-"""Prepare local, interactive calibration plans; never execute a trial.
+"""Prepare local calibration plans; never execute a trial.
 
 Run only after committing these scripts. For an old checkout, invoke this script
 with that checkout's uv environment and --repository pointing at that checkout.
@@ -10,8 +10,10 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from typing import Any, Literal
 from uuid import uuid4
 
+from crucible.benchmarks.manifests import case_digest, load_case
 from crucible.improvement.calibration import (
     IsolatedCalibrationConfig,
     validate_calibration_inputs,
@@ -19,12 +21,14 @@ from crucible.improvement.calibration import (
 from crucible.improvement.contracts import EDITABLE_PATHS, CalibrationManifest
 from crucible.improvement.source import _digest, inspect_source
 
+ApprovalMode = Literal["interactive", "preauthorized-disposable"]
+
 
 def git(root: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
 
 
-def trial_budget(limits: dict, policy: dict) -> dict:
+def trial_budget(limits: dict[str, int], policy: dict[str, Any]) -> dict[str, int]:
     return {
         "max_reported_and_reserved_tokens": limits["max_model_tokens"],
         "max_model_requests": limits["max_steps"],
@@ -44,16 +48,22 @@ case "$batch" in *[!a-z0-9-]*|-*|'') echo 'Invalid batch name' >&2; exit 2;; esa
 root=$(cd -- "$(dirname -- "$0")" && pwd)
 plan="$root/$batch-harness/batch.json"
 [ -f "$plan" ] || { echo 'Batch plan does not exist' >&2; exit 2; }
-[ -t 0 ] || { echo 'Terminal stdin required for manual approval' >&2; exit 2; }
 # Python validates the frozen plan and emits shell-quoted arguments only.
 eval "$(python3 - "$plan" <<'PYTHON'
 import json
-import re, shlex, sys
+import shlex, sys
 p=json.load(open(sys.argv[1]))
 print('repository='+shlex.quote(p['repository']))
 print('expected='+shlex.quote(p['commit']))
+print('mode='+shlex.quote(p.get('approval_mode', 'interactive')))
 PYTHON
 )"
+case "$mode" in
+  interactive)
+    [ -t 0 ] || { echo 'Terminal stdin required for manual approval' >&2; exit 2; };;
+  preauthorized-disposable) ;;
+  *) echo 'Invalid batch approval mode' >&2; exit 2;;
+esac
 [ -z "$(git -C "$repository" status --porcelain)" ] || {
   echo 'Checkout must be clean' >&2; exit 2;
 }
@@ -66,7 +76,7 @@ for config in "$root/$batch-harness"/*/config.json; do
   if [ -e "$output" ]; then echo "Skipping existing $output"; continue; fi
   echo "Running $config"
   code=0
-  uv run crucible benchmark isolated-trial \
+  uv run --frozen crucible benchmark isolated-trial \
     --config "$config" --output "$output" || code=$?
   echo "Finished $config (exit $code)"
   [ "$code" -ne 3 ] || { echo 'Infrastructure failure: stopping' >&2; exit 3; }
@@ -76,17 +86,71 @@ done
     destination.chmod(0o755)
 
 
-def prepare(repository: Path, source_root: Path, batch: str) -> dict:
+def prepare(
+    repository: Path,
+    source_root: Path,
+    batch: str,
+    *,
+    approval_mode: ApprovalMode = "interactive",
+    authorize_disposable_commands: bool = False,
+    admitted_registry: Path | None = None,
+    max_batch_tokens: int | None = None,
+) -> dict[str, object]:
     if re.fullmatch(r"[a-z0-9][a-z0-9-]*", batch) is None:
         raise ValueError("invalid batch name")
+    if (
+        approval_mode == "preauthorized-disposable"
+        and not authorize_disposable_commands
+    ):
+        raise ValueError("--authorize-disposable-commands required")
     if git(repository, "status", "--porcelain"):
         raise ValueError("commit scripts first: repository must be clean")
-    original = source_root / "data/self-improvement/full-run-v1"
+    data = source_root / "data/self-improvement"
+    original = data / ("full-run-v1" if admitted_registry is None else "full-run-v3")
     frozen = json.loads((original / "experiment-manifest.json").read_text())
-    registry = json.loads((original / "registry/registry.json").read_text())["cases"]
+    if admitted_registry is None:
+        if max_batch_tokens is not None:
+            raise ValueError("a batch token cap requires a calibration registry")
+        registry = json.loads((original / "registry/registry.json").read_text())[
+            "cases"
+        ]
+        cases = [case for case in frozen["cases"] if case["split"] == "development"]
+        repeats = 3
+        root = data / "calibration-v1"
+    else:
+        admitted_registry = admitted_registry.resolve()
+        registered = json.loads(admitted_registry.read_text())
+        registry = registered["cases"]
+        if registered["pending_slots"] or not registry:
+            raise ValueError("screening requires a complete admission registry")
+        if max_batch_tokens is None or max_batch_tokens < len(registry):
+            raise ValueError("screening requires a positive batch token allocation")
+        cases = []
+        for identity, entry in registry.items():
+            case = load_case(Path(entry["case_manifest"]))
+            if (
+                case.split != "calibration"
+                or case.case_id != identity
+                or entry["retired"]
+            ):
+                raise ValueError("registry must contain current calibration cases")
+            cases.append(
+                {
+                    "case_id": identity,
+                    "case_digest": case_digest(case),
+                    "admission_digest": hashlib.sha256(
+                        Path(entry["admission_record"]).read_bytes()
+                    ).hexdigest(),
+                }
+            )
+        frozen["trial_limits"]["max_model_tokens"] = min(
+            frozen["trial_limits"]["max_model_tokens"],
+            max_batch_tokens // len(registry),
+        )
+        repeats = 1
+        root = admitted_registry.parent.parent
     commit = git(repository, "rev-parse", "HEAD")
     source = inspect_source(repository, commit)
-    root = source_root / "data/self-improvement/calibration-v1"
     target = root / f"{batch}-harness"
     if target.exists():
         raise ValueError(f"refusing to overwrite batch: {target}")
@@ -108,7 +172,9 @@ def prepare(repository: Path, source_root: Path, batch: str) -> dict:
         schema_version=1,
         worker_protocol_version=2,
         authorization="one-isolated-calibration",
-        approval_mode="interactive",
+        approval_mode=approval_mode,
+        disposable_commands_authorized=authorize_disposable_commands,
+        command_policy={**frozen["command_policy"], "mode": approval_mode},
         initial_commit=commit,
         initial_source_digest=source.source_digest,
         controller_digest=_digest(
@@ -122,12 +188,10 @@ def prepare(repository: Path, source_root: Path, batch: str) -> dict:
     trials = []
     # Validate every plan before writing anything. This function only inspects
     # local files, git, admission/layout and hashes; it never starts execution.
-    for case in frozen["cases"]:
-        if case["split"] != "development":
-            continue
-        for repeat in range(3):
+    for case_ref in cases:
+        for repeat in range(repeats):
             trial_id = str(uuid4())
-            directory = target / f"{case['case_id']}-r{repeat + 1}-{trial_id}"
+            directory = target / f"{case_ref['case_id']}-r{repeat + 1}-{trial_id}"
             manifest = CalibrationManifest.model_validate_json(
                 json.dumps(
                     {
@@ -135,11 +199,11 @@ def prepare(repository: Path, source_root: Path, batch: str) -> dict:
                         "experiment_id": str(uuid4()),
                         "trial_id": trial_id,
                         **{
-                            k: registry[case["case_id"]][k]
+                            k: registry[case_ref["case_id"]][k]
                             for k in ("case_manifest", "admission_record")
                         },
-                        "case_digest": case["case_digest"],
-                        "admission_digest": case["admission_digest"],
+                        "case_digest": case_ref["case_digest"],
+                        "admission_digest": case_ref["admission_digest"],
                     }
                 )
             )
@@ -155,7 +219,7 @@ def prepare(repository: Path, source_root: Path, batch: str) -> dict:
             output = directory / "output"
             validate_calibration_inputs(manifest, repository, output, settings.data_dir)
             trials.append((directory, settings))
-    target.mkdir(parents=True)
+    target.mkdir(parents=True, mode=0o700)
     for directory, settings in trials:
         directory.mkdir(mode=0o700)
         settings.data_dir.mkdir(mode=0o700)
@@ -166,6 +230,7 @@ def prepare(repository: Path, source_root: Path, batch: str) -> dict:
     plan = {
         "repository": str(repository),
         "commit": commit,
+        "approval_mode": approval_mode,
         "trials": len(trials),
         "max_tokens": len(trials)
         * shared["budget"]["max_reported_and_reserved_tokens"],
@@ -184,10 +249,26 @@ if __name__ == "__main__":
         "--source-root", type=Path, default=Path(__file__).resolve().parents[2]
     )
     parser.add_argument("--batch", default="new")
+    parser.add_argument(
+        "--approval-mode",
+        choices=("interactive", "preauthorized-disposable"),
+        default="interactive",
+    )
+    parser.add_argument("--authorize-disposable-commands", action="store_true")
+    parser.add_argument("--admitted-registry", type=Path)
+    parser.add_argument("--max-batch-tokens", type=int)
     args = parser.parse_args()
     print(
         json.dumps(
-            prepare(args.repository.resolve(), args.source_root.resolve(), args.batch),
+            prepare(
+                args.repository.resolve(),
+                args.source_root.resolve(),
+                args.batch,
+                approval_mode=args.approval_mode,
+                authorize_disposable_commands=args.authorize_disposable_commands,
+                admitted_registry=args.admitted_registry,
+                max_batch_tokens=args.max_batch_tokens,
+            ),
             indent=2,
         )
     )

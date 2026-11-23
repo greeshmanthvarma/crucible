@@ -24,6 +24,7 @@ from crucible.engine.gateway import (
     PreparedModelRequest,
 )
 from crucible.improvement.contracts import (
+    CalibrationManifest,
     ExecutionManifest,
     MiningDiagnosticManifest,
     UsageAmounts,
@@ -366,6 +367,11 @@ class ImprovementBroker:
             session.binding.path.resolve()
         ):
             allowed = False
+        approval_details: dict[str, object] = {
+            "job_id": str(job.job_id),
+            "command_id": str(command_id),
+            "spec_digest": spec.digest,
+        }
         if allowed and policy.mode == "interactive":
             if self.approval is None or self.pause_worker is None:
                 allowed = False
@@ -376,22 +382,13 @@ class ImprovementBroker:
                     await self.store.record_event(
                         job.experiment_id,
                         "command_approval_requested",
-                        {
-                            "job_id": str(job.job_id),
-                            "command_id": str(command_id),
-                            "spec_digest": spec.digest,
-                        },
+                        approval_details,
                     )
                     allowed = await self.approval(job, spec)
                     await self.store.record_event(
                         job.experiment_id,
                         "command_approval",
-                        {
-                            "job_id": str(job.job_id),
-                            "command_id": str(command_id),
-                            "spec_digest": spec.digest,
-                            "approved": allowed,
-                        },
+                        {**approval_details, "approved": allowed},
                     )
                 finally:
                     try:
@@ -412,6 +409,17 @@ class ImprovementBroker:
                             "seconds": elapsed,
                         },
                     )
+        elif allowed and isinstance(session.manifest, CalibrationManifest):
+            allowed = (
+                session.manifest.disposable_commands_authorized
+                and self.approval is not None
+                and await self.approval(job, spec)
+            )
+            await self.store.record_event(
+                job.experiment_id,
+                "command_approval",
+                {**approval_details, "approved": allowed},
+            )
         if not allowed or self.commands is None:
             session.records.append(CommandRecord(command_id, spec.digest, False, None))
             return (

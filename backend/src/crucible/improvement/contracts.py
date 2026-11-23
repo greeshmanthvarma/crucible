@@ -105,17 +105,25 @@ class CalibrationManifest(ExecutionPolicy):
     schema_version: Literal[1]
     worker_protocol_version: Literal[2]
     authorization: Literal["one-isolated-calibration"]
-    approval_mode: Literal["interactive"]
+    approval_mode: Literal["interactive", "preauthorized-disposable"]
     case_manifest: Path
     admission_record: Path
     case_digest: Sha256
     admission_digest: Sha256
     trial_id: UUID
+    disposable_commands_authorized: bool = Field(
+        default=False, exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
-    def interactive_only(self) -> Self:
-        if self.command_policy.mode != "interactive":
-            raise ValueError("calibration requires interactive commands")
+    def calibration_policy(self) -> Self:
+        if self.command_policy.mode != self.approval_mode:
+            raise ValueError("calibration approval mode and command policy must match")
+        if (
+            self.approval_mode == "preauthorized-disposable"
+            and not self.disposable_commands_authorized
+        ):
+            raise ValueError("disposable commands require operator authorization")
         if self.model.output_reserve >= self.model.input_limit:
             raise ValueError("invalid context limits")
         return self
