@@ -1,7 +1,7 @@
 """Classify one-trial evidence for targeted development case selection."""
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from itertools import pairwise
@@ -104,3 +104,63 @@ def classification_record(c: Classification) -> dict[str, object]:
         "eligible": c.eligible,
         "reason": c.reason,
     }
+
+
+def v4_proposal(
+    v3_manifest: Mapping[str, object],
+    v3_dev_counts: Mapping[str, int],
+    targeted: Sequence[str],
+) -> dict[str, object]:
+    if len(targeted) < 3:
+        raise ValueError("insufficient targeted evidence")
+    if len(set(targeted)) != len(targeted) or len(targeted) > 8:
+        raise ValueError("targeted cases must be distinct and fit the development cap")
+
+    v3_cases: dict[str, list[str]] = {
+        "development": [],
+        "selection-validation": [],
+        "final-test": [],
+    }
+    rows = v3_manifest.get("cases")
+    if not isinstance(rows, (list, tuple)):
+        raise ValueError("v3 manifest requires case records")
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("invalid v3 case record")
+        split, case_id = row.get("split"), row.get("case_id")
+        if not isinstance(case_id, str) or split not in v3_cases:
+            raise ValueError("invalid v3 case id or split")
+        v3_cases[split].append(case_id)
+
+    old_development = v3_cases["development"]
+    held_out = set(v3_cases["selection-validation"]) | set(v3_cases["final-test"])
+    if held_out.intersection([*old_development, *targeted]):
+        raise ValueError("development cases must be disjoint from the v3 held-out sets")
+    if set(old_development).intersection(targeted):
+        raise ValueError("targeted cases must be new to development")
+
+    passes = {case_id: v3_dev_counts.get(case_id, 0) for case_id in old_development}
+    ranked = sorted(
+        (case_id for case_id in old_development if passes[case_id] < 3),
+        key=passes.__getitem__,
+    )
+    retained = set(ranked[: 8 - len(targeted)])
+    proposal: dict[str, object] = {
+        "development": [
+            *(case_id for case_id in old_development if case_id in retained),
+            *targeted,
+        ],
+        "selection_validation": list(v3_cases["selection-validation"]),
+        "final_test": list(v3_cases["final-test"]),
+        "dropped_development": [
+            case_id for case_id in old_development if case_id not in retained
+        ],
+        "rule": (
+            "Keep all targeted cases and fill remaining development slots to eight "
+            "with v3 cases below three passes, prioritizing fewer passes and using "
+            "manifest order for ties. Copy both v3 held-out lists verbatim."
+        ),
+    }
+    assert proposal["selection_validation"] == v3_cases["selection-validation"]
+    assert proposal["final_test"] == v3_cases["final-test"]
+    return proposal

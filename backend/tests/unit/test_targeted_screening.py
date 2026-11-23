@@ -9,6 +9,7 @@ from scripts.targeted_screening import (
     classification_record,
     classify,
     pick,
+    v4_proposal,
 )
 
 
@@ -135,3 +136,51 @@ def test_pick_output_has_no_reference_content(failed_trial: ScreeningTrial) -> N
         "reason": "targeted",
     }
     assert private_path not in json.dumps([result, record])
+
+
+@pytest.fixture
+def v3_manifest() -> dict[str, object]:
+    return {
+        "cases": [
+            {"case_id": "d1", "split": "development"},
+            {"case_id": "v2", "split": "selection-validation"},
+            {"case_id": "f2", "split": "final-test"},
+            {"case_id": "d2", "split": "development"},
+            {"case_id": "d3", "split": "development"},
+            {"case_id": "v1", "split": "selection-validation"},
+            {"case_id": "f1", "split": "final-test"},
+        ]
+    }
+
+
+def test_v4_proposal_keeps_v3_validation_and_final(
+    v3_manifest: dict[str, object],
+) -> None:
+    targets = ["t1", "t2", "t3"]
+    counts = {"d1": 0, "d2": 2, "d3": 3}
+    proposal = v4_proposal(v3_manifest, counts, targets)
+    assert proposal["selection_validation"] == ["v2", "v1"]
+    assert proposal["final_test"] == ["f2", "f1"]
+    with pytest.raises(ValueError, match="held-out"):
+        v4_proposal(v3_manifest, counts, ["v1", "t2", "t3"])
+
+
+def test_v4_proposal_drops_saturated_development(
+    v3_manifest: dict[str, object],
+) -> None:
+    targets = ["t1", "t2", "t3"]
+    proposal = v4_proposal(v3_manifest, {"d1": 0, "d2": 2, "d3": 3}, targets)
+    assert proposal["development"] == ["d1", "d2", *targets]
+    assert proposal["dropped_development"] == ["d3"]
+
+
+def test_v4_proposal_caps_development_at_eight(v3_manifest: dict[str, object]) -> None:
+    targets = ["t1", "t2", "t3", "t4", "t5", "t6"]
+    proposal = v4_proposal(v3_manifest, {"d1": 2, "d2": 1, "d3": 0}, targets)
+    assert proposal["development"] == ["d2", "d3", *targets]
+    assert proposal["dropped_development"] == ["d1"]
+
+
+def test_v4_proposal_requires_three_targeted(v3_manifest: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="insufficient targeted evidence"):
+        v4_proposal(v3_manifest, {"d1": 0, "d2": 2, "d3": 3}, ["t1", "t2"])
