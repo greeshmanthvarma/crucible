@@ -10,7 +10,13 @@ from crucible.context.result_projection import (
 )
 from crucible.domain.ids import new_id
 from crucible.engine.coding_behavior import BehaviorObservation
-from crucible.engine.gateway import ModelMessage, ModelPart, ModelRole
+from crucible.engine.gateway import (
+    ModelMessage,
+    ModelPart,
+    ModelRole,
+    PreparedModelRequest,
+)
+from crucible.repair.worker_protocol import decode_request, encode_request
 
 
 def batch(
@@ -195,3 +201,15 @@ def test_small_results_are_not_masked() -> None:
     projected = project(messages, remaining_tokens=100_000)
     assert projected[1] != messages[1]
     assert projected[2:] == messages[2:]
+
+
+def test_projection_metadata_stays_outside_worker_wire() -> None:
+    call, result = batch("execute_command", "test failed")
+    result = replace(result, parts=(replace(result.parts[0], exit_code=1),))
+    messages = project((call, result))
+    request = PreparedModelRequest(new_id(), new_id(), "fake", messages, (), 1024)
+    decoded = decode_request(encode_request(request))
+    assert decoded.messages == (
+        call,
+        replace(result, parts=(replace(result.parts[0], exit_code=None),)),
+    )
