@@ -136,14 +136,14 @@ def test_masking_keeps_edit_target_and_latest_failure() -> None:
         + (
             replace(
                 earlier_failure[1],
-                parts=(replace(earlier_failure[1].parts[0], exit_code=1),),
+                parts=(replace(earlier_failure[1].parts[0], command_failed=True),),
             ),
         )
         + latest_failure[:1]
         + (
             replace(
                 latest_failure[1],
-                parts=(replace(latest_failure[1].parts[0], exit_code=2),),
+                parts=(replace(latest_failure[1].parts[0], command_failed=True),),
             ),
         )
         + batch("execute_command", content)
@@ -205,11 +205,30 @@ def test_small_results_are_not_masked() -> None:
 
 def test_projection_metadata_stays_outside_worker_wire() -> None:
     call, result = batch("execute_command", "test failed")
-    result = replace(result, parts=(replace(result.parts[0], exit_code=1),))
+    result = replace(result, parts=(replace(result.parts[0], command_failed=True),))
     messages = project((call, result))
     request = PreparedModelRequest(new_id(), new_id(), "fake", messages, (), 1024)
     decoded = decode_request(encode_request(request))
     assert decoded.messages == (
         call,
-        replace(result, parts=(replace(result.parts[0], exit_code=None),)),
+        replace(result, parts=(replace(result.parts[0], command_failed=False),)),
     )
+
+
+def test_edit_target_prefers_read_after_last_edit() -> None:
+    args = {"path": "src/a.py"}
+    messages = (
+        batch("read_file", "original" * 400, args)
+        + batch("edit_file", "edited", args)
+        + batch("read_file", "before last edit" * 400, args)
+        + batch("write_file", "written", args)
+        + batch("read_file", "older current read" * 400, args)
+        + batch("read_file", "latest current read" * 400, args)
+        + reads(3)
+    )
+    projected = project(messages)
+    assert projected[11] == messages[11]
+    for index in (1, 5, 9):
+        assert projected[index].parts[0].text_content == (
+            "[masked read_file: src/a.py lines 1-EOF; call again to view]"
+        )

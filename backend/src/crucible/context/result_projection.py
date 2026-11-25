@@ -1,5 +1,6 @@
 """Shorten older coding observations only in outgoing model requests."""
 
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import PurePosixPath
 
@@ -35,13 +36,22 @@ def request_allowance(observation: BehaviorObservation) -> int:
 
 
 def mask_older_results(messages: tuple[ModelMessage, ...]) -> tuple[ModelMessage, ...]:
-    protected = _protected_results(messages)
+    masked, _, _ = _mask_older_results(messages)
+    return masked
+
+
+def _mask_older_results(
+    messages: tuple[ModelMessage, ...],
+) -> tuple[tuple[ModelMessage, ...], set[ToolCallId], dict[ToolCallId, str]]:
     calls = {
         part.tool_call_id: part
         for message in messages
         for part in message.parts
-        if part.kind == "tool_call"
+        if message.role is ModelRole.ASSISTANT
+        and part.kind == "tool_call"
+        and part.tool_call_id is not None
     }
+    protected = _protected_results(messages, calls)
     eligible = [
         part
         for message in messages
@@ -56,7 +66,7 @@ def mask_older_results(messages: tuple[ModelMessage, ...]) -> tuple[ModelMessage
         for part in eligible[:-KEEP_RECENT_RESULTS]
         if part.tool_call_id is not None and part.tool_call_id not in protected
     }
-    return (
+    masked = (
         tuple(
             replace(
                 message,
@@ -72,32 +82,36 @@ def mask_older_results(messages: tuple[ModelMessage, ...]) -> tuple[ModelMessage
         if stubs
         else messages
     )
+    return masked, protected, stubs
 
 
-def _protected_results(messages: tuple[ModelMessage, ...]) -> set[ToolCallId]:
-    protected = set()
-    read_paths: dict[ToolCallId, PurePosixPath] = {}
+def _protected_results(
+    messages: tuple[ModelMessage, ...], calls: Mapping[ToolCallId, ModelPart]
+) -> set[ToolCallId]:
+    edited_paths: set[PurePosixPath] = set()
     latest_reads: dict[PurePosixPath, ToolCallId] = {}
     latest_failure = None
-    for message in messages:
-        for part in message.parts:
+    for message in reversed(messages):
+        for part in reversed(message.parts):
             call_id = part.tool_call_id
-            if call_id is None:
+            if call_id is None or call_id not in calls:
                 continue
+            call = calls[call_id]
             if part.kind == "tool_call":
-                args = part.arguments or {}
-                path = args.get("path")
-                if part.tool_name == "read_file" and isinstance(path, str):
-                    read_paths[call_id] = PurePosixPath(path)
-                for target in _edit_paths(part):
-                    read_id = latest_reads.get(PurePosixPath(target))
-                    if read_id is not None:
-                        protected.add(read_id)
+                edited_paths.update(PurePosixPath(path) for path in _edit_paths(call))
             elif part.kind == "tool_result":
-                if call_id in read_paths:
-                    latest_reads[read_paths[call_id]] = call_id
-                if part.tool_name == "execute_command" and part.exit_code:
+                if call.tool_name == "read_file":
+                    path = (call.arguments or {}).get("path")
+                    if isinstance(path, str):
+                        latest_reads.setdefault(PurePosixPath(path), call_id)
+                if (
+                    latest_failure is None
+                    and call.tool_name == "execute_command"
+                    and part.command_failed
+                ):
                     latest_failure = call_id
+    # The newest read is after the last edit if any such read exists.
+    protected = {latest_reads[path] for path in edited_paths & latest_reads.keys()}
     if latest_failure is not None:
         protected.add(latest_failure)
     return protected
@@ -147,7 +161,7 @@ def project_coding_tool_results(
     max_output_tokens: int,
     estimator: TokenEstimator,
 ) -> tuple[ModelMessage, ...]:
-    masked = mask_older_results(messages)
+    masked, protected, stubs = _mask_older_results(messages)
     original_estimate = estimator.estimate(masked)
     savings = (
         estimator.estimate(messages) - original_estimate
@@ -157,13 +171,6 @@ def project_coding_tool_results(
     excess = estimated_input_tokens - savings - request_allowance(observation)
     if excess <= 0:
         return masked
-    protected = _protected_results(messages)
-    replaced = {
-        before.tool_call_id
-        for old, new in zip(messages, masked, strict=True)
-        for before, after in zip(old.parts, new.parts, strict=True)
-        if before != after
-    }
     messages = masked
     batches = [
         tuple(part.tool_call_id for part in message.parts if part.kind == "tool_call")
@@ -177,7 +184,7 @@ def project_coding_tool_results(
         for part in message.parts
         if part.kind == "tool_result"
         and part.tool_call_id not in protected
-        and part.tool_call_id not in replaced
+        and part.tool_call_id not in stubs
         and part.tool_name in PROJECTED_TOOLS
         and part.text_content is not None
         and len(part.text_content) > SHORTEN_ABOVE_CHARS

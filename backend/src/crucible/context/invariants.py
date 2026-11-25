@@ -58,7 +58,12 @@ def model_part(
         ),
         tool_name=call.name if call is not None else None,
         arguments=call.arguments if call is not None else None,
-        exit_code=exit_code if type(exit_code) is int else None,
+        command_failed=(
+            call is not None
+            and call.name == "execute_command"
+            and result is not None
+            and (bool(result.error_code) or (type(exit_code) is int and exit_code != 0))
+        ),
         provider_correlation_id=(
             call.provider_correlation_id if call is not None else None
         ),

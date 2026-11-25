@@ -20,7 +20,7 @@ def projection(request):
     for message in value["messages"]:
         for part in message["parts"]:
             # Exit status is projection metadata outside the provider payload.
-            part.pop("exit_code")
+            part.pop("command_failed")
     return json.loads(json.dumps(value, default=str))
 
 

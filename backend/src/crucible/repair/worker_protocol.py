@@ -113,7 +113,7 @@ def encode_request(request: PreparedModelRequest) -> dict[str, JsonValue]:
     payload.pop("response_format")
     for message in payload["messages"]:
         for part in message["parts"]:
-            part.pop("exit_code")
+            part.pop("command_failed")
     return WireRequest.model_validate(payload).model_dump(mode="json")
 
 

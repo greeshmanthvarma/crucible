@@ -21,7 +21,7 @@ class ModelPart:
     tool_name: str | None = None
     arguments: Mapping[str, object] | None = None
     provider_correlation_id: str | None = None
-    exit_code: int | None = None
+    command_failed: bool = False
 
 
 @dataclass(frozen=True)
