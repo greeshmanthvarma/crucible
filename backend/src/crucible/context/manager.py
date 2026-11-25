@@ -328,9 +328,8 @@ class ContextManager:
                 self._estimator,
             )
             if projected != model_messages:
-                projected_estimate = self._estimator.estimate(projected)
-                if projected_estimate < estimate:
-                    model_messages, estimate = projected, projected_estimate
+                model_messages = projected
+                estimate = self._estimator.estimate(projected)
         if transform_request is not None:
             request = transform_request(
                 PreparedModelRequest(

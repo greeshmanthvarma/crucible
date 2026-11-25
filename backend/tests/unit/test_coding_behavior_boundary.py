@@ -17,6 +17,10 @@ def projection(request):
     value = json.loads(canonical_json(request))
     value.pop("run_id")
     value.pop("step_id")
+    for message in value["messages"]:
+        for part in message["parts"]:
+            # Exit status is projection metadata outside the provider payload.
+            part.pop("exit_code")
     return json.loads(json.dumps(value, default=str))
 
 

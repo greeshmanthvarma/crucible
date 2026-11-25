@@ -49,6 +49,7 @@ def model_part(
     )
     if call is None and result is not None:
         call = calls.get(result.tool_call_id)
+    exit_code = result.result.get("exit_code") if result is not None else None
     return ModelPart(
         part.kind.value,
         part.text_content or part.reasoning_content,
@@ -57,6 +58,7 @@ def model_part(
         ),
         tool_name=call.name if call is not None else None,
         arguments=call.arguments if call is not None else None,
+        exit_code=exit_code if type(exit_code) is int else None,
         provider_correlation_id=(
             call.provider_correlation_id if call is not None else None
         ),

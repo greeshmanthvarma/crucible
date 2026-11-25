@@ -1,7 +1,9 @@
+from collections.abc import Mapping
+from dataclasses import replace
+
 from crucible.context.invariants import SimpleTokenEstimator
 from crucible.context.result_projection import (
     PREVIEW_CHARS,
-    SHORTEN_ABOVE_CHARS,
     SHORTENED_NOTICE,
     project_coding_tool_results,
     request_allowance,
@@ -11,14 +13,19 @@ from crucible.engine.coding_behavior import BehaviorObservation
 from crucible.engine.gateway import ModelMessage, ModelPart, ModelRole
 
 
-def batch(name: str, text: str) -> tuple[ModelMessage, ...]:
+def batch(
+    name: str, text: str, arguments: Mapping[str, object] | None = None
+) -> tuple[ModelMessage, ...]:
     call_id = new_id()
     return (
         ModelMessage(
             ModelRole.ASSISTANT,
             (
                 ModelPart(
-                    "tool_call", tool_call_id=call_id, tool_name=name, arguments={}
+                    "tool_call",
+                    tool_call_id=call_id,
+                    tool_name=name,
+                    arguments=arguments or {},
                 ),
             ),
         ),
@@ -47,15 +54,6 @@ def project(
     )
 
 
-def test_projection_shortens_old_read_results() -> None:
-    messages = batch("list_files", "x" * 5000) + sum(
-        (batch("read_file", "y" * 2000) for _ in range(3)), ()
-    )
-    projected = project(messages)
-    assert projected[1].parts[0].text_content == "x" * PREVIEW_CHARS + SHORTENED_NOTICE
-    assert messages[1].parts[0].text_content == "x" * 5000
-
-
 def test_projection_keeps_recent_batches_and_mutation_results() -> None:
     messages = sum(
         (
@@ -73,15 +71,15 @@ def test_projection_keeps_recent_batches_and_mutation_results() -> None:
     assert project(messages) == messages
 
 
-def test_projection_leaves_short_results_and_preserves_structure() -> None:
+def test_masking_preserves_call_result_pairing() -> None:
     messages = (
-        batch("read_file", "x" * SHORTEN_ABOVE_CHARS)
+        batch("read_file", "x" * 500)
         + batch("list_files", "y" * 5000)
-        + batch("read_file", "z")
-        + batch("read_file", "z")
+        + batch("read_file", "z" * 500)
+        + batch("read_file", "z" * 500)
     )
     projected = project(messages)
-    assert projected[1] == messages[1]
+    assert projected[1] != messages[1]
     assert len(projected) == len(messages)
     for before, after in zip(messages, projected, strict=True):
         assert before.role == after.role
@@ -105,19 +103,95 @@ def test_request_allowance_divides_remaining_tokens_by_remaining_requests() -> N
     )
 
 
-def test_projection_unchanged_within_allowance() -> None:
+def test_masks_all_but_last_three_results() -> None:
     messages = reads(6)
-    assert project(messages, remaining_tokens=ESTIMATOR.estimate(messages)) == messages
+    projected = project(messages, remaining_tokens=100_000)
+    assert projected[-6:] == messages[-6:]
+    assert all(projected[index] != messages[index] for index in (1, 3, 5))
+    assert messages[1].parts[0].text_content == "y" * 4000
 
 
-def test_projection_shortens_oldest_first_until_within_allowance() -> None:
+def test_projection_fallback_shortens_oldest_eligible_result() -> None:
     messages = reads(6)
-    one_result = ESTIMATOR.estimate(messages) - ESTIMATOR.estimate(reads(5))
-    projected = project(
-        messages, remaining_tokens=ESTIMATOR.estimate(messages) - one_result // 2
+    masked = project(messages, remaining_tokens=100_000)
+    allowance = ESTIMATOR.estimate(masked) - 1
+    projected = project(messages, remaining_tokens=allowance)
+    assert projected[7].parts[0].text_content == "y" * PREVIEW_CHARS + SHORTENED_NOTICE
+    assert projected[:7] == masked[:7]
+    assert projected[8:] == masked[8:]
+
+
+def test_masking_keeps_edit_target_and_latest_failure() -> None:
+    content = "x" * 2000
+    earlier_failure = batch("execute_command", content)
+    latest_failure = batch("execute_command", content)
+    messages = (
+        earlier_failure[:1]
+        + (
+            replace(
+                earlier_failure[1],
+                parts=(replace(earlier_failure[1].parts[0], exit_code=1),),
+            ),
+        )
+        + latest_failure[:1]
+        + (
+            replace(
+                latest_failure[1],
+                parts=(replace(latest_failure[1].parts[0], exit_code=2),),
+            ),
+        )
+        + batch("execute_command", content)
     )
-    results = [m.parts[0].text_content for m in projected if m.role is ModelRole.TOOL]
-    assert results[0] is not None and results[0].endswith(SHORTENED_NOTICE)
-    assert all(
-        text is not None and not text.endswith(SHORTENED_NOTICE) for text in results[1:]
+    for name in ("edit_file", "write_file", "apply_patch"):
+        path = f"{name}.py"
+        args = {"path": path}
+        edit_args = (
+            {"patch": f"--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-x\n+y\n"}
+            if name == "apply_patch"
+            else args
+        )
+        messages += (
+            batch("read_file", content, args)
+            + batch("read_file", content, args)
+            + batch(name, "edited", edit_args)
+        )
+    messages += reads(3)
+    projected = project(messages)
+    for index in (3, 9, 15, 21):
+        assert projected[index] == messages[index]
+    for index in (1, 5, 7, 13, 19):
+        assert projected[index] != messages[index]
+
+
+def test_mask_stub_names_tool_and_target() -> None:
+    cases: tuple[tuple[str, Mapping[str, object], str], ...] = (
+        (
+            "read_file",
+            {"path": "src/a.py", "start_line": 10, "end_line": 20},
+            "src/a.py lines 10-20",
+        ),
+        (
+            "search_files",
+            {"query": "class Widget", "path": "src"},
+            "'class Widget' in src",
+        ),
+        ("list_files", {"path": "src"}, "src"),
+        (
+            "execute_command",
+            {"executable": "python", "arguments": ["-m", "pytest"]},
+            "python -m pytest",
+        ),
+        ("workspace_diff", {}, "workspace"),
     )
+    for tool, args, target in cases:
+        messages = batch(tool, "x" * 500, args) + reads(3)
+        assert project(messages, remaining_tokens=100_000)[1].parts[0].text_content == (
+            f"[masked {tool}: {target}; call again to view]"
+        )
+
+
+def test_small_results_are_not_masked() -> None:
+    messages = reads(1, 201) + reads(4, 200) + reads(3, 201)
+    projected = project(messages, remaining_tokens=100_000)
+    assert projected[1] != messages[1]
+    assert projected[2:] == messages[2:]
