@@ -1,4 +1,5 @@
 from collections import deque
+from dataclasses import replace
 
 from pydantic import ValidationError
 
@@ -129,9 +130,9 @@ class SearchFilesTool:
     def __init__(
         self,
         *,
-        max_matches: int = 200,
-        max_bytes: int = 100_000,
-        snippet_bytes: int = 512,
+        max_matches: int = 20,
+        max_bytes: int = 8_000,
+        snippet_bytes: int = 200,
     ) -> None:
         self.max_matches = max_matches
         self.max_bytes = max_bytes
@@ -144,13 +145,20 @@ class SearchFilesTool:
 
     async def invoke(self, context: ToolContext, arguments: object) -> ToolOutcome:
         args = SearchFilesArguments.model_validate(arguments)
-        return await search_workspace(
+        notice = (
+            f"\n[Showing the first {self.max_matches} matches; more exist. "
+            "Narrow the query or pass a subdirectory path.]"
+        )
+        outcome = await search_workspace(
             context.workspace,
             args,
             max_matches=self.max_matches,
-            max_bytes=self.max_bytes,
+            max_bytes=min(self.max_bytes, max(128, self.max_bytes - len(notice))),
             snippet_bytes=self.snippet_bytes,
         )
+        if outcome.truncated and outcome.error_code is None:
+            return replace(outcome, display_text=outcome.display_text + notice)
+        return outcome
 
 
 def invalid_arguments(error: ValidationError) -> ToolOutcome:

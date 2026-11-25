@@ -2,7 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from crucible.tools.filesystem import WorkspacePathResolver
+from crucible.tools.definitions import ToolContext
+from crucible.tools.filesystem import SearchFilesTool
+from crucible.tools.workspace_authority import WorkspacePathResolver
 
 
 def test_resolver_rejects_absolute_traversal_and_symlink_escapes(
@@ -42,3 +44,25 @@ def test_resolver_allows_internal_symlinks_and_missing_targets(tmp_path: Path) -
     assert (
         resolver.resolve("actual/new.txt", allow_missing=True) == directory / "new.txt"
     )
+
+
+async def test_search_cap_reports_more_matches(tmp_path: Path) -> None:
+    (tmp_path / "matches.txt").write_text("x\n" * 25)
+    outcome = await SearchFilesTool().invoke(ToolContext(tmp_path), {"query": "x"})
+    locations = outcome.data["locations"]
+    assert isinstance(locations, list)
+    assert [hit["line"] for hit in locations] == list(range(1, 21))
+    assert outcome.truncated
+    assert outcome.display_text.endswith(
+        "[Showing the first 20 matches; more exist. "
+        "Narrow the query or pass a subdirectory path.]"
+    )
+
+
+async def test_search_under_cap_has_no_notice(tmp_path: Path) -> None:
+    (tmp_path / "matches.txt").write_text("needle\n" * 5)
+    outcome = await SearchFilesTool().invoke(ToolContext(tmp_path), {"query": "needle"})
+    matches = outcome.data["matches"]
+    assert isinstance(matches, list) and len(matches) == 5
+    assert not outcome.truncated
+    assert "Narrow the query" not in outcome.display_text

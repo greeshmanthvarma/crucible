@@ -101,7 +101,7 @@
       },
       {
         "name": "search_files",
-        "description": "Search workspace text with a ripgrep regular expression. Returns bounded matching excerpts with workspace-relative paths, line numbers and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged with the same query and path to continue when truncated. No matches is conclusive only when truncated is false and there is no error. A snippet may omit part of a large match; use its offsets for bounded reads. Search is not a snapshot: restart without a cursor if files change.",
+        "description": "Search workspace text with a ripgrep regular expression. Returns up to 20 matching excerpts by default, with workspace-relative paths, line numbers and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged with the same query and path to continue when truncated. No matches is conclusive only when truncated is false and there is no error. A snippet may omit part of a large match; use its offsets for bounded reads. Search is not a snapshot: restart without a cursor if files change.",
         "input_schema": {
           "$defs": {
             "SearchCursor": {

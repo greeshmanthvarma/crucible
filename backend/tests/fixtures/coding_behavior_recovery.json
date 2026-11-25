@@ -103,7 +103,7 @@
           "schema_version": 1
         },
         {
-          "description": "Search workspace text with a ripgrep regular expression. Returns bounded matching excerpts with workspace-relative paths, line numbers and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged with the same query and path to continue when truncated. No matches is conclusive only when truncated is false and there is no error. A snippet may omit part of a large match; use its offsets for bounded reads. Search is not a snapshot: restart without a cursor if files change.",
+          "description": "Search workspace text with a ripgrep regular expression. Returns up to 20 matching excerpts by default, with workspace-relative paths, line numbers and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged with the same query and path to continue when truncated. No matches is conclusive only when truncated is false and there is no error. A snippet may omit part of a large match; use its offsets for bounded reads. Search is not a snapshot: restart without a cursor if files change.",
           "input_schema": {
             "$defs": {
               "SearchCursor": {
@@ -375,7 +375,7 @@
               "arguments": null,
               "kind": "text",
               "provider_correlation_id": null,
-              "text_content": "Supplemental coding advice:\nThis is model request 2 of 20; about 198365 model tokens remain.",
+              "text_content": "Supplemental coding advice:\nThis is model request 2 of 20; about 198358 model tokens remain.",
               "tool_call_id": null,
               "tool_name": null
             }
@@ -447,7 +447,7 @@
           "schema_version": 1
         },
         {
-          "description": "Search workspace text with a ripgrep regular expression. Returns bounded matching excerpts with workspace-relative paths, line numbers and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged with the same query and path to continue when truncated. No matches is conclusive only when truncated is false and there is no error. A snippet may omit part of a large match; use its offsets for bounded reads. Search is not a snapshot: restart without a cursor if files change.",
+          "description": "Search workspace text with a ripgrep regular expression. Returns up to 20 matching excerpts by default, with workspace-relative paths, line numbers and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged with the same query and path to continue when truncated. No matches is conclusive only when truncated is false and there is no error. A snippet may omit part of a large match; use its offsets for bounded reads. Search is not a snapshot: restart without a cursor if files change.",
           "input_schema": {
             "$defs": {
               "SearchCursor": {
@@ -719,7 +719,7 @@
               "arguments": null,
               "kind": "text",
               "provider_correlation_id": null,
-              "text_content": "Supplemental coding advice:\nThis is model request 3 of 20; about 196604 model tokens remain.",
+              "text_content": "Supplemental coding advice:\nThis is model request 3 of 20; about 196589 model tokens remain.",
               "tool_call_id": null,
               "tool_name": null
             }
@@ -821,7 +821,7 @@
           "schema_version": 1
         },
         {
-          "description": "Search workspace text with a ripgrep regular expression. Returns bounded matching excerpts with workspace-relative paths, line numbers and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged with the same query and path to continue when truncated. No matches is conclusive only when truncated is false and there is no error. A snippet may omit part of a large match; use its offsets for bounded reads. Search is not a snapshot: restart without a cursor if files change.",
+          "description": "Search workspace text with a ripgrep regular expression. Returns up to 20 matching excerpts by default, with workspace-relative paths, line numbers and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged with the same query and path to continue when truncated. No matches is conclusive only when truncated is false and there is no error. A snippet may omit part of a large match; use its offsets for bounded reads. Search is not a snapshot: restart without a cursor if files change.",
           "input_schema": {
             "$defs": {
               "SearchCursor": {

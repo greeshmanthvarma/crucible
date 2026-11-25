@@ -8,7 +8,8 @@ DESCRIPTIONS = {
     "directories end with /. "
     "Large trees are truncated; pass a subdirectory path to see deeper levels.",
     "search_files": "Search workspace text with a ripgrep regular expression. "
-    "Returns bounded matching excerpts with workspace-relative paths, line numbers "
+    "Returns up to 20 matching excerpts by default, with workspace-relative paths, "
+    "line numbers "
     "and UTF-8 byte offsets, including on long lines. Pass next_cursor unchanged "
     "with the same query and path to continue when truncated. No matches is "
     "conclusive only when truncated is false and there is no error. "
